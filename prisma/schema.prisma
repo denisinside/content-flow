@@ -1,5 +1,4 @@
-// M1.1 establishes the adapter and migration workflow only.
-// UserProfile/AppSession arrive in M1.2; Project/Member/Asset in M1.3.
+// Provider-owned auth tables are deliberately outside this application schema.
 generator client {
   provider               = "prisma-client"
   output                 = "../packages/backend/src/generated/prisma"
@@ -11,4 +10,32 @@ generator client {
 datasource db {
   provider = "postgresql"
   schemas  = ["contextflow"]
+}
+
+model UserProfile {
+  id          String       @id @db.Uuid
+  displayName String?      @db.VarChar(80)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  sessions    AppSession[]
+
+  @@schema("contextflow")
+}
+
+model AppSession {
+  id                     String      @id @db.Uuid
+  cookieDigest           String      @unique @db.Char(64)
+  userId                 String      @db.Uuid
+  user                   UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  encryptedProviderTokens String?
+  tokenKeyVersion        Int
+  providerSessionId      String?     @db.Uuid
+  providerTokenExpiresAt DateTime    @db.Timestamptz(3)
+  createdAt              DateTime    @default(now()) @db.Timestamptz(3)
+  lastUserActivityAt     DateTime    @default(now()) @db.Timestamptz(3)
+  expiresAt              DateTime    @db.Timestamptz(3)
+  revokedAt              DateTime?   @db.Timestamptz(3)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@schema("contextflow")
 }

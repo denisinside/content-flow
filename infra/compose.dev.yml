@@ -25,19 +25,9 @@ x-redis: &redis
   networks: [dependencies]
 
 services:
-  postgres:
-    <<: *postgres
-    environment:
-      POSTGRES_DB: contextflow_dev
-      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Run pnpm env:init first}
-      APP_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?Missing migration password}
-      APP_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?Missing runtime password}
-    ports: ["127.0.0.1:54329:5432"]
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./postgres/init-app.sh:/docker-entrypoint-initdb.d/00-init-app.sh:ro
   redis:
     <<: *redis
+    profiles: [local]
     ports: ["127.0.0.1:63829:6379"]
     volumes: [redis-data:/data]
   postgres-test:
@@ -57,13 +47,62 @@ services:
     profiles: [test]
     ports: ["127.0.0.1:63830:6379"]
     volumes: [redis-test-data:/data]
+  auth-test:
+    image: ghcr.io/supabase/gotrue:v2.197.0@sha256:1736a63078f5922b198c4cbe50f80ab9a2d3b54fe8b7b6cfb2e9dc5dbbc12c6b
+    profiles: [test]
+    restart: unless-stopped
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: http://127.0.0.1:54331/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${TEST_AUTH_POSTGRES_PASSWORD:?Missing TEST_AUTH_POSTGRES_PASSWORD}@postgres-test:5432/contextflow_test
+      DB_NAMESPACE: auth
+      GOTRUE_SITE_URL: http://localhost:5173
+      GOTRUE_URI_ALLOW_LIST: http://localhost:5173,http://127.0.0.1:5173
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_SECRET: ${TEST_AUTH_JWT_SECRET:?Missing TEST_AUTH_JWT_SECRET}
+      GOTRUE_JWT_ISSUER: http://127.0.0.1:54331/auth/v1
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9999/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [dependencies]
+  auth-gateway-test:
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    profiles: [test]
+    restart: unless-stopped
+    depends_on:
+      auth-test:
+        condition: service_healthy
+    ports: ["127.0.0.1:54331:8080"]
+    volumes:
+      - ./auth/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks: [dependencies]
 
 networks:
   dependencies:
     driver: bridge
 
 volumes:
-  postgres-data:
   redis-data:
   postgres-test-data:
   redis-test-data:

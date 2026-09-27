@@ -36,6 +36,12 @@ describe('isolated real PostgreSQL/Redis foundation', () => {
     );
     expect(result.rows[0]).toEqual({ can_read: false, can_write: false });
   });
+  it('cannot read the provider-owned TEST Auth schema', async () => {
+    const result = await runtimePool.query<{ can_use: boolean; can_read: boolean }>(
+      "SELECT has_schema_privilege(current_user, n.oid, 'USAGE') AS can_use, has_table_privilege(current_user, c.oid, 'SELECT') AS can_read FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'auth' AND c.relname = 'users'"
+    );
+    expect(result.rows[0]).toEqual({ can_use: false, can_read: false });
+  });
   it('round-trips only an isolated expiring synthetic Redis key', async () => {
     const key = 'contextflow:test:' + randomUUID();
     try {

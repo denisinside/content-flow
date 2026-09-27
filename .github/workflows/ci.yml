@@ -18,9 +18,14 @@ jobs:
         run: npm install --global pnpm@11.19.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm env:init
-      - run: pnpm deps:up && pnpm deps:test:up
-      - run: pnpm db:migrate && pnpm check
+      - run: pnpm deps:test:up
+      # Local planning/configuration folders are intentionally excluded by .gitignore.
+      - run: pnpm db:migrate:test && pnpm lint && pnpm typecheck && pnpm test:unit && pnpm build && pnpm verify:prisma
+      - name: Verify canonical documentation when included in the checkout
+        if: hashFiles('docs/STATUS.md') != ''
+        run: pnpm verify:bootstrap
       - run: pnpm test:integration
+      - run: pnpm verify:migrations
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
         env:

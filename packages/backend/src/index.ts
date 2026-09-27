@@ -13,3 +13,4 @@ export type { DependencyHealth } from './dependency-health.js';
 export { ConfigurationError, loadRuntimeConfig, parseRuntimeConfig } from './config.js';
 export type { BackendConfig } from './config.js';
 export { databasePoolOptions } from './database-connection.js';
+export type { Prisma } from './generated/prisma/client.js';
