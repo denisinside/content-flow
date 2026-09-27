@@ -1,0 +1,14 @@
+// M1.1 establishes the adapter and migration workflow only.
+// UserProfile/AppSession arrive in M1.2; Project/Member/Asset in M1.3.
+generator client {
+  provider               = "prisma-client"
+  output                 = "../packages/backend/src/generated/prisma"
+  moduleFormat           = "esm"
+  generatedFileExtension = "ts"
+  importFileExtension    = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+  schemas  = ["contextflow"]
+}

@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "declaration": false,
+    "experimentalDecorators": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts", "tests/**/*.ts", "*.config.ts"]
+}

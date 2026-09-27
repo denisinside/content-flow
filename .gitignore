@@ -1,0 +1,14 @@
+# Local credentials and generated artifacts.
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+packages/backend/src/generated/
+.pnpm-store/
+.codex
+.agents
+docs/

@@ -1,0 +1,9 @@
+{
+  "name": "@contextflow/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite --host 127.0.0.1 --port 5173 --strictPort", "build": "vue-tsc --noEmit && vite build", "typecheck": "vue-tsc --noEmit", "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort" },
+  "dependencies": { "vue": "3.5.43", "vue-router": "4.6.4", "pinia": "4.0.3" },
+  "devDependencies": { "@vitejs/plugin-vue": "6.0.9", "vite": "8.3.1", "vue-tsc": "3.3.11" }
+}

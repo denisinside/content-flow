@@ -1,0 +1,3 @@
+Synthetic public test fixture — no private provider content.
+ContextFlow uses project membership to isolate editorial material.
+Контрольний український текст для перевірки кодування.

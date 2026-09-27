@@ -1,0 +1,69 @@
+name: contextflow-dev
+
+x-postgres: &postgres
+  image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d $$POSTGRES_DB"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+  volumes:
+    - ./postgres/init-app.sh:/docker-entrypoint-initdb.d/00-init-app.sh:ro
+  networks: [dependencies]
+
+x-redis: &redis
+  image: redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+  restart: unless-stopped
+  user: redis
+  command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+  networks: [dependencies]
+
+services:
+  postgres:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: contextflow_dev
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Run pnpm env:init first}
+      APP_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD:?Missing migration password}
+      APP_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?Missing runtime password}
+    ports: ["127.0.0.1:54329:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-app.sh:/docker-entrypoint-initdb.d/00-init-app.sh:ro
+  redis:
+    <<: *redis
+    ports: ["127.0.0.1:63829:6379"]
+    volumes: [redis-data:/data]
+  postgres-test:
+    <<: *postgres
+    profiles: [test]
+    environment:
+      POSTGRES_DB: contextflow_test
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_ADMIN_PASSWORD:?Run pnpm env:init first}
+      APP_MIGRATION_PASSWORD: ${TEST_POSTGRES_MIGRATION_PASSWORD:?Missing test migration password}
+      APP_RUNTIME_PASSWORD: ${TEST_POSTGRES_RUNTIME_PASSWORD:?Missing test runtime password}
+    ports: ["127.0.0.1:54330:5432"]
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+      - ./postgres/init-app.sh:/docker-entrypoint-initdb.d/00-init-app.sh:ro
+  redis-test:
+    <<: *redis
+    profiles: [test]
+    ports: ["127.0.0.1:63830:6379"]
+    volumes: [redis-test-data:/data]
+
+networks:
+  dependencies:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  postgres-test-data:
+  redis-test-data:
