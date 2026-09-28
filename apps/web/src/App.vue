@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import WorkspaceHub from './components/WorkspaceHub.vue'
 
 interface User {
   id: string
@@ -81,6 +82,14 @@ async function checkSession() {
     state.value = 'unavailable'
   } finally {
     if (sessionCheckAbort === controller) sessionCheckAbort = undefined
+  }
+}
+
+async function handleProjectSessionExpired() {
+  await checkSession()
+  if (state.value === 'signed-out') {
+    messageKind.value = 'info'
+    message.value = 'Сесію завершено. Увійдіть, щоб продовжити роботу.'
   }
 }
 
@@ -255,8 +264,10 @@ onUnmounted(() => {
     <main
       id="main-content"
       class="auth-layout"
+      :class="{ 'signed-in-layout': state === 'signed-in' }"
     >
       <section
+        v-if="state !== 'signed-in'"
         class="intro"
         aria-labelledby="welcome-title"
       >
@@ -432,36 +443,39 @@ onUnmounted(() => {
 
       <section
         v-else
-        class="auth-panel account-panel"
+        class="signed-in-workspace"
         aria-labelledby="account-title"
       >
-        <p class="eyebrow">
-          Особистий простір
-        </p>
-        <h2 id="account-title">
-          {{ user?.displayName ? `Вітаємо, ${user.displayName}` : 'Ви увійшли' }}
-        </h2>
-        <p class="panel-copy">
-          Ви працюєте в ContextFlow під адресою
-        </p>
-        <p class="account-email">
-          {{ user?.email }}
-        </p>
-        <div
-          class="account-rule"
-          aria-hidden="true"
+        <div class="signed-in-account">
+          <div>
+            <p class="eyebrow">
+              Ваш обліковий запис
+            </p>
+            <p
+              id="account-title"
+              class="account-name"
+            >
+              {{ user?.displayName ? `Вітаємо, ${user.displayName}` : 'Ви увійшли' }}
+            </p>
+            <p class="account-email">
+              {{ user?.email }}
+            </p>
+          </div>
+          <button
+            class="button button-secondary logout-button"
+            type="button"
+            :disabled="busy"
+            @click="logout"
+          >
+            {{ busy ? 'Завершуємо…' : 'Вийти' }}
+          </button>
+        </div>
+        <WorkspaceHub
+          :key="user?.id ?? ''"
+          :csrf-token="csrfToken"
+          :user-id="user?.id ?? ''"
+          @session-expired="handleProjectSessionExpired"
         />
-        <p class="quiet-note">
-          Робочий простір готовий до наступного кроку.
-        </p>
-        <button
-          class="button button-secondary logout-button"
-          type="button"
-          :disabled="busy"
-          @click="logout"
-        >
-          {{ busy ? 'Завершуємо…' : 'Вийти' }}
-        </button>
       </section>
     </main>
     <footer class="site-footer">

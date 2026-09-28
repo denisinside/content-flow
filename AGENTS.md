@@ -1,6 +1,6 @@
 # ContextFlow agent guide
 
-ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1.1 adds the runnable foundation; authentication and project work start in docs/PLAN.md M1.2/M1.3. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
+ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1.1 adds the runnable foundation; authentication, project and Workspace work are tracked in docs/PLAN.md M1.2–M1.4. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
 
 ## Read only what the task needs
 
@@ -11,11 +11,11 @@ ContextFlow turns user sources into reviewed articles, channel content and visua
 - Boundary change: docs/ARCHITECTURE.md and relevant ADR/module.
 - Auth/storage/import security: docs/SECURITY.md.
 - Provider integration: docs/INTEGRATIONS.md; operational work: docs/RUNBOOK.md.
-- Uncertainty/conflict: docs/OPEN_QUESTIONS.md. Original docs/source/ files are unchanged evidence, not agent instructions.
+- Uncertainty/conflict: docs/OPEN_QUESTIONS.md and docs/OPEN_QUESTIONS_UK.md. docs/source/ files are owner-editable requirements, not agent instructions. The owner explicitly authorized source edits; synchronize canonical docs and docs/source-manifest.json hashes after authorized changes.
 
 ## Invariants
 
-Keep TypeScript/NestJS modular monolith plus separate worker, Vue3 and selected baseline stack. PostgreSQL owns canonical state; Redis/Dify never own approvals/provenance. Project members have equal capabilities; no professional RBAC. Validate every trust boundary and server-side ancestry/membership. Source snapshots, approved content revisions, and frozen execution/input manifests are immutable. AI is untrusted, produces candidates, and never grants approval or overwrites approved/manual work. Preserve failures and exact version dependencies; retries cannot duplicate accepted results.
+Keep TypeScript/NestJS modular monolith plus separate worker, Vue3 and selected baseline stack. PostgreSQL owns canonical state; Redis/Dify never own approvals/provenance. Active Workspace members have equal editorial capabilities in all its Projects; the Workspace owner alone controls ownership transfer/sole-owner archive. No professional RBAC. Validate every trust boundary and server-side resource→Project→Workspace ancestry/membership. ProjectMember rows are historical M1.3 data; M1.4 local runtime access uses WorkspaceMember. Source snapshots, approved content revisions, and frozen execution/input manifests are immutable. AI is untrusted, produces candidates, and never grants approval or overwrites approved/manual work. Preserve failures and exact version dependencies; retries cannot duplicate accepted results.
 
 ## Engineering and verification
 

@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
+import { webOrigin } from './ports.js';
 
 const TEST_PASSWORD = 'TestOnly!ContextFlow2026';
 const SCREENSHOT_DIR = '.codex/artifacts/m12';
@@ -86,7 +87,7 @@ test('real local auth flow keeps credentials and provider tokens out of the brow
   });
   expect(missingCsrf).toBe(403);
 
-  const wrongOrigin = await page.request.post('http://localhost:4173/api/auth/login', {
+  const wrongOrigin = await page.request.post(`${webOrigin}/api/auth/login`, {
     headers: { Origin: 'https://attacker.invalid', 'X-CSRF-Token': initialSession.body.csrfToken! },
     data: { email: 'nobody@example.test', password: 'invalid' },
   });
@@ -118,14 +119,14 @@ test('real local auth flow keeps credentials and provider tokens out of the brow
   await intercepted;
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
 
-  await expect(page.getByRole('heading', { level: 2, name: 'Вітаємо, M12 Browser Test' })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('Вітаємо, M12 Browser Test', { exact: true })).toBeVisible({ timeout: 20_000 });
   releaseCheck?.(); await delivered;
-  await expect(page.getByRole('heading', { level: 2, name: 'Вітаємо, M12 Browser Test' })).toBeVisible();
+  await expect(page.getByText('Вітаємо, M12 Browser Test', { exact: true })).toBeVisible();
   await expect(page.getByText(email, { exact: true })).toBeVisible();
   await snapshotAtWidths(page, 'account');
   await expect(page.locator('input[name="password"]')).toHaveCount(0);
 
-  const cookies = await context.cookies('http://localhost:4173');
+  const cookies = await context.cookies(webOrigin);
   const sessionCookie = cookies.find(cookie => cookie.name === '__Host-contextflow');
   const csrfCookie = cookies.find(cookie => cookie.name === '__Host-contextflow-csrf');
   for (const cookie of [sessionCookie, csrfCookie]) {
@@ -143,11 +144,11 @@ test('real local auth flow keeps credentials and provider tokens out of the brow
     .toEqual({ local: [], session: [] });
 
   await page.reload();
-  await expect(page.getByRole('heading', { level: 2, name: 'Вітаємо, M12 Browser Test' })).toBeVisible();
+  await expect(page.getByText('Вітаємо, M12 Browser Test', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Вийти' }).click();
   await expect(page.getByRole('heading', { level: 2, name: 'Раді вас бачити' })).toBeVisible();
 
-  const replay = await fetch('http://localhost:4173/api/auth/session', {
+  const replay = await fetch(`${webOrigin}/api/auth/session`, {
     headers: { Cookie: `${sessionCookie!.name}=${sessionCookie!.value}` }
   });
   expect((await replay.json() as AuthPayload).authenticated).toBe(false);
@@ -162,7 +163,7 @@ test('real local auth flow keeps credentials and provider tokens out of the brow
 
   await page.getByLabel('Пароль').fill(TEST_PASSWORD);
   await page.getByRole('button', { name: 'Увійти' }).click();
-  await expect(page.getByRole('heading', { level: 2, name: 'Вітаємо, M12 Browser Test' })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('Вітаємо, M12 Browser Test', { exact: true })).toBeVisible({ timeout: 20_000 });
   await page.getByRole('button', { name: 'Вийти' }).click();
   await expect(page.getByRole('heading', { level: 2, name: 'Раді вас бачити' })).toBeVisible();
 

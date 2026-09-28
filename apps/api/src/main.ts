@@ -14,6 +14,7 @@ async function bootstrap(): Promise<void> {
   const openApiConfig = new DocumentBuilder()
     .setTitle('ContextFlow API')
     .setVersion('1.0.0')
+    .addCookieAuth('__Host-contextflow', { type: 'apiKey', in: 'cookie' }, '__Host-contextflow')
     .build();
   const openApiDocument = SwaggerModule.createDocument(app, openApiConfig);
   SwaggerModule.setup('api/docs', app, openApiDocument, {

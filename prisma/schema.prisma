@@ -17,7 +17,155 @@ model UserProfile {
   displayName String?      @db.VarChar(80)
   createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   sessions    AppSession[]
+  createdProjects Project[]
+  memberships ProjectMember[]
+  ownedWorkspaces Workspace[] @relation("WorkspaceOwner")
+  workspaceMemberships WorkspaceMember[]
+  sentInvites WorkspaceInvite[] @relation("InviteSender")
+  acceptedInvites WorkspaceInvite[] @relation("InviteAcceptor")
+  styleRevisions WorkspaceStyleRevision[]
+  createdAssets Asset[] @relation("AssetCreator")
 
+  @@schema("contextflow")
+}
+
+model Workspace {
+  id String @id @default(uuid()) @db.Uuid
+  name String @db.VarChar(120)
+  ownerId String @db.Uuid
+  owner UserProfile @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  archivedAt DateTime? @db.Timestamptz(3)
+  styleRevision Int @default(1)
+  members WorkspaceMember[]
+  invites WorkspaceInvite[]
+  styles WorkspaceStyleRevision[]
+  projects Project[]
+  @@index([ownerId])
+  @@schema("contextflow")
+}
+
+model WorkspaceMember {
+  workspaceId String @db.Uuid
+  userId String @db.Uuid
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  user UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  joinedAt DateTime @default(now()) @db.Timestamptz(3)
+  leftAt DateTime? @db.Timestamptz(3)
+  @@id([workspaceId, userId])
+  @@index([userId, leftAt, workspaceId])
+  @@schema("contextflow")
+}
+
+model WorkspaceInvite {
+  id String @id @default(uuid()) @db.Uuid
+  workspaceId String @db.Uuid
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  email String @db.VarChar(254)
+  tokenDigest String @unique @db.Char(64)
+  invitedBy String @db.Uuid
+  sender UserProfile @relation("InviteSender", fields: [invitedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  acceptedBy String? @db.Uuid
+  acceptor UserProfile? @relation("InviteAcceptor", fields: [acceptedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  expiresAt DateTime @db.Timestamptz(3)
+  acceptedAt DateTime? @db.Timestamptz(3)
+  @@index([workspaceId, email, expiresAt])
+  @@schema("contextflow")
+}
+
+model WorkspaceStyleRevision {
+  workspaceId String @db.Uuid
+  revision Int
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  brandbook String @default("") @db.Text
+  tone String @default("") @db.Text
+  settings Json @default("{}")
+  createdBy String @db.Uuid
+  creator UserProfile @relation(fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@id([workspaceId, revision])
+  @@schema("contextflow")
+}
+
+enum ProjectFormat {
+  ARTICLE
+  LINKEDIN_TEXT
+  LINKEDIN_COVER
+  LINKEDIN_CAROUSEL
+  INSTAGRAM_COVER
+  INSTAGRAM_CAROUSEL
+  INSTAGRAM_STORIES
+  TELEGRAM_POST
+  @@schema("contextflow")
+}
+
+enum AssetState {
+  STAGED
+  AVAILABLE
+  QUARANTINED
+  @@schema("contextflow")
+}
+
+enum AssetPurpose {
+  ORIGINAL
+  NORMALIZED
+  GENERATED
+  EXPORT
+  @@schema("contextflow")
+}
+
+model Project {
+  id String @id @default(uuid()) @db.Uuid
+  workspaceId String @db.Uuid
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  topic String @db.VarChar(500)
+  formats ProjectFormat[]
+  revision Int @default(1)
+  createdBy String @db.Uuid
+  creator UserProfile @relation(fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  archivedAt DateTime? @db.Timestamptz(3)
+  members ProjectMember[]
+  assets Asset[]
+  @@index([createdBy])
+  @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model ProjectMember {
+  projectId String @db.Uuid
+  userId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  user UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  joinedAt DateTime @default(now()) @db.Timestamptz(3)
+  leftAt DateTime? @db.Timestamptz(3)
+  @@id([projectId, userId])
+  @@index([userId, leftAt, projectId])
+  @@schema("contextflow")
+}
+
+model Asset {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bucket String @db.VarChar(63)
+  objectKey String @db.VarChar(1024)
+  mediaType String @db.VarChar(255)
+  bytes BigInt
+  sha256 String @db.Char(64)
+  state AssetState @default(STAGED)
+  purpose AssetPurpose
+  createdBy String @db.Uuid
+  creator UserProfile @relation("AssetCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([projectId, id])
+  @@unique([bucket, objectKey])
+  @@index([projectId, state, createdAt])
+  @@index([projectId, createdBy])
   @@schema("contextflow")
 }
 

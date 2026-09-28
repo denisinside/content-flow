@@ -1,6 +1,6 @@
 # ContextFlow
 
-Редакційний робочий простір на Vue 3 і NestJS. M1.1 — технічна основа; M1.2 додає реєстрацію, вхід і захищені серверні сесії. Проєкти — наступний M1.3. Основна БД працює в Supabase, Redis — в Upstash; локальні сервіси ізольовані для тестів.
+Редакційний робочий простір на Vue 3 і NestJS. M1.1 — технічна основа; M1.2 — реєстрація, вхід і захищені серверні сесії; M1.3 — ізольовані проєкти, налаштування теми й форматів та доступ до метаданих приватних файлів. Основна БД працює в Supabase, Redis — в Upstash; локальні сервіси ізольовані для тестів.
 
 Потрібні Node **24.19.0**, pnpm **11.19.0** і Docker з Compose. На Windows можна використовувати `scripts/workspace.ps1`: він обирає сумісний Node24 із Codex без зміни глобального PATH.
 
@@ -26,6 +26,7 @@ pnpm test:integration
 pnpm test:e2e
 pnpm verify:connections
 pnpm verify:auth
+pnpm verify:projects
 pnpm verify:migrations
 ```
 

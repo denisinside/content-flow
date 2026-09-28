@@ -95,10 +95,56 @@ async function checkRuntime(runtimeUrl) {
     }
 
     stage = 'runtime-app-dml';
+    for (const table of ['Workspace', 'WorkspaceMember', 'WorkspaceInvite', 'WorkspaceStyleRevision', 'Project', 'ProjectMember', 'Asset']) {
+      for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+        const allowed = await runtime.query('SELECT has_table_privilege(current_user, $1, $2) AS allowed', [`contextflow."${table}"`, privilege]);
+        if (!allowed.rows[0]?.allowed) throw new Error('project-table-privilege');
+      }
+    }
     await runtime.query('BEGIN');
     await runtime.query(`INSERT INTO contextflow."UserProfile" ("id", "displayName") VALUES ('00000000-0000-4000-8000-000000000001', 'migration verifier')`);
     await runtime.query(`INSERT INTO contextflow."AppSession" ("id", "cookieDigest", "userId", "encryptedProviderTokens", "tokenKeyVersion", "providerTokenExpiresAt", "expiresAt") VALUES ('00000000-0000-4000-8000-000000000002', repeat('a', 64), '00000000-0000-4000-8000-000000000001', 'test-only-ciphertext-placeholder', 1, CURRENT_TIMESTAMP + interval '1 hour', CURRENT_TIMESTAMP + interval '1 day')`);
     await runtime.query(`UPDATE contextflow."UserProfile" SET "displayName" = 'migration verifier updated' WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
+    const projectId = '00000000-0000-4000-8000-000000000003';
+    const userId = '00000000-0000-4000-8000-000000000001';
+    const workspaceId = '00000000-0000-4000-8000-000000000009';
+    await runtime.query(`INSERT INTO contextflow."Workspace" ("id", "name", "ownerId") VALUES ($1, 'migration verifier', $2)`, [workspaceId, userId]);
+    await runtime.query(`INSERT INTO contextflow."WorkspaceMember" ("workspaceId", "userId") VALUES ($1, $2)`, [workspaceId, userId]);
+    await runtime.query(`INSERT INTO contextflow."WorkspaceStyleRevision" ("workspaceId", "revision", "createdBy") VALUES ($1, 1, $2)`, [workspaceId, userId]);
+    await runtime.query(`INSERT INTO contextflow."WorkspaceInvite" ("id", "workspaceId", "email", "tokenDigest", "invitedBy", "expiresAt") VALUES ('00000000-0000-4000-8000-000000000010', $1, 'recipient@example.test', repeat('b', 64), $2, CURRENT_TIMESTAMP + interval '1 day')`, [workspaceId, userId]);
+    await runtime.query(`INSERT INTO contextflow."Project" ("id", "workspaceId", "topic", "formats", "createdBy") VALUES ($1, $2, 'synthetic article project', ARRAY['ARTICLE']::contextflow."ProjectFormat"[], $3)`, [projectId, workspaceId, userId]);
+    await runtime.query(`INSERT INTO contextflow."ProjectMember" ("projectId", "userId") VALUES ('00000000-0000-4000-8000-000000000003', '00000000-0000-4000-8000-000000000001')`);
+    const allFormats = ['ARTICLE', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_COVER', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'TELEGRAM_POST'];
+    const eightSelection = await runtime.query(`UPDATE contextflow."Project" SET "formats" = $1::contextflow."ProjectFormat"[] WHERE "id" = $2 RETURNING cardinality("formats") AS format_count, 'ARTICLE' = ANY("formats") AS article_selected`, [allFormats, projectId]);
+    if (Number(eightSelection.rows[0]?.format_count) !== 8 || !eightSelection.rows[0]?.article_selected) throw new Error('article-eight-format-selection');
+
+    const invalidSelections = [
+      { id: '00000000-0000-4000-8000-000000000005', formats: [] },
+      { id: '00000000-0000-4000-8000-000000000006', formats: ['ARTICLE', 'ARTICLE'] },
+      { id: '00000000-0000-4000-8000-000000000007', formats: [null] },
+      { id: '00000000-0000-4000-8000-000000000008', formats: [...allFormats, 'ARTICLE'] },
+    ];
+    for (const invalid of invalidSelections) {
+      await runtime.query('SAVEPOINT project_format_check');
+      let checkRejected = false;
+      try {
+        await runtime.query(`INSERT INTO contextflow."Project" ("id", "workspaceId", "topic", "formats", "createdBy") VALUES ($1, $2, 'invalid format selection', $3::contextflow."ProjectFormat"[], $4)`, [invalid.id, workspaceId, invalid.formats, userId]);
+      } catch (error) { checkRejected = error?.code === '23514'; }
+      await runtime.query('ROLLBACK TO SAVEPOINT project_format_check');
+      await runtime.query('RELEASE SAVEPOINT project_format_check');
+      if (!checkRejected) throw new Error('project-format-check-constraint');
+    }
+    await runtime.query(`INSERT INTO contextflow."Asset" ("id", "projectId", "bucket", "objectKey", "mediaType", "bytes", "sha256", "purpose", "createdBy") VALUES ('00000000-0000-4000-8000-000000000004', '00000000-0000-4000-8000-000000000003', 'private-assets', '00000000-0000-4000-8000-000000000003/fixture.txt', 'text/plain', 1, repeat('a', 64), 'ORIGINAL', '00000000-0000-4000-8000-000000000001')`);
+    await runtime.query(`UPDATE contextflow."Project" SET "topic" = 'updated synthetic project', "revision" = "revision" + 1 WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
+    await runtime.query(`UPDATE contextflow."Asset" SET "state" = 'AVAILABLE' WHERE "id" = '00000000-0000-4000-8000-000000000004'`);
+    await runtime.query(`UPDATE contextflow."ProjectMember" SET "leftAt" = CURRENT_TIMESTAMP WHERE "projectId" = '00000000-0000-4000-8000-000000000003'`);
+    await runtime.query(`DELETE FROM contextflow."Asset" WHERE "id" = '00000000-0000-4000-8000-000000000004'`);
+    await runtime.query(`DELETE FROM contextflow."ProjectMember" WHERE "projectId" = '00000000-0000-4000-8000-000000000003'`);
+    await runtime.query(`DELETE FROM contextflow."Project" WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
+    await runtime.query(`DELETE FROM contextflow."WorkspaceInvite" WHERE "workspaceId" = $1`, [workspaceId]);
+    await runtime.query(`DELETE FROM contextflow."WorkspaceStyleRevision" WHERE "workspaceId" = $1`, [workspaceId]);
+    await runtime.query(`DELETE FROM contextflow."WorkspaceMember" WHERE "workspaceId" = $1`, [workspaceId]);
+    await runtime.query(`DELETE FROM contextflow."Workspace" WHERE "id" = $1`, [workspaceId]);
     await runtime.query(`DELETE FROM contextflow."AppSession" WHERE "id" = '00000000-0000-4000-8000-000000000002'`);
     await runtime.query(`DELETE FROM contextflow."UserProfile" WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
     await runtime.query('ROLLBACK');
@@ -193,8 +239,8 @@ try {
       && actualMigrations.every((row, index) => row.migration_name === expectedMigrations[index] && row.finished_at !== null && row.rolled_back_at === null);
     const checks = await migrated.query(`
       SELECT
-        (SELECT count(*) = 2 FROM information_schema.tables
-          WHERE table_schema = 'contextflow' AND table_name IN ('UserProfile', 'AppSession')) AS app_tables_ok,
+        (SELECT count(*) = 9 FROM information_schema.tables
+          WHERE table_schema = 'contextflow' AND table_name IN ('UserProfile', 'AppSession', 'Workspace', 'WorkspaceMember', 'WorkspaceInvite', 'WorkspaceStyleRevision', 'Project', 'ProjectMember', 'Asset')) AS app_tables_ok,
         (SELECT count(*) = 7 FROM pg_constraint c
           JOIN pg_class t ON t.oid = c.conrelid
           JOIN pg_namespace n ON n.oid = t.relnamespace

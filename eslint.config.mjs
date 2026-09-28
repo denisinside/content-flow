@@ -2,7 +2,7 @@ import tseslint from 'typescript-eslint';
 import vue from 'eslint-plugin-vue';
 
 export default tseslint.config(
-  { ignores: ['**/node_modules/**', '**/dist/**', '**/generated/**', '.codex/**', '.agents/**', 'docs/**', 'test-results/**', 'playwright-report/**'] },
+  { ignores: ['**/node_modules/**', '**/dist/**', '**/generated/**', '.codex/**', '.agents/**', 'docs/**', 'coverage/**', 'test-results/**', 'playwright-report/**'] },
   ...tseslint.configs.recommended,
   ...vue.configs['flat/recommended'],
   {

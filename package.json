@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.19.0",
-  "engines": { "node": ">=24.19.0 <25", "pnpm": "11.19.0" },
+  "engines": {
+    "node": ">=24.19.0 <25",
+    "pnpm": "11.19.0"
+  },
   "scripts": {
     "env:init": "node scripts/init-env.mjs",
     "dev": "pnpm db:generate && pnpm --filter @contextflow/backend build && pnpm --parallel --filter \"./apps/*\" dev",
@@ -26,12 +29,17 @@
     "prepare:backend": "pnpm db:generate && pnpm --filter @contextflow/backend build",
     "verify:connections": "pnpm prepare:backend && tsx scripts/check-connections.ts",
     "verify:auth": "pnpm prepare:backend && tsx scripts/check-auth.ts",
+    "verify:projects": "pnpm prepare:backend && tsx scripts/check-projects.ts",
     "verify:migrations": "node scripts/verify-test-migrations.mjs",
+    "verify:workspace-backfill": "node scripts/verify-workspace-backfill.mjs",
     "verify:prisma": "node scripts/verify-prisma.mjs",
     "verify:bootstrap": "node scripts/verify-bootstrap.mjs"
   },
   "devDependencies": {
     "@contextflow/backend": "workspace:*",
+    "@nestjs/common": "12.1.0",
+    "@nestjs/core": "12.1.0",
+    "@nestjs/platform-express": "12.1.0",
     "@playwright/test": "1.63.0",
     "@types/node": "24.19.0",
     "@types/pg": "8.23.1",
@@ -40,6 +48,7 @@
     "ioredis": "5.11.1",
     "pg": "8.23.0",
     "prisma": "7.10.0",
+    "reflect-metadata": "0.2.2",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "typescript-eslint": "8.70.1",

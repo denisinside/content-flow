@@ -7,19 +7,23 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const failures = [];
 const check = (condition, message) => { if (!condition) failures.push(message); };
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
-const hashes = {
-  'practical-1.md': '2534853FEB95CBFB0D47B4F40AD985206BE2A2DBD026FBF03BE9F660222EAC13',
-  'practical-2.md': 'B8C182CC07B7ECBE0F4CCCC4D5968925A21BD8EDD5560A31C84B8C20B30238B8',
-  'practical-3.md': 'D35AA4360E3EE510CC4A660F181AA3D63161E044B113D831AB7C452FD0BD88AD',
-  'practical-4.md': 'CCD4F5B1E21490DF47BC3ED6AAE0C9B3F9E2E8D635FAF2E57D66F7D8C310A9EE',
-};
-const sourceDir = path.join(root, 'docs/source');
+const manifest = JSON.parse(read('docs/source-manifest.json'));
+check(manifest.schemaVersion === 1 && typeof manifest.authorization === 'string' && manifest.authorization.length > 0, 'Invalid owner-authorized source manifest');
+check(Array.isArray(manifest.sources) && manifest.sources.length === 4, 'Expected four source records');
 const sourceFiles = {};
-const candidates = fs.readdirSync(sourceDir).filter(name => name.endsWith('.md')).map(name => ({ name, hash: crypto.createHash('sha256').update(fs.readFileSync(path.join(sourceDir, name))).digest('hex').toUpperCase() }));
-for (const [name, expected] of Object.entries(hashes)) {
-  const matches = candidates.filter(c => c.hash === expected);
-  check(matches.length === 1, `Source changed/missing/duplicated: ${name}`);
-  if (matches.length === 1) sourceFiles[name] = matches[0].name;
+const seenPaths = new Set();
+for (const entry of manifest.sources ?? []) {
+  check(typeof entry.alias === 'string' && /^practical-[1-4]\.md$/.test(entry.alias) && !Object.hasOwn(sourceFiles, entry.alias), 'Invalid or duplicate source alias');
+  check(typeof entry.path === 'string' && entry.path.startsWith('docs/source/') && path.dirname(path.resolve(root, entry.path)) === path.resolve(root, 'docs/source') && !seenPaths.has(entry.path), 'Invalid or duplicate source path');
+  check(typeof entry.sha256 === 'string' && /^[A-F0-9]{64}$/.test(entry.sha256), 'Invalid source hash');
+  if (failures.length) break;
+  seenPaths.add(entry.path);
+  check(fs.existsSync(path.join(root, entry.path)), `Source missing: ${entry.alias}`);
+  if (fs.existsSync(path.join(root, entry.path))) {
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, entry.path))).digest('hex').toUpperCase();
+    check(actual === entry.sha256, `Source differs from owner-authorized revision: ${entry.alias}`);
+  }
+  sourceFiles[entry.alias] = path.basename(entry.path);
 }
 if (failures.length) { console.error(failures.join('\n')); process.exit(1); }
 const spec = read('docs/SPEC.md');
@@ -36,7 +40,11 @@ for (const id of [...fr, ...nfr]) {
 }
 for (const id of us) check(spec.includes(`${id}→`), `Story mapping absent: ${id}`);
 for (const l of trace.split('\n').filter(l => /^\| (FR-|NFR-|SYS-)/.test(l))) {
-  check(l.includes('| TODO |'), `Unimplemented requirement marked otherwise: ${l.split('|')[1]}`);
+  const cells = l.split('|').map(value => value.trim());
+  check(['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'DEFERRED'].includes(cells[5]), `Invalid traceability status: ${cells[1]}`);
+  if (cells[5] === 'DONE') {
+    check(cells[6] && !cells[6].startsWith('—') && cells[7] && !cells[7].startsWith('—'), `DONE row lacks implementation/evidence: ${cells[1]}`);
+  }
 }
 const walk = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]);
 const authoredMd = walk(path.join(root, 'docs')).filter(p => p.endsWith('.md') && !p.includes(`${path.sep}source${path.sep}`));
@@ -95,4 +103,4 @@ for (const [role, [model, effort, sandbox]] of Object.entries(roles)) {
 }
 // The restricted TOML subset above is not a general TOML parser or effective runtime validation.
 if (failures.length) { console.error(failures.join('\n')); process.exitCode = 1; }
-else console.log(`Bootstrap checks passed: 4 unchanged sources, ${fr.length} FR, ${nfr.length} NFR, ${us.length} story mappings, ${links} local links, ${Object.keys(roles).length} role definitions and documented config subset.`);
+else console.log(`Bootstrap checks passed: 4 sources match owner-authorized revision, ${fr.length} FR, ${nfr.length} NFR, ${us.length} story mappings, ${links} local links, ${Object.keys(roles).length} role definitions and documented config subset.`);
