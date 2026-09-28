@@ -31,6 +31,22 @@ const busy = ref(false)
 const message = ref('')
 const messageKind = ref<'error' | 'success' | 'info'>('info')
 const isRegistering = computed(() => mode.value === 'register')
+const preferenceState = ref<'loading' | 'ready' | 'error'>('loading')
+const savedIdleMinutes = ref<number | null>(null)
+const draftIdleMinutes = ref<number | null>(null)
+const preferenceMessage = ref('')
+const preferenceSaving = ref(false)
+const preferenceEditing = ref(false)
+const formattedIdleTime = computed(() => {
+  const minutes = savedIdleMinutes.value
+  if (minutes === null) return ''
+  if (minutes > 1440 && minutes % 1440 === 0) {
+    const days = minutes / 1440
+    return `${days} ${days === 2 || days === 3 || days === 4 ? 'доби' : 'діб'}`
+  }
+  if (minutes % 60 === 0) return `${minutes / 60} год`
+  return `${minutes} хв`
+})
 
 // Every transition that replaces the auth state advances this generation. Responses
 // from work started before logout or a newer session check cannot restore stale UI.
@@ -38,15 +54,125 @@ let generation = 0
 let lastActivityAt = 0
 let activityInFlight = false
 let sessionCheckAbort: AbortController | undefined
+let preferenceAbort: AbortController | undefined
+let preferenceEpoch = 0
 const activityEvents = ['pointerdown', 'keydown', 'input', 'touchstart'] as const
+
+function clearPreferences() {
+  preferenceEpoch++
+  preferenceAbort?.abort()
+  preferenceAbort = undefined
+  preferenceState.value = 'loading'
+  savedIdleMinutes.value = null
+  draftIdleMinutes.value = null
+  preferenceMessage.value = ''
+  preferenceSaving.value = false
+  preferenceEditing.value = false
+}
+
+async function loadPreferences() {
+  preferenceAbort?.abort()
+  const controller = new AbortController()
+  const subjectUserId = user.value?.id
+  const requestEpoch = preferenceEpoch
+  preferenceAbort = controller
+  preferenceState.value = 'loading'
+  preferenceMessage.value = ''
+  try {
+    const response = await fetch('/api/auth/preferences', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+    if (requestEpoch !== preferenceEpoch || preferenceAbort !== controller || subjectUserId !== user.value?.id || state.value !== 'signed-in') return
+    if (response.status === 401) {
+      await checkSession()
+      if (requestEpoch === preferenceEpoch && state.value === 'signed-in') {
+        preferenceState.value = 'error'
+        preferenceMessage.value = 'Не вдалося перевірити сесію. Спробуйте ще раз.'
+      }
+      return
+    }
+    if (!response.ok) throw new Error('Preferences unavailable')
+    const result = await response.json() as { preferences?: { idleTimeoutMinutes?: number } }
+    if (requestEpoch !== preferenceEpoch || preferenceAbort !== controller || subjectUserId !== user.value?.id || state.value !== 'signed-in') return
+    const minutes = result.preferences?.idleTimeoutMinutes
+    if (!Number.isInteger(minutes) || minutes === undefined || minutes < 1 || minutes > 10080) {
+      throw new Error('Invalid preferences')
+    }
+    savedIdleMinutes.value = minutes
+    draftIdleMinutes.value = minutes
+    preferenceState.value = 'ready'
+  } catch {
+    if (requestEpoch === preferenceEpoch && preferenceAbort === controller && subjectUserId === user.value?.id && state.value === 'signed-in' && !controller.signal.aborted) {
+      preferenceState.value = 'error'
+      preferenceMessage.value = 'Не вдалося завантажити налаштування сесії.'
+    }
+  } finally {
+    if (preferenceAbort === controller) preferenceAbort = undefined
+  }
+}
+
+async function savePreferences() {
+  const minutes = Number(draftIdleMinutes.value)
+  if (preferenceSaving.value || preferenceState.value !== 'ready') return
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+    preferenceMessage.value = 'Вкажіть цілу кількість хвилин від 1 до 10 080.'
+    return
+  }
+  preferenceSaving.value = true
+  preferenceMessage.value = ''
+  const subjectUserId = user.value?.id
+  const requestEpoch = preferenceEpoch
+  try {
+    const response = await fetch('/api/auth/preferences', {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken.value },
+      body: JSON.stringify({ idleTimeoutMinutes: minutes }),
+    })
+    if (requestEpoch !== preferenceEpoch || subjectUserId !== user.value?.id || state.value !== 'signed-in') return
+    if (response.status === 401) {
+      await checkSession()
+      if (requestEpoch === preferenceEpoch && state.value === 'signed-in') {
+        preferenceMessage.value = 'Не вдалося перевірити сесію. Спробуйте зберегти ще раз.'
+      }
+      return
+    }
+    if (!response.ok) throw new Error('Preferences not saved')
+    const result = await response.json() as { preferences?: { idleTimeoutMinutes?: number } }
+    if (requestEpoch !== preferenceEpoch || subjectUserId !== user.value?.id || state.value !== 'signed-in') return
+    const updatedMinutes = result.preferences?.idleTimeoutMinutes
+    if (!Number.isInteger(updatedMinutes) || updatedMinutes === undefined) throw new Error('Invalid preferences')
+    savedIdleMinutes.value = updatedMinutes
+    draftIdleMinutes.value = updatedMinutes
+    preferenceEditing.value = false
+    preferenceMessage.value = 'Налаштування збережено.'
+  } catch {
+    if (requestEpoch === preferenceEpoch && subjectUserId === user.value?.id && state.value === 'signed-in') {
+      preferenceMessage.value = 'Не вдалося зберегти. Спробуйте ще раз.'
+    }
+  } finally {
+    if (requestEpoch === preferenceEpoch && subjectUserId === user.value?.id) preferenceSaving.value = false
+  }
+}
+
+function cancelPreferenceEdit() {
+  draftIdleMinutes.value = savedIdleMinutes.value
+  preferenceEditing.value = false
+  preferenceMessage.value = ''
+}
 
 function applySession(result: SessionResponse) {
   csrfToken.value = result.csrfToken
   if (result.authenticated && result.user) {
+    const needsPreferences = user.value?.id !== result.user.id || state.value !== 'signed-in'
+    if (needsPreferences) clearPreferences()
     user.value = result.user
     state.value = 'signed-in'
     message.value = ''
+    if (needsPreferences) void loadPreferences()
   } else {
+    clearPreferences()
     user.value = null
     state.value = 'signed-out'
     if (result.reason === 'expired') {
@@ -68,6 +194,7 @@ async function checkSession() {
     if (requestGeneration !== generation) return
     if (!response.ok) {
       if (response.status === 401) {
+        clearPreferences()
         state.value = 'signed-out'
         user.value = null
         return
@@ -164,6 +291,7 @@ async function logout() {
   sessionCheckAbort?.abort()
   const logoutGeneration = ++generation
   const token = csrfToken.value
+  clearPreferences()
   state.value = 'loading'
   busy.value = true
   message.value = ''
@@ -239,6 +367,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   sessionCheckAbort?.abort()
+  preferenceAbort?.abort()
   document.removeEventListener('visibilitychange', onVisibilityChange)
   for (const eventName of activityEvents) window.removeEventListener(eventName, recordActivity)
 })
@@ -437,7 +566,7 @@ onUnmounted(() => {
           </button>
         </form>
         <p class="privacy-note">
-          Сесія завершується після 60 хвилин бездіяльності.
+          За замовчуванням сесія завершується після 24 годин бездіяльності. Особистий ліміт можна змінити після входу.
         </p>
       </section>
 
@@ -470,6 +599,105 @@ onUnmounted(() => {
             {{ busy ? 'Завершуємо…' : 'Вийти' }}
           </button>
         </div>
+        <details class="session-settings">
+          <summary>
+            <span>Налаштування сесії</span>
+            <span class="session-settings-current">
+              {{ preferenceState === 'ready' ? `Бездіяльність: ${formattedIdleTime}` : preferenceState === 'loading' ? 'Завантаження…' : 'Не вдалося завантажити' }}
+            </span>
+          </summary>
+          <div class="session-settings-body">
+            <p class="session-settings-explanation">
+              Сесія завершується після обраного часу бездіяльності. Після входу вона в будь-якому разі діє не довше 7 діб.
+            </p>
+            <p
+              v-if="preferenceState === 'loading'"
+              class="session-settings-status"
+              role="status"
+            >
+              Завантажуємо ваші налаштування…
+            </p>
+            <div v-else-if="preferenceState === 'error'">
+              <p
+                class="session-settings-error"
+                role="alert"
+              >
+                {{ preferenceMessage }}
+              </p>
+              <button
+                class="button button-secondary session-settings-action"
+                type="button"
+                @click="loadPreferences()"
+              >
+                Спробувати ще раз
+              </button>
+            </div>
+            <form
+              v-else-if="preferenceEditing"
+              class="session-settings-form"
+              @submit.prevent="savePreferences"
+            >
+              <label
+                class="field"
+                for="idle-timeout-minutes"
+              >
+                <span>Завершувати після бездіяльності, хвилин</span>
+                <input
+                  id="idle-timeout-minutes"
+                  v-model.number="draftIdleMinutes"
+                  type="number"
+                  inputmode="numeric"
+                  min="1"
+                  max="10080"
+                  step="1"
+                  required
+                  :disabled="preferenceSaving"
+                  aria-describedby="idle-timeout-help"
+                >
+              </label>
+              <p
+                id="idle-timeout-help"
+                class="session-settings-hint"
+              >
+                Від 1 хвилини до 7 діб. 24 години — 1440 хвилин.
+              </p>
+              <div class="session-settings-actions">
+                <button
+                  class="button button-primary"
+                  type="submit"
+                  :disabled="preferenceSaving"
+                >
+                  {{ preferenceSaving ? 'Зберігаємо…' : 'Зберегти' }}
+                </button>
+                <button
+                  class="button button-secondary"
+                  type="button"
+                  :disabled="preferenceSaving"
+                  @click="cancelPreferenceEdit"
+                >
+                  Скасувати
+                </button>
+              </div>
+            </form>
+            <button
+              v-else
+              class="button button-secondary session-settings-action"
+              type="button"
+              @click="preferenceEditing = true; preferenceMessage = ''"
+            >
+              Змінити ліміт
+            </button>
+            <p
+              v-if="preferenceState === 'ready' && preferenceMessage"
+              class="session-settings-status"
+              :class="{ 'session-settings-error': preferenceEditing }"
+              role="status"
+              aria-live="polite"
+            >
+              {{ preferenceMessage }}
+            </p>
+          </div>
+        </details>
         <WorkspaceHub
           :key="user?.id ?? ''"
           :csrf-token="csrfToken"

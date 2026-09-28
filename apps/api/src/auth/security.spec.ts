@@ -79,7 +79,7 @@ describe('session security boundaries', () => {
     const spy = vi.spyOn(Date, 'now').mockReturnValue(now + 61 * 60_000);
     try {
       expect(() => protection.require(valid)).not.toThrow();
-      spy.mockReturnValue(now + 24 * 3_600_000);
+      spy.mockReturnValue(now + 7 * 24 * 3_600_000);
       expect(() => protection.require(valid)).toThrow();
     } finally { spy.mockRestore(); }
   });

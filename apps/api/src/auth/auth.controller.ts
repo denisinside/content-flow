@@ -1,15 +1,18 @@
-import { BadRequestException, Body, Controller, Get, Inject, Post, Req, Res, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Get, Inject, Patch, Post, Req, Res, ServiceUnavailableException, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { ApiBody, ApiCookieAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { AuthProvider, ProviderFailure } from './auth-provider.js';
 import { AuthRateLimit } from './auth-rate-limit.js';
 import { CsrfProtection, SESSION_COOKIE, cookieValue, setCookie } from './csrf.js';
 import { SessionService } from './session-service.js';
+import { MAX_IDLE_TIMEOUT_MINUTES } from './session-service.js';
+import { SessionGuard, type AuthenticatedRequest } from './session.guard.js';
 import type { AuthConfig } from './auth-config.js';
 
 const loginInput = z.object({ email: z.email().max(254), password: z.string().min(1).max(128) }).strict();
 const registrationInput = loginInput.extend({ password: z.string().min(8).max(128), displayName: z.string().trim().min(1).max(80).optional() });
+const preferencesInput = z.object({ idleTimeoutMinutes: z.number().int().min(1).max(MAX_IDLE_TIMEOUT_MINUTES) }).strict();
 
 @ApiTags('identity')
 @Controller('api/auth')
@@ -35,6 +38,28 @@ export class AuthController {
       return { authenticated: false, reason: 'expired', csrfToken: this.csrf.token(request, response, undefined, true) };
     }
     return { authenticated: true, user: result.user, csrfToken: this.csrf.token(request, response, cookie) };
+  }
+
+  @Get('preferences')
+  @UseGuards(SessionGuard)
+  @ApiCookieAuth('__Host-contextflow')
+  @ApiOperation({ summary: 'Read the signed-in user’s personal idle timeout in minutes' })
+  @ApiResponse({ status: 200, description: 'Saved personal idle timeout; no provider tokens' })
+  preferences(@Req() request: AuthenticatedRequest) {
+    return this.sessions.preferences(request.sessionUser.id);
+  }
+
+  @Patch('preferences')
+  @UseGuards(SessionGuard)
+  @ApiCookieAuth('__Host-contextflow')
+  @ApiOperation({ summary: 'Save the signed-in user’s personal idle timeout' })
+  @ApiBody({ schema: { type: 'object', required: ['idleTimeoutMinutes'], additionalProperties: false,
+    properties: { idleTimeoutMinutes: { type: 'integer', minimum: 1, maximum: MAX_IDLE_TIMEOUT_MINUTES } } } })
+  @ApiResponse({ status: 200, description: 'Saved personal idle timeout; concurrent checks use the next committed setting' })
+  updatePreferences(@Req() request: AuthenticatedRequest, @Body() body: unknown) {
+    const parsed = preferencesInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('Invalid session preference');
+    return this.sessions.updatePreferences(request.sessionUser.id, parsed.data.idleTimeoutMinutes);
   }
 
   @Post('login')

@@ -103,6 +103,17 @@ async function checkRuntime(runtimeUrl) {
     }
     await runtime.query('BEGIN');
     await runtime.query(`INSERT INTO contextflow."UserProfile" ("id", "displayName") VALUES ('00000000-0000-4000-8000-000000000001', 'migration verifier')`);
+    const preferenceDefault = await runtime.query(`SELECT "idleTimeoutMinutes" FROM contextflow."UserProfile" WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
+    if (preferenceDefault.rows[0]?.idleTimeoutMinutes !== 1440) throw new Error('personal-idle-default');
+    for (const invalid of [0, 10081]) {
+      await runtime.query('SAVEPOINT personal_idle_check');
+      let rejected = false;
+      try { await runtime.query(`UPDATE contextflow."UserProfile" SET "idleTimeoutMinutes" = $1 WHERE "id" = '00000000-0000-4000-8000-000000000001'`, [invalid]); }
+      catch (error) { rejected = error?.code === '23514'; }
+      await runtime.query('ROLLBACK TO SAVEPOINT personal_idle_check');
+      await runtime.query('RELEASE SAVEPOINT personal_idle_check');
+      if (!rejected) throw new Error('personal-idle-check-constraint');
+    }
     await runtime.query(`INSERT INTO contextflow."AppSession" ("id", "cookieDigest", "userId", "encryptedProviderTokens", "tokenKeyVersion", "providerTokenExpiresAt", "expiresAt") VALUES ('00000000-0000-4000-8000-000000000002', repeat('a', 64), '00000000-0000-4000-8000-000000000001', 'test-only-ciphertext-placeholder', 1, CURRENT_TIMESTAMP + interval '1 hour', CURRENT_TIMESTAMP + interval '1 day')`);
     await runtime.query(`UPDATE contextflow."UserProfile" SET "displayName" = 'migration verifier updated' WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
     const projectId = '00000000-0000-4000-8000-000000000003';

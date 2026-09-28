@@ -123,8 +123,26 @@ test('real local auth flow keeps credentials and provider tokens out of the brow
   releaseCheck?.(); await delivered;
   await expect(page.getByText('Вітаємо, M12 Browser Test', { exact: true })).toBeVisible();
   await expect(page.getByText(email, { exact: true })).toBeVisible();
+  await expect(page.getByText('Бездіяльність: 24 год')).toBeVisible();
   await snapshotAtWidths(page, 'account');
   await expect(page.locator('input[name="password"]')).toHaveCount(0);
+
+  await page.getByText('Налаштування сесії').click();
+  await page.getByRole('button', { name: 'Змінити ліміт' }).click();
+  const idleInput = page.getByLabel('Завершувати після бездіяльності, хвилин');
+  await expect(idleInput).toHaveValue('1440');
+  await idleInput.fill('45');
+  await page.getByRole('button', { name: 'Зберегти' }).click();
+  await expect(page.getByText('Налаштування збережено.')).toBeVisible();
+  await expect(page.getByText('Бездіяльність: 45 хв')).toBeVisible();
+  await snapshotAtWidths(page, 'preferences');
+  await page.reload();
+  await expect(page.getByText('Бездіяльність: 45 хв')).toBeVisible();
+  const preferenceAfterReload = await page.evaluate(async () => {
+    const response = await fetch('/api/auth/preferences', { credentials: 'same-origin' });
+    return { status: response.status, body: await response.json() as { preferences: { idleTimeoutMinutes: number } } };
+  });
+  expect(preferenceAfterReload).toEqual({ status: 200, body: { preferences: { idleTimeoutMinutes: 45 } } });
 
   const cookies = await context.cookies(webOrigin);
   const sessionCookie = cookies.find(cookie => cookie.name === '__Host-contextflow');
@@ -164,6 +182,7 @@ test('real local auth flow keeps credentials and provider tokens out of the brow
   await page.getByLabel('Пароль').fill(TEST_PASSWORD);
   await page.getByRole('button', { name: 'Увійти' }).click();
   await expect(page.getByText('Вітаємо, M12 Browser Test', { exact: true })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('Бездіяльність: 45 хв')).toBeVisible();
   await page.getByRole('button', { name: 'Вийти' }).click();
   await expect(page.getByRole('heading', { level: 2, name: 'Раді вас бачити' })).toBeVisible();
 

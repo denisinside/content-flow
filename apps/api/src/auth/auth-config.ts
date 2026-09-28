@@ -11,6 +11,8 @@ export interface AuthConfig {
   providerTimeoutMs: number;
 }
 
+export const SESSION_ABSOLUTE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 function key(value: string | undefined, field: string): Buffer {
   if (!value || !/^[A-Za-z0-9+/]{43}=$/.test(value) || Buffer.from(value, 'base64').length !== 32) {
     throw new ConfigurationError([field]);
@@ -44,16 +46,14 @@ export function parseAuthConfig(env: Record<string, string | undefined>, webOrig
       }
     } catch { throw new ConfigurationError([prefix + 'SESSION_PREVIOUS_ENCRYPTION_KEYS']); }
   }
-  const hours = Number(env['SESSION_ABSOLUTE_TTL_HOURS'] || '24');
   const timeout = Number(env['AUTH_PROVIDER_TIMEOUT_MS'] || '5000');
-  if (!Number.isInteger(hours) || hours < 1 || hours > 720) throw new ConfigurationError(['SESSION_ABSOLUTE_TTL_HOURS']);
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 5000) throw new ConfigurationError(['AUTH_PROVIDER_TIMEOUT_MS']);
   let origin: URL;
   try { origin = new URL(webOrigin); } catch { throw new ConfigurationError(['WEB_ORIGIN']); }
   if (origin.href !== origin.origin + '/' || (env['NODE_ENV'] === 'production' && origin.protocol !== 'https:')) throw new ConfigurationError(['WEB_ORIGIN']);
   return { providerUrl: url.origin, publishableKey, encryptionKeys: keys, currentKeyVersion: version,
     csrfKey: key(env[prefix + 'SESSION_CSRF_KEY'], prefix + 'SESSION_CSRF_KEY'), webOrigin: origin.origin,
-    absoluteTtlMs: hours * 3_600_000, providerTimeoutMs: timeout };
+    absoluteTtlMs: SESSION_ABSOLUTE_TTL_MS, providerTimeoutMs: timeout };
 }
 
 export function loadAuthConfig(): AuthConfig {

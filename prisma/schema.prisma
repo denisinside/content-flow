@@ -15,6 +15,7 @@ datasource db {
 model UserProfile {
   id          String       @id @db.Uuid
   displayName String?      @db.VarChar(80)
+  idleTimeoutMinutes Int   @default(1440)
   createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   sessions    AppSession[]
   createdProjects Project[]

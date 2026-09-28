@@ -296,6 +296,42 @@ button { color: inherit; }
 .signed-in-account .account-email { margin-top: 5px; color: var(--muted); font-size: 12px; font-weight: 400; }
 .signed-in-account .logout-button { width: auto; margin: 0; }
 
+.session-settings {
+  width: min(100%, 1220px);
+  margin: -37px auto 47px;
+  border-bottom: 1px solid var(--rule);
+}
+.session-settings summary {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 17px;
+  width: max-content;
+  max-width: 100%;
+  padding: 0 0 15px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.session-settings summary:hover { color: var(--copper); }
+.session-settings summary:focus-visible { outline: 2px solid var(--copper); outline-offset: 4px; }
+.session-settings-current { color: var(--muted); font-size: 12px; font-weight: 400; }
+.session-settings-body { max-width: 560px; padding: 3px 0 25px 19px; }
+.session-settings-explanation, .session-settings-hint, .session-settings-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.session-settings-explanation { margin-bottom: 16px; }
+.session-settings-form { display: grid; gap: 9px; }
+.session-settings-form .field input { width: min(100%, 240px); }
+.session-settings-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 8px; }
+.session-settings-action { min-height: 38px; }
+.session-settings-status { margin-top: 12px; }
+.session-settings-error { color: var(--error); }
+
 .workspace-main { width: 100%; }
 .workspace-hub { width: 100%; }
 .workspace-switcher, .workspace-management, .workspace-archived-note {
@@ -525,6 +561,7 @@ button { color: inherit; }
   .signed-in-layout { padding-top: 27px; }
   .signed-in-account { align-items: flex-start; margin-bottom: 37px; padding-bottom: 17px; }
   .signed-in-account .logout-button { min-height: 38px; padding-inline: 11px; }
+  .session-settings { margin-top: -22px; margin-bottom: 34px; }
   .workspace-switcher { margin-bottom: 35px; }
   .workspace-heading { align-items: flex-start; flex-direction: column; gap: 20px; margin-bottom: 31px; }
   .workspace-heading h1 { font-size: 40px; }
@@ -548,6 +585,8 @@ button { color: inherit; }
   .signed-in-account { gap: 12px; margin-bottom: 31px; }
   .signed-in-account .account-name { max-width: 205px; font-size: 23px; }
   .signed-in-account .logout-button { min-height: 36px; padding-inline: 9px; font-size: 12px; }
+  .session-settings { margin-top: -18px; margin-bottom: 30px; }
+  .session-settings-body { padding-left: 0; }
   .workspace-switcher-heading { align-items: flex-start; }
   .workspace-switcher-heading .workspace-switcher-title { font-size: 24px; }
   .workspace-choice { align-items: stretch; flex-direction: column; }

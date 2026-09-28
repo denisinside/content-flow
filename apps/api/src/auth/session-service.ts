@@ -5,7 +5,9 @@ import type { AuthConfig } from './auth-config.js';
 import { AuthProvider, ProviderFailure, type ProviderSession } from './auth-provider.js';
 import { SessionCrypto, opaqueToken, tokenDigest, validOpaqueToken, type ProviderTokens } from './session-crypto.js';
 
-export const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+export const DEFAULT_IDLE_TIMEOUT_MINUTES = 24 * 60;
+export const MAX_IDLE_TIMEOUT_MINUTES = 7 * 24 * 60;
+export const IDLE_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MINUTES * 60 * 1000;
 export interface SessionUser { id: string; email: string; displayName: string | null }
 export type SessionCheck = { kind: 'active'; user: SessionUser } | { kind: 'expired' } | { kind: 'unavailable' };
 
@@ -62,7 +64,12 @@ export class SessionService {
         await tx.appSession.update({ where: { id: row.id }, data: { revokedAt: new Date(), encryptedProviderTokens: null } });
         return { kind: 'expired' };
       };
-      if (Date.now() >= row.expiresAt.getTime() || Date.now() - row.lastUserActivityAt.getTime() >= IDLE_TIMEOUT_MS) return revoke();
+      // Hold the personal setting while verifying the session. Concurrent edits
+      // apply on the next check and cannot turn an already-expired check active.
+      const preferences = await tx.$queryRaw<Array<{ idleTimeoutMinutes: number }>>`SELECT "idleTimeoutMinutes" FROM contextflow."UserProfile" WHERE "id" = ${row.userId}::uuid FOR SHARE`;
+      if (!preferences[0]) return revoke();
+      const idleTimeoutMs = preferences[0].idleTimeoutMinutes * 60_000;
+      if (Date.now() >= row.expiresAt.getTime() || Date.now() - row.lastUserActivityAt.getTime() >= idleTimeoutMs) return revoke();
       let tokens: ProviderTokens;
       try { tokens = this.crypto.decrypt(row.encryptedProviderTokens ?? '', row.tokenKeyVersion, row.id, row.userId); }
       catch { return revoke(); }
@@ -71,7 +78,7 @@ export class SessionService {
         const identity = refreshed?.identity ?? await this.provider.verify(tokens);
         if (identity.id !== row.userId || identity.sessionId !== row.providerSessionId) return revoke();
         // Verification/refresh may take time; neither may revive an expired session.
-        if (Date.now() >= row.expiresAt.getTime() || Date.now() - row.lastUserActivityAt.getTime() >= IDLE_TIMEOUT_MS) return revoke();
+        if (Date.now() >= row.expiresAt.getTime() || Date.now() - row.lastUserActivityAt.getTime() >= idleTimeoutMs) return revoke();
         if (refreshed || row.tokenKeyVersion !== this.config.currentKeyVersion) {
           const encrypted = this.crypto.encrypt(refreshed?.tokens ?? tokens, row.id, row.userId);
           await tx.appSession.update({ where: { id: row.id }, data: { encryptedProviderTokens: encrypted.ciphertext,
@@ -86,6 +93,16 @@ export class SessionService {
         throw error;
       }
     });
+  }
+
+  async preferences(userId: string): Promise<{ preferences: { idleTimeoutMinutes: number } }> {
+    const profile = await this.prisma.userProfile.findUniqueOrThrow({ where: { id: userId }, select: { idleTimeoutMinutes: true } });
+    return { preferences: { idleTimeoutMinutes: profile.idleTimeoutMinutes } };
+  }
+
+  async updatePreferences(userId: string, idleTimeoutMinutes: number): Promise<{ preferences: { idleTimeoutMinutes: number } }> {
+    const profile = await this.prisma.userProfile.update({ where: { id: userId }, data: { idleTimeoutMinutes }, select: { idleTimeoutMinutes: true } });
+    return { preferences: { idleTimeoutMinutes: profile.idleTimeoutMinutes } };
   }
 
   async logout(cookie: string | undefined): Promise<void> {
