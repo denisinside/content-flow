@@ -6,6 +6,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/u
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import SourceWorkspace from './SourceWorkspace.vue'
 
 type ProjectFormat =
   | 'ARTICLE'
@@ -65,8 +66,9 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/sources)?\/?$/i)?.[1] ?? null)
 const isDetail = computed(() => page.value !== null)
+const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
 const canSave = computed(() => topic.value.trim().length > 0 && topic.value.trim().length <= 500 && selectedFormats.value.length > 0 && selectedFormats.value.length <= formats.length)
 const hasChanges = computed(() => {
   if (!currentProject.value) return false
@@ -572,152 +574,182 @@ onBeforeUnmount(() => {
       </Alert>
 
       <template v-else-if="currentProject">
-        <div class="workspace-heading project-title-row">
-          <div>
-            <p class="eyebrow">
-              {{ currentProject.archivedAt ? 'Архівований проєкт' : 'Проєкт' }}
-            </p>
-            <h1 id="project-detail-title">
-              {{ currentProject.topic }}
-            </h1>
-          </div>
-          <Button
-            v-if="!currentProject.archivedAt"
-            class="workspace-button workspace-button-secondary"
-            variant="outline"
-            :disabled="saving"
-            @click="openEditForm"
-          >
-            Редагувати проєкт
-          </Button>
-        </div>
-
-        <form
-          v-if="formOpen && editing"
-          class="project-form"
-          @submit.prevent="submitProject"
-        >
-          <div class="project-form-heading">
+        <template v-if="isSources">
+          <SourceWorkspace
+            :key="currentProject.id"
+            :project-id="currentProject.id"
+            :project-title="currentProject.topic"
+            :csrf-token="csrfToken"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+          />
+        </template>
+        <template v-else>
+          <div class="workspace-heading project-title-row">
             <div>
               <p class="eyebrow">
-                Налаштування
+                {{ currentProject.archivedAt ? 'Архівований проєкт' : 'Проєкт' }}
               </p>
-              <h2>Тема та формати</h2>
+              <h1 id="project-detail-title">
+                {{ currentProject.topic }}
+              </h1>
             </div>
             <Button
-              class="workspace-button workspace-button-quiet"
-              type="button"
-              variant="ghost"
-              :disabled="saving"
-              @click="closeForm"
-            >
-              Скасувати
-            </Button>
-          </div>
-          <FieldGroup class="workspace-field-group">
-            <Field class="workspace-field">
-              <FieldLabel
-                for="project-topic"
-                class="workspace-field-label"
-              >
-                Тема проєкту
-              </FieldLabel>
-              <Textarea
-                id="project-topic"
-                v-model="topic"
-                class="workspace-input workspace-topic-input"
-                rows="3"
-                maxlength="500"
-                required
-                :disabled="saving"
-              />
-              <FieldDescription class="field-hint">
-                До 500 символів.
-              </FieldDescription>
-            </Field>
-          </FieldGroup>
-          <FieldSet class="format-fieldset">
-            <FieldLegend class="format-legend">
-              Формати матеріалів
-            </FieldLegend>
-            <FieldDescription class="field-hint">
-              Оберіть хоча б один формат. Стаття — за бажанням.
-            </FieldDescription>
-            <div class="format-options">
-              <label
-                v-for="format in formats"
-                :key="format.id"
-                class="format-option"
-              >
-                <input
-                  v-model="selectedFormats"
-                  type="checkbox"
-                  :value="format.id"
-                  :disabled="saving"
-                >
-                <span>{{ format.label }}</span>
-              </label>
-            </div>
-          </FieldSet>
-          <Alert
-            v-if="formError"
-            variant="destructive"
-            class="workspace-alert"
-          >
-            <AlertTitle>{{ conflict ? 'Є нові зміни' : 'Не вдалося зберегти' }}</AlertTitle>
-            <AlertDescription>{{ formError }}</AlertDescription>
-            <Button
-              v-if="conflict"
-              class="workspace-button workspace-button-quiet"
+              v-if="!currentProject.archivedAt"
+              class="workspace-button workspace-button-secondary"
               variant="outline"
-              type="button"
-              @click="loadProject(page as string)"
+              :disabled="saving"
+              @click="openEditForm"
             >
-              Скинути мої зміни й оновити
-            </Button>
-          </Alert>
-          <div class="form-actions">
-            <Button
-              class="workspace-button workspace-button-primary"
-              type="submit"
-              :disabled="saving || !canSave || !hasChanges"
-            >
-              {{ saving ? 'Зберігаємо…' : 'Зберегти зміни' }}
+              Редагувати проєкт
             </Button>
           </div>
-        </form>
 
-        <section
-          v-else
-          class="project-detail-body"
-          aria-labelledby="formats-title"
-        >
-          <p class="project-detail-copy">
-            Матеріали цього проєкту стосуються теми вище.
-          </p>
-          <div
-            class="detail-rule"
-            aria-hidden="true"
-          />
-          <h2 id="formats-title">
-            Формати матеріалів
-          </h2>
-          <ul class="format-list">
-            <li
-              v-for="format in currentProject.formats"
-              :key="format"
-            >
-              {{ labelFor(format) }}
-            </li>
-          </ul>
-          <Alert
-            v-if="currentProject.archivedAt"
-            class="workspace-alert archive-note"
+          <form
+            v-if="formOpen && editing"
+            class="project-form"
+            @submit.prevent="submitProject"
           >
-            <AlertTitle>Проєкт архівований</AlertTitle>
-            <AlertDescription>Ви можете переглянути його налаштування, але змінити вже не можна.</AlertDescription>
-          </Alert>
-        </section>
+            <div class="project-form-heading">
+              <div>
+                <p class="eyebrow">
+                  Налаштування
+                </p>
+                <h2>Тема та формати</h2>
+              </div>
+              <Button
+                class="workspace-button workspace-button-quiet"
+                type="button"
+                variant="ghost"
+                :disabled="saving"
+                @click="closeForm"
+              >
+                Скасувати
+              </Button>
+            </div>
+            <FieldGroup class="workspace-field-group">
+              <Field class="workspace-field">
+                <FieldLabel
+                  for="project-topic"
+                  class="workspace-field-label"
+                >
+                  Тема проєкту
+                </FieldLabel>
+                <Textarea
+                  id="project-topic"
+                  v-model="topic"
+                  class="workspace-input workspace-topic-input"
+                  rows="3"
+                  maxlength="500"
+                  required
+                  :disabled="saving"
+                />
+                <FieldDescription class="field-hint">
+                  До 500 символів.
+                </FieldDescription>
+              </Field>
+            </FieldGroup>
+            <FieldSet class="format-fieldset">
+              <FieldLegend class="format-legend">
+                Формати матеріалів
+              </FieldLegend>
+              <FieldDescription class="field-hint">
+                Оберіть хоча б один формат. Стаття — за бажанням.
+              </FieldDescription>
+              <div class="format-options">
+                <label
+                  v-for="format in formats"
+                  :key="format.id"
+                  class="format-option"
+                >
+                  <input
+                    v-model="selectedFormats"
+                    type="checkbox"
+                    :value="format.id"
+                    :disabled="saving"
+                  >
+                  <span>{{ format.label }}</span>
+                </label>
+              </div>
+            </FieldSet>
+            <Alert
+              v-if="formError"
+              variant="destructive"
+              class="workspace-alert"
+            >
+              <AlertTitle>{{ conflict ? 'Є нові зміни' : 'Не вдалося зберегти' }}</AlertTitle>
+              <AlertDescription>{{ formError }}</AlertDescription>
+              <Button
+                v-if="conflict"
+                class="workspace-button workspace-button-quiet"
+                variant="outline"
+                type="button"
+                @click="loadProject(page as string)"
+              >
+                Скинути мої зміни й оновити
+              </Button>
+            </Alert>
+            <div class="form-actions">
+              <Button
+                class="workspace-button workspace-button-primary"
+                type="submit"
+                :disabled="saving || !canSave || !hasChanges"
+              >
+                {{ saving ? 'Зберігаємо…' : 'Зберегти зміни' }}
+              </Button>
+            </div>
+          </form>
+
+          <section
+            v-else
+            class="project-detail-body"
+            aria-labelledby="formats-title"
+          >
+            <p class="project-detail-copy">
+              Матеріали цього проєкту стосуються теми вище.
+            </p>
+            <div class="project-sources-entry">
+              <div>
+                <p class="eyebrow">
+                  Дослідження
+                </p>
+                <h2>Джерела</h2>
+                <p class="project-detail-copy">
+                  Додавайте тексти й документи та переглядайте збережені версії.
+                </p>
+              </div>
+              <Button
+                class="workspace-button workspace-button-secondary"
+                variant="outline"
+                @click="routeTo(`/projects/${currentProject.id}/sources`)"
+              >
+                Відкрити джерела
+              </Button>
+            </div>
+            <div
+              class="detail-rule"
+              aria-hidden="true"
+            />
+            <h2 id="formats-title">
+              Формати матеріалів
+            </h2>
+            <ul class="format-list">
+              <li
+                v-for="format in currentProject.formats"
+                :key="format"
+              >
+                {{ labelFor(format) }}
+              </li>
+            </ul>
+            <Alert
+              v-if="currentProject.archivedAt"
+              class="workspace-alert archive-note"
+            >
+              <AlertTitle>Проєкт архівований</AlertTitle>
+              <AlertDescription>Ви можете переглянути його налаштування, але змінити вже не можна.</AlertDescription>
+            </Alert>
+          </section>
+        </template>
       </template>
     </section>
   </div>

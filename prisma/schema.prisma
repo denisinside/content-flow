@@ -16,6 +16,8 @@ model UserProfile {
   id          String       @id @db.Uuid
   displayName String?      @db.VarChar(80)
   idleTimeoutMinutes Int   @default(1440)
+  externalProcessingNoticeVersion String? @db.VarChar(64)
+  externalProcessingAcceptedAt DateTime? @db.Timestamptz(3)
   createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   sessions    AppSession[]
   createdProjects Project[]
@@ -26,6 +28,8 @@ model UserProfile {
   acceptedInvites WorkspaceInvite[] @relation("InviteAcceptor")
   styleRevisions WorkspaceStyleRevision[]
   createdAssets Asset[] @relation("AssetCreator")
+  createdMaterials Material[] @relation("MaterialCreator")
+  createdSnapshots SourceSnapshot[] @relation("SnapshotCreator")
 
   @@schema("contextflow")
 }
@@ -117,6 +121,27 @@ enum AssetPurpose {
   @@schema("contextflow")
 }
 
+enum MaterialKind {
+  TEXT
+  FILE
+  @@schema("contextflow")
+}
+
+enum MaterialPurpose {
+  FACTUAL_SOURCE
+  NOTES
+  BRANDBOOK
+  STYLE_SAMPLE
+  SUPPLIED_ARTICLE
+  @@schema("contextflow")
+}
+
+enum SourceOrigin {
+  MANUAL_TEXT
+  LOCAL_FILE
+  @@schema("contextflow")
+}
+
 model Project {
   id String @id @default(uuid()) @db.Uuid
   workspaceId String @db.Uuid
@@ -131,6 +156,7 @@ model Project {
   archivedAt DateTime? @db.Timestamptz(3)
   members ProjectMember[]
   assets Asset[]
+  materials Material[]
   @@index([createdBy])
   @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([createdAt(sort: Desc), id(sort: Desc)])
@@ -163,10 +189,81 @@ model Asset {
   createdBy String @db.Uuid
   creator UserProfile @relation("AssetCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
+  sourceSnapshots SourceSnapshot[]
   @@unique([projectId, id])
   @@unique([bucket, objectKey])
   @@index([projectId, state, createdAt])
   @@index([projectId, createdBy])
+  @@schema("contextflow")
+}
+
+model Material {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  kind MaterialKind
+  purpose MaterialPurpose
+  label String @db.VarChar(200)
+  included Boolean @default(true)
+  revision Int @default(1)
+  currentSnapshotId String? @db.Uuid
+  createdBy String @db.Uuid
+  creator UserProfile @relation("MaterialCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  snapshots SourceSnapshot[] @relation("MaterialSnapshots")
+  currentSnapshot SourceSnapshot? @relation("MaterialCurrentSnapshot", fields: [projectId, id, currentSnapshotId], references: [projectId, materialId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([projectId, id])
+  @@index([projectId, included, createdAt, id])
+  @@index([projectId, currentSnapshotId])
+  @@schema("contextflow")
+}
+
+model SourceSnapshot {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  materialId String @db.Uuid
+  material Material @relation("MaterialSnapshots", fields: [projectId, materialId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  currentForMaterials Material[] @relation("MaterialCurrentSnapshot")
+  sequence Int
+  normalizedText String @db.Text
+  sha256 String @db.Char(64)
+  bytes Int
+  origin SourceOrigin
+  originalAssetId String? @db.Uuid
+  originalFilename String? @db.VarChar(255)
+  originalAsset Asset? @relation(fields: [projectId, originalAssetId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  previousSnapshotId String? @db.Uuid
+  previousSnapshot SourceSnapshot? @relation("SnapshotHistory", fields: [projectId, materialId, previousSnapshotId], references: [projectId, materialId, id], onDelete: Restrict, onUpdate: NoAction)
+  nextSnapshots SourceSnapshot[] @relation("SnapshotHistory")
+  createdBy String @db.Uuid
+  creator UserProfile @relation("SnapshotCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  fragments SourceFragment[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, materialId, id])
+  @@unique([projectId, materialId, sequence])
+  @@unique([projectId, materialId, previousSnapshotId])
+  @@index([projectId, materialId, createdAt, id])
+  @@index([projectId, originalAssetId])
+  @@schema("contextflow")
+}
+
+model SourceFragment {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  snapshotId String @db.Uuid
+  snapshot SourceSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  ordinal Int
+  startOffset Int
+  endOffset Int
+  sha256 String @db.Char(64)
+
+  @@unique([projectId, id])
+  @@unique([projectId, snapshotId, ordinal])
+  @@index([projectId, snapshotId, startOffset])
   @@schema("contextflow")
 }
 

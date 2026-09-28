@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
     resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
     envDir: workspaceRoot,
     server: {
+      fs: { deny: ['.env', '.env.*', '*.{crt,pem,key,p12,pfx,cer,der}', '.npmrc', '.yarnrc.yml', '**/.git/**', '**/.private-assets/**', '**/.private-assets-test/**'] },
       headers: { 'Content-Security-Policy': policy.replace("style-src 'self'", "style-src 'self' 'unsafe-inline'").replace("connect-src 'self'", "connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173") },
       proxy: { '/api': { target: `http://127.0.0.1:${apiPort}`, changeOrigin: false } }
     },

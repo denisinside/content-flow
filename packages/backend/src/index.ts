@@ -14,4 +14,4 @@ export { ConfigurationError, loadRuntimeConfig, parseRuntimeConfig } from './con
 export type { BackendConfig } from './config.js';
 export { databasePoolOptions } from './database-connection.js';
 export type { Prisma } from './generated/prisma/client.js';
-export { ProjectFormat, AssetState, AssetPurpose } from './generated/prisma/enums.js';
+export { ProjectFormat, AssetState, AssetPurpose, MaterialKind, MaterialPurpose, SourceOrigin } from './generated/prisma/enums.js';

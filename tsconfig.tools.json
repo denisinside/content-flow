@@ -8,5 +8,5 @@
     "experimentalDecorators": true,
     "types": ["node"]
   },
-  "include": ["scripts/**/*.ts", "tests/**/*.ts", "*.config.ts"]
+  "include": ["scripts/**/*.ts", "tests/**/*.ts", "*.config.ts", "apps/web/*.spec.ts"]
 }

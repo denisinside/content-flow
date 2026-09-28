@@ -51,8 +51,10 @@ try {
     await db.connect();
     stage = 'old-migrations';
     const names = (await readdir(migrations, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort();
-    check(names.at(-1) === '20260928000100_workspace_foundation' && names.length === 8, 'Unexpected migration list');
-    for (const name of names.slice(0, -1)) {
+    const workspaceMigration = '20260928000100_workspace_foundation';
+    const workspaceIndex = names.indexOf(workspaceMigration);
+    check(workspaceIndex === 7, 'Unexpected pre-Workspace migration list');
+    for (const name of names.slice(0, workspaceIndex)) {
       stage = `old-migrations:${name}`;
       // Prisma creates its own metadata table before executing migrations.
       // This direct-SQL fixture has no migration ledger to restrict.
@@ -78,6 +80,11 @@ try {
     await db.query(`INSERT INTO contextflow."Asset" ("id","projectId","bucket","objectKey","mediaType","bytes","sha256","purpose","createdBy") VALUES ($1,$2,'private-assets',$3,'text/plain',1,repeat('a',64),'ORIGINAL',$4)`, [ids.asset, ids.p1, `${ids.p1}/fixture.txt`, ids.b]);
     stage = 'workspace-migration';
     await db.query(await readFile(new URL('20260928000100_workspace_foundation/migration.sql', migrations), 'utf8'));
+    // Keep the populated upgrade check useful after later additive releases.
+    for (const name of names.slice(workspaceIndex + 1)) {
+      stage = `later-migrations:${name}`;
+      await db.query(await readFile(new URL(`${name}/migration.sql`, migrations), 'utf8'));
+    }
     stage = 'access-set-assertions';
     const rows = await db.query(`SELECT p."id" AS project_id, p."workspaceId" AS workspace_id, w."ownerId" AS owner_id, w."archivedAt" AS archived_at,
       ARRAY(SELECT m."userId"::text FROM contextflow."WorkspaceMember" m WHERE m."workspaceId"=p."workspaceId" AND m."leftAt" IS NULL ORDER BY m."userId") AS current_users,

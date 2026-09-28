@@ -1,6 +1,6 @@
 # ContextFlow agent guide
 
-ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1.1 adds the runnable foundation; authentication, project and Workspace work are tracked in docs/PLAN.md M1.2–M1.4. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
+ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1 and M2.1 are DONE locally; next work is docs/PLAN.md M2.2, then M2.3. Read docs/STATUS.md and docs/modules/sources.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
 
 ## Read only what the task needs
 
@@ -19,7 +19,7 @@ Keep TypeScript/NestJS modular monolith plus separate worker, Vue3 and selected 
 
 ## Engineering and verification
 
-Strict types, cohesive modules, explicit transitions, narrow adapters, deterministic business rules. No speculative interfaces, microservices, catch-and-continue or hidden vendor fallback. Tests protect requirement acceptance/invariants. Run relevant tests/typecheck/lint/build and inspect results before accepting work; failed milestone verification means stop and fix. Foundation scripts exist in package.json; docs/TEST_STRATEGY.md and RUNBOOK.md distinguish actual M1.1 checks from later acceptance. Use Node24 >=24.19.0 (scripts/workspace.ps1 selects the Codex bundle on Windows). Never mark DONE from code alone.
+Strict types, cohesive modules, explicit transitions, narrow adapters, deterministic business rules. No speculative interfaces, microservices, catch-and-continue or hidden vendor fallback. Tests protect requirement acceptance/invariants. Run relevant tests/typecheck/lint/build and inspect results before accepting work; failed milestone verification means stop and fix. Scripts exist in package.json; docs/TEST_STRATEGY.md and RUNBOOK.md distinguish current verified checks from planned feature acceptance. Use Node24 >=24.19.0 (scripts/workspace.ps1 selects the Codex bundle on Windows). Never mark DONE from code alone.
 
 Prisma migrations reviewed with model changes; never edit applied migrations or use db push on shared/deployed DB. Test migration/restore; risky changes need backup and expand/contract plan. Provider auth/storage schemas are not app migration targets.
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import WorkspaceHub from './components/WorkspaceHub.vue'
+import ExternalProcessingNotice from './components/ExternalProcessingNotice.vue'
 
 interface User {
   id: string
@@ -599,6 +600,12 @@ onUnmounted(() => {
             {{ busy ? 'Завершуємо…' : 'Вийти' }}
           </button>
         </div>
+        <ExternalProcessingNotice
+          :key="user?.id ?? ''"
+          :csrf-token="csrfToken"
+          :user-id="user?.id ?? ''"
+          @session-expired="handleProjectSessionExpired"
+        />
         <details class="session-settings">
           <summary>
             <span>Налаштування сесії</span>

@@ -1,12 +1,14 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { loadRuntimeConfig } from '@contextflow/backend';
 import { AppModule } from './app.module.js';
 
 async function bootstrap(): Promise<void> {
   const config = loadRuntimeConfig();
-  const app = await NestFactory.create(AppModule, { logger: false });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
+  app.useBodyParser('json', { limit: '1mb' });
 
   app.getHttpAdapter().getInstance().disable('x-powered-by');
   app.enableShutdownHooks();

@@ -13,8 +13,13 @@ let admin;
 let databaseName;
 let databaseCreated = false;
 
-function safeFailure() {
-  process.stderr.write(`Test migration verification failed at ${stage}.\n`);
+function safeFailure(error) {
+  const code = typeof error?.code === 'string' ? error.code : 'unknown';
+  const constraint = typeof error?.constraint === 'string' ? error.constraint.replace(/[^A-Za-z0-9_]/g, '').slice(0, 96) : 'none';
+  const reason = code === 'unknown' && typeof error?.message === 'string'
+    ? error.message.replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 100)
+    : 'none';
+  process.stderr.write(`Test migration verification failed at ${stage} (db-code=${code}, constraint=${constraint}, reason=${reason || 'none'}).\n`);
   process.exitCode = 1;
 }
 
@@ -101,6 +106,16 @@ async function checkRuntime(runtimeUrl) {
         if (!allowed.rows[0]?.allowed) throw new Error('project-table-privilege');
       }
     }
+    for (const [table, privileges] of [
+      ['Material', ['SELECT', 'INSERT', 'UPDATE']],
+      ['SourceSnapshot', ['SELECT', 'INSERT']],
+      ['SourceFragment', ['SELECT', 'INSERT']],
+    ]) {
+      for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+        const result = await runtime.query('SELECT has_table_privilege(current_user, $1, $2) AS allowed', [`contextflow."${table}"`, privilege]);
+        if (Boolean(result.rows[0]?.allowed) !== privileges.includes(privilege)) throw new Error('source-table-privilege');
+      }
+    }
     await runtime.query('BEGIN');
     await runtime.query(`INSERT INTO contextflow."UserProfile" ("id", "displayName") VALUES ('00000000-0000-4000-8000-000000000001', 'migration verifier')`);
     const preferenceDefault = await runtime.query(`SELECT "idleTimeoutMinutes" FROM contextflow."UserProfile" WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
@@ -114,9 +129,18 @@ async function checkRuntime(runtimeUrl) {
       await runtime.query('RELEASE SAVEPOINT personal_idle_check');
       if (!rejected) throw new Error('personal-idle-check-constraint');
     }
+    await runtime.query('SAVEPOINT external_acceptance_check');
+    let unpairedAcceptanceRejected = false;
+    try { await runtime.query(`UPDATE contextflow."UserProfile" SET "externalProcessingNoticeVersion" = 'notice-v1' WHERE "id" = '00000000-0000-4000-8000-000000000001'`); }
+    catch (error) { unpairedAcceptanceRejected = error?.code === '23514'; }
+    await runtime.query('ROLLBACK TO SAVEPOINT external_acceptance_check');
+    await runtime.query('RELEASE SAVEPOINT external_acceptance_check');
+    if (!unpairedAcceptanceRejected) throw new Error('external-processing-acceptance-pair-check');
+    await runtime.query(`UPDATE contextflow."UserProfile" SET "externalProcessingNoticeVersion" = 'notice-v1', "externalProcessingAcceptedAt" = CURRENT_TIMESTAMP WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
     await runtime.query(`INSERT INTO contextflow."AppSession" ("id", "cookieDigest", "userId", "encryptedProviderTokens", "tokenKeyVersion", "providerTokenExpiresAt", "expiresAt") VALUES ('00000000-0000-4000-8000-000000000002', repeat('a', 64), '00000000-0000-4000-8000-000000000001', 'test-only-ciphertext-placeholder', 1, CURRENT_TIMESTAMP + interval '1 hour', CURRENT_TIMESTAMP + interval '1 day')`);
     await runtime.query(`UPDATE contextflow."UserProfile" SET "displayName" = 'migration verifier updated' WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
     const projectId = '00000000-0000-4000-8000-000000000003';
+    const secondProjectId = '00000000-0000-4000-8000-000000000011';
     const userId = '00000000-0000-4000-8000-000000000001';
     const workspaceId = '00000000-0000-4000-8000-000000000009';
     await runtime.query(`INSERT INTO contextflow."Workspace" ("id", "name", "ownerId") VALUES ($1, 'migration verifier', $2)`, [workspaceId, userId]);
@@ -124,6 +148,7 @@ async function checkRuntime(runtimeUrl) {
     await runtime.query(`INSERT INTO contextflow."WorkspaceStyleRevision" ("workspaceId", "revision", "createdBy") VALUES ($1, 1, $2)`, [workspaceId, userId]);
     await runtime.query(`INSERT INTO contextflow."WorkspaceInvite" ("id", "workspaceId", "email", "tokenDigest", "invitedBy", "expiresAt") VALUES ('00000000-0000-4000-8000-000000000010', $1, 'recipient@example.test', repeat('b', 64), $2, CURRENT_TIMESTAMP + interval '1 day')`, [workspaceId, userId]);
     await runtime.query(`INSERT INTO contextflow."Project" ("id", "workspaceId", "topic", "formats", "createdBy") VALUES ($1, $2, 'synthetic article project', ARRAY['ARTICLE']::contextflow."ProjectFormat"[], $3)`, [projectId, workspaceId, userId]);
+    await runtime.query(`INSERT INTO contextflow."Project" ("id", "workspaceId", "topic", "formats", "createdBy") VALUES ($1, $2, 'second synthetic project', ARRAY['ARTICLE']::contextflow."ProjectFormat"[], $3)`, [secondProjectId, workspaceId, userId]);
     await runtime.query(`INSERT INTO contextflow."ProjectMember" ("projectId", "userId") VALUES ('00000000-0000-4000-8000-000000000003', '00000000-0000-4000-8000-000000000001')`);
     const allFormats = ['ARTICLE', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_COVER', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'TELEGRAM_POST'];
     const eightSelection = await runtime.query(`UPDATE contextflow."Project" SET "formats" = $1::contextflow."ProjectFormat"[] WHERE "id" = $2 RETURNING cardinality("formats") AS format_count, 'ARTICLE' = ANY("formats") AS article_selected`, [allFormats, projectId]);
@@ -146,18 +171,41 @@ async function checkRuntime(runtimeUrl) {
       if (!checkRejected) throw new Error('project-format-check-constraint');
     }
     await runtime.query(`INSERT INTO contextflow."Asset" ("id", "projectId", "bucket", "objectKey", "mediaType", "bytes", "sha256", "purpose", "createdBy") VALUES ('00000000-0000-4000-8000-000000000004', '00000000-0000-4000-8000-000000000003', 'private-assets', '00000000-0000-4000-8000-000000000003/fixture.txt', 'text/plain', 1, repeat('a', 64), 'ORIGINAL', '00000000-0000-4000-8000-000000000001')`);
+    stage = 'runtime-source-second-asset';
+    await runtime.query(`INSERT INTO contextflow."Asset" ("id", "projectId", "bucket", "objectKey", "mediaType", "bytes", "sha256", "purpose", "createdBy") VALUES ('00000000-0000-4000-8000-000000000012', $1, 'private-assets', $1::uuid::text || '/fixture.txt', 'text/plain', 3, repeat('c', 64), 'ORIGINAL', $2)`, [secondProjectId, userId]);
+    stage = 'runtime-source-materials';
+    const materialId = '00000000-0000-4000-8000-000000000013';
+    const otherMaterialId = '00000000-0000-4000-8000-000000000014';
+    const snapshotId = '00000000-0000-4000-8000-000000000015';
+    const secondSnapshotId = '00000000-0000-4000-8000-000000000016';
+    const otherSnapshotId = '00000000-0000-4000-8000-000000000017';
+    await runtime.query(`INSERT INTO contextflow."Material" ("id", "projectId", "kind", "purpose", "label", "createdBy") VALUES ($1, $2, 'TEXT', 'FACTUAL_SOURCE', 'Synthetic source', $3), ($4, $5, 'FILE', 'FACTUAL_SOURCE', 'Other project source', $3)`, [materialId, projectId, userId, otherMaterialId, secondProjectId]);
+    stage = 'runtime-source-snapshots';
+    await runtime.query(`INSERT INTO contextflow."SourceSnapshot" ("id", "projectId", "materialId", "sequence", "normalizedText", "sha256", "bytes", "origin", "originalAssetId", "originalFilename", "createdBy") VALUES ($1, $2, $3, 1, 'abc', encode(sha256(convert_to('abc', 'UTF8')), 'hex'), 3, 'LOCAL_FILE', '00000000-0000-4000-8000-000000000004', 'fixture.txt', $4)`, [snapshotId, projectId, materialId, userId]);
+    await runtime.query(`UPDATE contextflow."Material" SET "currentSnapshotId" = $1, "revision" = "revision" + 1, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = $2`, [snapshotId, materialId]);
+    await runtime.query(`INSERT INTO contextflow."SourceSnapshot" ("id", "projectId", "materialId", "sequence", "normalizedText", "sha256", "bytes", "origin", "previousSnapshotId", "createdBy") VALUES ($1, $2, $3, 2, 'abcd', encode(sha256(convert_to('abcd', 'UTF8')), 'hex'), 4, 'MANUAL_TEXT', $4, $5)`, [secondSnapshotId, projectId, materialId, snapshotId, userId]);
+    await runtime.query(`INSERT INTO contextflow."SourceSnapshot" ("id", "projectId", "materialId", "sequence", "normalizedText", "sha256", "bytes", "origin", "createdBy") VALUES ($1, $2, $3, 1, 'xyz', encode(sha256(convert_to('xyz', 'UTF8')), 'hex'), 3, 'MANUAL_TEXT', $4)`, [otherSnapshotId, secondProjectId, otherMaterialId, userId]);
+    await runtime.query(`INSERT INTO contextflow."SourceFragment" ("id", "projectId", "snapshotId", "ordinal", "startOffset", "endOffset", "sha256") VALUES ('00000000-0000-4000-8000-000000000018', $1, $2, 1, 0, 3, encode(sha256(convert_to('abc', 'UTF8')), 'hex'))`, [projectId, snapshotId]);
+
+    const assertRejected = async (savepoint, expectedCode, action, failure) => {
+      await runtime.query(`SAVEPOINT ${savepoint}`);
+      let rejected = false;
+      try { await action(); } catch (error) { rejected = error?.code === expectedCode; }
+      await runtime.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await runtime.query(`RELEASE SAVEPOINT ${savepoint}`);
+      if (!rejected) throw new Error(failure);
+    };
+    await assertRejected('source_cross_asset', '23503', () => runtime.query(`INSERT INTO contextflow."SourceSnapshot" ("id", "projectId", "materialId", "sequence", "normalizedText", "sha256", "bytes", "origin", "originalAssetId", "originalFilename", "previousSnapshotId", "createdBy") VALUES ('00000000-0000-4000-8000-000000000019', $1, $2, 3, 'abc', encode(sha256(convert_to('abc', 'UTF8')), 'hex'), 3, 'MANUAL_TEXT', '00000000-0000-4000-8000-000000000012', 'other.txt', $3, $4)`, [projectId, materialId, secondSnapshotId, userId]), 'cross-project-original-asset-fk');
+    await assertRejected('source_cross_previous', '23514', () => runtime.query(`INSERT INTO contextflow."SourceSnapshot" ("id", "projectId", "materialId", "sequence", "normalizedText", "sha256", "bytes", "origin", "previousSnapshotId", "createdBy") VALUES ('00000000-0000-4000-8000-000000000020', $1, $2, 3, 'abc', encode(sha256(convert_to('abc', 'UTF8')), 'hex'), 3, 'MANUAL_TEXT', $3, $4)`, [projectId, materialId, otherSnapshotId, userId]), 'cross-project-previous-snapshot-rejected');
+    await assertRejected('source_cross_fragment', '23503', () => runtime.query(`INSERT INTO contextflow."SourceFragment" ("id", "projectId", "snapshotId", "ordinal", "startOffset", "endOffset", "sha256") VALUES ('00000000-0000-4000-8000-000000000021', $1, $2, 1, 0, 1, repeat('a', 64))`, [projectId, otherSnapshotId]), 'cross-project-fragment-snapshot-fk');
+    await assertRejected('source_cross_current', '23503', () => runtime.query(`UPDATE contextflow."Material" SET "currentSnapshotId" = $1, "revision" = "revision" + 1 WHERE "id" = $2`, [otherSnapshotId, materialId]), 'cross-project-material-current-snapshot-fk');
+    await assertRejected('source_snapshot_immutable', '42501', () => runtime.query(`UPDATE contextflow."SourceSnapshot" SET "normalizedText" = 'edited' WHERE "id" = $1`, [snapshotId]), 'runtime-source-snapshot-update-denied');
+    await assertRejected('source_fragment_immutable', '42501', () => runtime.query(`UPDATE contextflow."SourceFragment" SET "endOffset" = 2 WHERE "snapshotId" = $1`, [snapshotId]), 'runtime-source-fragment-update-denied');
+    await assertRejected('source_referenced_asset', '23514', () => runtime.query(`UPDATE contextflow."Asset" SET "objectKey" = $1 WHERE "id" = '00000000-0000-4000-8000-000000000004'`, [projectId + '/changed.txt']), 'referenced-source-original-metadata-immutable');
+    await assertRejected('source_invalid_range', '23514', () => runtime.query(`INSERT INTO contextflow."SourceFragment" ("id", "projectId", "snapshotId", "ordinal", "startOffset", "endOffset", "sha256") VALUES ('00000000-0000-4000-8000-000000000022', $1, $2, 1, 4, 3, repeat('a', 64))`, [projectId, snapshotId]), 'source-fragment-range-check');
     await runtime.query(`UPDATE contextflow."Project" SET "topic" = 'updated synthetic project', "revision" = "revision" + 1 WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
     await runtime.query(`UPDATE contextflow."Asset" SET "state" = 'AVAILABLE' WHERE "id" = '00000000-0000-4000-8000-000000000004'`);
     await runtime.query(`UPDATE contextflow."ProjectMember" SET "leftAt" = CURRENT_TIMESTAMP WHERE "projectId" = '00000000-0000-4000-8000-000000000003'`);
-    await runtime.query(`DELETE FROM contextflow."Asset" WHERE "id" = '00000000-0000-4000-8000-000000000004'`);
-    await runtime.query(`DELETE FROM contextflow."ProjectMember" WHERE "projectId" = '00000000-0000-4000-8000-000000000003'`);
-    await runtime.query(`DELETE FROM contextflow."Project" WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
-    await runtime.query(`DELETE FROM contextflow."WorkspaceInvite" WHERE "workspaceId" = $1`, [workspaceId]);
-    await runtime.query(`DELETE FROM contextflow."WorkspaceStyleRevision" WHERE "workspaceId" = $1`, [workspaceId]);
-    await runtime.query(`DELETE FROM contextflow."WorkspaceMember" WHERE "workspaceId" = $1`, [workspaceId]);
-    await runtime.query(`DELETE FROM contextflow."Workspace" WHERE "id" = $1`, [workspaceId]);
-    await runtime.query(`DELETE FROM contextflow."AppSession" WHERE "id" = '00000000-0000-4000-8000-000000000002'`);
-    await runtime.query(`DELETE FROM contextflow."UserProfile" WHERE "id" = '00000000-0000-4000-8000-000000000001'`);
     await runtime.query('ROLLBACK');
 
     stage = 'runtime-private-metadata';
@@ -185,6 +233,45 @@ async function checkRuntime(runtimeUrl) {
   } finally {
     await runtime.query('ROLLBACK').catch(() => {});
     await runtime.end().catch(() => {});
+  }
+}
+
+async function checkMigrationSourceGuards(migrationUrl) {
+  const migration = new Client({ connectionString: migrationUrl, ssl: false, application_name: 'contextflow-migration-verifier-source-guards', connectionTimeoutMillis: 5000 });
+  try {
+    await migration.connect();
+    await migration.query('BEGIN');
+    const userId = '00000000-0000-4000-8000-000000000031';
+    const workspaceId = '00000000-0000-4000-8000-000000000032';
+    const projectId = '00000000-0000-4000-8000-000000000033';
+    const assetId = '00000000-0000-4000-8000-000000000034';
+    const materialId = '00000000-0000-4000-8000-000000000035';
+    const snapshotId = '00000000-0000-4000-8000-000000000036';
+    await migration.query(`INSERT INTO contextflow."UserProfile" ("id", "displayName") VALUES ($1, 'source guard verifier')`, [userId]);
+    await migration.query(`INSERT INTO contextflow."Workspace" ("id", "name", "ownerId") VALUES ($1, 'source guard verifier', $2)`, [workspaceId, userId]);
+    await migration.query(`INSERT INTO contextflow."WorkspaceMember" ("workspaceId", "userId") VALUES ($1, $2)`, [workspaceId, userId]);
+    await migration.query(`INSERT INTO contextflow."WorkspaceStyleRevision" ("workspaceId", "revision", "createdBy") VALUES ($1, 1, $2)`, [workspaceId, userId]);
+    await migration.query(`INSERT INTO contextflow."Project" ("id", "workspaceId", "topic", "formats", "createdBy") VALUES ($1, $2, 'source guard verifier', ARRAY['ARTICLE']::contextflow."ProjectFormat"[], $3)`, [projectId, workspaceId, userId]);
+    await migration.query(`INSERT INTO contextflow."Asset" ("id", "projectId", "bucket", "objectKey", "mediaType", "bytes", "sha256", "purpose", "createdBy") VALUES ($1, $2, 'private-assets', $2::uuid::text || '/source.txt', 'text/plain', 3, encode(sha256(convert_to('abc', 'UTF8')), 'hex'), 'ORIGINAL', $3)`, [assetId, projectId, userId]);
+    await migration.query(`INSERT INTO contextflow."Material" ("id", "projectId", "kind", "purpose", "label", "createdBy") VALUES ($1, $2, 'FILE', 'FACTUAL_SOURCE', 'Guard source', $3)`, [materialId, projectId, userId]);
+    await migration.query(`INSERT INTO contextflow."SourceSnapshot" ("id", "projectId", "materialId", "sequence", "normalizedText", "sha256", "bytes", "origin", "originalAssetId", "originalFilename", "createdBy") VALUES ($1, $2, $3, 1, 'abc', encode(sha256(convert_to('abc', 'UTF8')), 'hex'), 3, 'LOCAL_FILE', $4, 'source.txt', $5)`, [snapshotId, projectId, materialId, assetId, userId]);
+    await migration.query(`INSERT INTO contextflow."SourceFragment" ("id", "projectId", "snapshotId", "ordinal", "startOffset", "endOffset", "sha256") VALUES ('00000000-0000-4000-8000-000000000037', $1, $2, 1, 0, 3, encode(sha256(convert_to('abc', 'UTF8')), 'hex'))`, [projectId, snapshotId]);
+
+    const assertGuarded = async (savepoint, action, failure) => {
+      await migration.query(`SAVEPOINT ${savepoint}`);
+      let rejected = false;
+      try { await action(); } catch (error) { rejected = error?.code === '23514'; }
+      await migration.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await migration.query(`RELEASE SAVEPOINT ${savepoint}`);
+      if (!rejected) throw new Error(failure);
+    };
+    await assertGuarded('snapshot_immutability_guard', () => migration.query(`UPDATE contextflow."SourceSnapshot" SET "normalizedText" = 'edited' WHERE "id" = $1`, [snapshotId]), 'source-snapshot-update-trigger');
+    await assertGuarded('fragment_immutability_guard', () => migration.query(`UPDATE contextflow."SourceFragment" SET "endOffset" = 2 WHERE "snapshotId" = $1`, [snapshotId]), 'source-fragment-update-trigger');
+    await assertGuarded('asset_metadata_guard', () => migration.query(`UPDATE contextflow."Asset" SET "objectKey" = $1 WHERE "id" = $2`, [projectId + '/changed.txt', assetId]), 'referenced-asset-metadata-trigger');
+    await migration.query('ROLLBACK');
+  } finally {
+    await migration.query('ROLLBACK').catch(() => {});
+    await migration.end().catch(() => {});
   }
 }
 
@@ -250,8 +337,8 @@ try {
       && actualMigrations.every((row, index) => row.migration_name === expectedMigrations[index] && row.finished_at !== null && row.rolled_back_at === null);
     const checks = await migrated.query(`
       SELECT
-        (SELECT count(*) = 9 FROM information_schema.tables
-          WHERE table_schema = 'contextflow' AND table_name IN ('UserProfile', 'AppSession', 'Workspace', 'WorkspaceMember', 'WorkspaceInvite', 'WorkspaceStyleRevision', 'Project', 'ProjectMember', 'Asset')) AS app_tables_ok,
+        (SELECT count(*) = 12 FROM information_schema.tables
+          WHERE table_schema = 'contextflow' AND table_name IN ('UserProfile', 'AppSession', 'Workspace', 'WorkspaceMember', 'WorkspaceInvite', 'WorkspaceStyleRevision', 'Project', 'ProjectMember', 'Asset', 'Material', 'SourceSnapshot', 'SourceFragment')) AS app_tables_ok,
         (SELECT count(*) = 7 FROM pg_constraint c
           JOIN pg_class t ON t.oid = c.conrelid
           JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -270,9 +357,11 @@ try {
 
   stage = 'runtime-privileges';
   await checkRuntime(runtimeUrl);
+  stage = 'migration-source-immutability';
+  await checkMigrationSourceGuards(migrationUrl);
   stage = 'complete';
-} catch {
-  safeFailure();
+} catch (error) {
+  safeFailure(error);
 } finally {
   if (admin && databaseCreated && /^cf_m12_migration_[a-f0-9]{32}$/.test(databaseName ?? '')) {
     stage = 'drop-disposable-database';
@@ -289,5 +378,5 @@ try {
 }
 
 if (process.exitCode !== 1) {
-  process.stdout.write('Verified all Prisma migrations, app tables and constraints, runtime table permissions, private migration metadata, and no auth schema; disposable database removed.\n');
+  process.stdout.write('Verified all Prisma migrations, source integrity and isolation constraints, immutable source write permissions, runtime table permissions, private migration metadata, and no auth schema; disposable database removed.\n');
 }

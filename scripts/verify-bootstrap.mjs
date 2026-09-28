@@ -91,7 +91,7 @@ for (const [name, settings] of Object.entries(expectedTables)) {
   check(lines.length === Object.keys(settings).length, `Unexpected settings in ${name}`);
   for (const [key, value] of Object.entries(settings)) check(lines.includes(`${key} = ${value}`), `Config setting mismatch: ${name}.${key}`);
 }
-const roles = { explorer: ['gpt-6-luna', 'high', 'read-only'], researcher: ['gpt-6-luna', 'high', 'read-only'], implementer: ['gpt-6-luna', 'high', 'workspace-write'], tester: ['gpt-6-luna', 'high', 'workspace-write'], tester_debug: ['gpt-6-luna', 'xhigh', 'workspace-write'], reviewer: ['gpt-6-sol', 'high', 'read-only'] };
+const roles = { explorer: ['gpt-6-luna', 'high', 'read-only'], researcher: ['gpt-6-luna', 'high', 'read-only'], implementer: ['gpt-6-luna', 'high', 'workspace-write'], tester: ['gpt-6-luna', 'high', 'workspace-write'], tester_debug: ['gpt-6-luna', 'xhigh', 'workspace-write'], reviewer: ['gpt-6-sol', 'medium', 'read-only'] };
 for (const [role, [model, effort, sandbox]] of Object.entries(roles)) {
   const t = read(`.codex/agents/${role}.toml`);
   for (const [key, value] of Object.entries({ name: role, model, model_reasoning_effort: effort, sandbox_mode: sandbox })) check(t.includes(`${key} = "${value}"`), `Role ${role} mismatch ${key}`);
