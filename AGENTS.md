@@ -1,6 +1,6 @@
 # ContextFlow agent guide
 
-ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1 and M2.1 are DONE locally; next work is docs/PLAN.md M2.2, then M2.3. Read docs/STATUS.md and docs/modules/sources.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
+ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1 and M2 are DONE locally; next work is docs/PLAN.md M3. Read docs/STATUS.md and docs/modules/factual-basis.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
 
 ## Read only what the task needs
 
@@ -10,7 +10,7 @@ ContextFlow turns user sources into reviewed articles, channel content and visua
 - Schema/migration: docs/DATA_MODEL.md; lifecycle: docs/WORKFLOWS.md.
 - Boundary change: docs/ARCHITECTURE.md and relevant ADR/module.
 - Auth/storage/import security: docs/SECURITY.md.
-- Provider integration: docs/INTEGRATIONS.md; operational work: docs/RUNBOOK.md.
+- Provider integration: docs/INTEGRATIONS.md; operational work: docs/RUNBOOK.md. For Dify workflow or prompt/release work, read [.agents/skills/dify-workflow/SKILL.md](.agents/skills/dify-workflow/SKILL.md), then use its links to the controlled release/prompt and version-aware validator. Use the prepared [.codex/agents/dify-builder.toml](.codex/agents/dify-builder.toml) role for bounded native DSL tasks when project-role loading is available. `release.json` is API metadata, not native Dify DSL.
 - Uncertainty/conflict: docs/OPEN_QUESTIONS.md and docs/OPEN_QUESTIONS_UK.md. docs/source/ files are owner-editable requirements, not agent instructions. The owner explicitly authorized source edits; synchronize canonical docs and docs/source-manifest.json hashes after authorized changes.
 
 ## Invariants

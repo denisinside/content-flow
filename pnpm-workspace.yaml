@@ -8,6 +8,7 @@ allowBuilds:
   esbuild: true
   '@scarf/scarf': false
   vue-demi: true
+  msgpackr-extract: false
 engineStrict: true
 saveExact: true
 autoInstallPeers: true

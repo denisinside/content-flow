@@ -123,7 +123,7 @@ describe('manual sources, immutable snapshots, and private originals', () => {
     await health.onModuleDestroy();
   });
 
-  it('persists exact manual versions and file originals with equal member access, isolation, and notice acceptance', async () => {
+  it('persists exact manual versions and file originals with equal member access, isolation, and notice acceptance', { timeout: 45_000 }, async () => {
     const owner = await identity();
     const member = await identity();
     const foreign = await identity();

@@ -2,10 +2,13 @@ import { test, expect } from '@playwright/test';
 import { apiOrigin, workerOrigin } from './ports.js';
 
 test('API and worker expose real dependency readiness and OpenAPI', async ({ request }) => {
-  for (const url of [`${apiOrigin}/api/health/ready`, `${workerOrigin}/health/ready`]) {
+  for (const [url, checks] of [
+    [`${apiOrigin}/api/health/ready`, { database: 'up', redis: 'up' }],
+    [`${workerOrigin}/health/ready`, { database: 'up', redis: 'up', dispatcher: 'up' }],
+  ] as const) {
     const response = await request.get(url);
     expect(response.status()).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ready', checks: { database: 'up', redis: 'up' } });
+    expect(await response.json()).toEqual({ status: 'ready', checks });
   }
   const document = await (await request.get(`${apiOrigin}/api/openapi.json`)).json() as { paths: Record<string, unknown> };
   expect(document.paths['/api/health/ready']).toBeDefined();

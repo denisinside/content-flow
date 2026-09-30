@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "contextflow-dify-release-v1",
+  "operation": "CLAIM_EXTRACTION",
+  "releaseId": "claim-extraction-2026-09-30.1",
+  "configDigest": "9c8619e05041a0de3c3eb4fb925b96c68bb7b0166d6be1dfc7f259e750f9af3c",
+  "publishedWorkflowIdEnv": "DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_CLAIM_EXTRACTION_CONFIG_SHA256",
+  "apiBaseEnv": "DIFY_API_BASE_URL",
+  "apiKeyEnv": "DIFY_CLAIM_EXTRACTION_API_KEY",
+  "contractVersion": "claims-v1",
+  "promptTemplateVersion": "claims-extraction-prompt-v1",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "668c4d0ba69480f85d194d23700bc0c0b92fb5d4c963a4af7fbf336f4989b5bc",
+  "inputVariable": "sources_json",
+  "outputVariable": "claims_json",
+  "responseMode": "streaming",
+  "provider": "dify",
+  "model": {
+    "provider": "openai",
+    "name": "gpt-4.1-mini",
+    "mode": "chat",
+    "completionParams": {
+      "temperature": 0,
+      "max_tokens": 8192
+    }
+  },
+  "workflowDslFile": "claim-extraction-v1.yml",
+  "workflowDslSha256": "fd2cb307a0fdbba610365378316687b66777c2506f57a86c3ec1dacc17bb853d"
+}

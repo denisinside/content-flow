@@ -11,6 +11,21 @@ test-results/
 .private-assets-test/
 packages/backend/src/generated/
 .pnpm-store/
+.venv-dify-validator/
 .codex
 .agents
 docs/
+
+# Track only the reusable Dify workflow guidance and specialist role.
+!.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/dify-workflow/
+.agents/skills/dify-workflow/*
+!.agents/skills/dify-workflow/SKILL.md
+!.codex/
+.codex/*
+!.codex/agents/
+.codex/agents/*
+!.codex/agents/dify-builder.toml

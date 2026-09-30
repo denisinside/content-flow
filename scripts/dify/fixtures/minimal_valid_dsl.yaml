@@ -1,0 +1,77 @@
+{
+  "app": {
+    "name": "Synthetic validator fixture"
+  },
+  "kind": "app",
+  "version": "0.7.0",
+  "workflow": {
+    "environment_variables": [],
+    "graph": {
+      "nodes": [
+        {
+          "id": "start",
+          "type": "custom",
+          "data": {
+            "type": "start",
+            "title": "Start"
+          }
+        },
+        {
+          "id": "code-1",
+          "type": "custom",
+          "data": {
+            "type": "code",
+            "title": "Format text",
+            "code_language": "python3",
+            "variables": [
+              {
+                "variable": "input_text",
+                "value_selector": ["start", "input"]
+              }
+            ],
+            "code": "def main(input_text):\n    return {\"result\": input_text}\n",
+            "outputs": {
+              "result": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "id": "template-1",
+          "type": "custom",
+          "data": {
+            "type": "template-transform",
+            "title": "Format output",
+            "variables": [
+              {
+                "variable": "result",
+                "value_selector": ["code-1", "result"]
+              }
+            ],
+            "template": "{{ result }}"
+          }
+        },
+        {
+          "id": "end",
+          "type": "custom",
+          "data": {
+            "type": "end",
+            "title": "Output",
+            "outputs": [
+              {
+                "variable": "answer",
+                "value_selector": ["template-1", "output"]
+              }
+            ]
+          }
+        }
+      ],
+      "edges": [
+        {"id": "edge-1", "source": "start", "target": "code-1", "sourceHandle": "source"},
+        {"id": "edge-2", "source": "code-1", "target": "template-1", "sourceHandle": "source"},
+        {"id": "edge-3", "source": "template-1", "target": "end", "sourceHandle": "source"}
+      ]
+    }
+  }
+}

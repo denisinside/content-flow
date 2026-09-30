@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import ImportJobs from './ImportJobs.vue'
+import SourceComparison from './SourceComparison.vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
@@ -7,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea'
 
 const TEXT_LIMIT = 200_000
 const FILE_LIMIT = 1_048_576
+const DOCUMENT_LIMIT = 10_485_760
 
 type Purpose = 'FACTUAL_SOURCE' | 'NOTES' | 'SUPPLIED_ARTICLE' | 'BRANDBOOK' | 'STYLE_SAMPLE'
 
@@ -21,6 +24,9 @@ interface Material {
   currentSnapshotId: string | null
   createdAt: string
   updatedAt: string
+  sourceUrl?: string | null
+  originalAssetId?: string | null
+  originalFilename?: string | null
 }
 
 interface SnapshotSummary {
@@ -40,6 +46,9 @@ interface Snapshot extends SnapshotSummary {
   sha256: string
   bytes: number
   previousSnapshotId: string | null
+  retrievedAt?: string | null
+  jobId?: string | null
+  providerMetadata?: Record<string, unknown> | null
   fragments: { id: string; ordinal: number; startOffset: number; endOffset: number; sha256: string }[]
 }
 
@@ -66,7 +75,7 @@ const selectedSnapshot = ref<Snapshot | null>(null)
 const listState = ref<'loading' | 'ready' | 'error'>('loading')
 const detailState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const errorMessage = ref('')
-const mode = ref<'text' | 'upload'>('text')
+const mode = ref<'text' | 'upload' | 'url' | 'document'>('text')
 const label = ref('')
 const purpose = ref<Purpose>('FACTUAL_SOURCE')
 const text = ref('')
@@ -77,9 +86,19 @@ const editorMessage = ref('')
 const refreshAvailable = ref(false)
 const externalNoticeRequired = ref(false)
 const includeBusyId = ref<string | null>(null)
+const sourceUrl = ref('')
+const importRevision = ref(0)
+const importMessage = ref('')
+const manualFallback = ref(false)
+const comparisonOpen = ref(false)
+const comparisonButton = ref<InstanceType<typeof Button> | null>(null)
+const canReimport = computed(() => selectedMaterial.value?.kind === 'URL' || (selectedMaterial.value?.kind === 'FILE' && /\.(pdf|docx)$/i.test(selectedMaterial.value.originalFilename ?? '')))
+const originalUrl = computed(() => /^https?:\/\//i.test(selectedMaterial.value?.sourceUrl ?? '') ? selectedMaterial.value?.sourceUrl : null)
 const textCount = computed(() => text.value.length)
 const editorCount = computed(() => editorText.value.length)
-const canAdd = computed(() => listState.value === 'ready' && !busy.value && !editing.value && label.value.trim().length > 0 && (mode.value === 'upload' || (textCount.value > 0 && textCount.value <= TEXT_LIMIT)))
+const canAdd = computed(() => listState.value === 'ready' && !busy.value && !editing.value && label.value.trim().length > 0 && (mode.value === 'upload' || mode.value === 'document' || (mode.value === 'url' && sourceUrl.value.trim().length > 0) || (mode.value === 'text' && textCount.value > 0 && textCount.value <= TEXT_LIMIT)))
+let commandKey = ''
+let commandPayload = ''
 
 let epoch = 0
 let controller: AbortController | null = null
@@ -96,6 +115,10 @@ function originLabel(value: string) {
     MANUAL_EDIT: 'Нова версія вручну',
     UPLOAD: 'Завантажено файлом',
     FILE_UPLOAD: 'Завантажено файлом',
+    WEB_IMPORT: 'Імпортовано зі сторінки',
+    URL_IMPORT: 'Імпортовано зі сторінки',
+    DOCUMENT_IMPORT: 'Виділено текст документа',
+    DOCLING: 'Виділено текст документа',
   }
   return labels[value] ?? value
 }
@@ -126,7 +149,7 @@ function readableError(status: number, operation: 'load' | 'write') {
   if (status === 403) return 'Доступ до цієї дії не дозволено. Перевірте повідомлення про зовнішню обробку та потрібну згоду.'
   if (status === 409) return 'Джерело вже змінилося в іншій вкладці. Ваш текст збережено тут; оновіть джерело перед новою спробою.'
   if (status === 413) return 'Файл або текст завеликий для цього джерела.'
-  if (status === 415 || status === 400) return 'Перевірте формат і розмір. Підтримуються UTF-8 TXT і Markdown до 1 МБ.'
+  if (status === 415 || status === 400) return 'Перевірте формат і розмір: UTF-8 TXT/Markdown до 1 МБ, PDF/DOCX до 10 МБ або доступне HTTP(S) посилання.'
   if (status === 404) return 'Проєкт або джерело більше недоступні.'
   if (status === 503) return 'Сервіс джерел тимчасово недоступний. Спробуйте ще раз.'
   return operation === 'load'
@@ -170,6 +193,8 @@ async function loadMaterial(materialId: string, snapshotId?: string) {
   selectedSnapshot.value = null
   snapshots.value = []
   editing.value = false
+  manualFallback.value = false
+  comparisonOpen.value = false
   detailState.value = 'loading'
   errorMessage.value = ''
   try {
@@ -231,6 +256,9 @@ async function reloadSources() {
 function clearCreateForm() {
   label.value = ''
   text.value = ''
+  sourceUrl.value = ''
+  commandKey = ''
+  commandPayload = ''
   purpose.value = 'FACTUAL_SOURCE'
   const input = document.getElementById('source-file') as HTMLInputElement | null
   if (input) input.value = ''
@@ -241,6 +269,7 @@ async function addMaterial() {
   busy.value = true
   errorMessage.value = ''
   externalNoticeRequired.value = false
+  importMessage.value = ''
   const { signal, version } = startRequest()
   try {
     let response: Response
@@ -250,16 +279,29 @@ async function addMaterial() {
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken },
         body: JSON.stringify({ label: label.value.trim(), purpose: purpose.value, text: text.value }),
       })
+    } else if (mode.value === 'url') {
+      const payload = JSON.stringify({ label: label.value.trim(), purpose: purpose.value, url: sourceUrl.value.trim() })
+      if (commandPayload !== payload) { commandKey = crypto.randomUUID(); commandPayload = payload }
+      response = await fetch(`/api/v1/projects/${encodeURIComponent(props.projectId)}/materials/url`, {
+        method: 'POST', credentials: 'same-origin', signal,
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken },
+        body: JSON.stringify({ label: label.value.trim(), purpose: purpose.value, url: sourceUrl.value.trim(), commandKey }),
+      })
     } else {
       const input = document.getElementById('source-file') as HTMLInputElement | null
       const file = input?.files?.[0]
-      if (!file) throw new Error('Оберіть TXT або Markdown файл.')
-      if (file.size > FILE_LIMIT) throw new Error('Файл має бути не більшим за 1 МБ.')
+      if (!file) throw new Error(mode.value === 'document' ? 'Оберіть PDF або DOCX файл.' : 'Оберіть TXT або Markdown файл.')
+      if (file.size > (mode.value === 'document' ? DOCUMENT_LIMIT : FILE_LIMIT)) throw new Error(mode.value === 'document' ? 'Документ має бути не більшим за 10 МБ.' : 'Файл має бути не більшим за 1 МБ.')
       const form = new FormData()
       form.set('file', file)
       form.set('label', label.value.trim())
       form.set('purpose', purpose.value)
-      response = await fetch(`/api/v1/projects/${encodeURIComponent(props.projectId)}/materials/upload`, {
+      if (mode.value === 'document') {
+        const payload = JSON.stringify({ label: label.value.trim(), purpose: purpose.value, filename: file.name, size: file.size, lastModified: file.lastModified })
+        if (commandPayload !== payload) { commandKey = crypto.randomUUID(); commandPayload = payload }
+        form.set('commandKey', commandKey)
+      }
+      response = await fetch(`/api/v1/projects/${encodeURIComponent(props.projectId)}/materials/${mode.value === 'document' ? 'document' : 'upload'}`, {
         method: 'POST', credentials: 'same-origin', signal,
         headers: { 'X-CSRF-Token': props.csrfToken }, body: form,
       })
@@ -267,14 +309,15 @@ async function addMaterial() {
     if (!stillCurrent(version)) return
     if (handleUnauthorized(response)) return
     if (!response.ok) {
-      if (mode.value === 'upload' && response.status === 403) externalNoticeRequired.value = true
+      if (mode.value !== 'text' && response.status === 403) externalNoticeRequired.value = true
       throw new Error(readableError(response.status, 'write'))
     }
-    const result = await response.json() as { material: Material; snapshot: SnapshotSummary }
+    const result = await response.json() as { material: Material; snapshot?: SnapshotSummary; job?: { id: string } }
     if (!stillCurrent(version)) return
     clearCreateForm()
+    if (result.job) { importRevision.value += 1; importMessage.value = 'Імпорт прийнято. Стан обробки з’явиться нижче; джерело збережено у проєкті.' }
     await loadMaterials()
-    await loadMaterial(result.material.id, result.snapshot.id)
+    await loadMaterial(result.material.id, result.snapshot?.id)
   } catch (error) {
     if (!stillCurrent(version) || (error instanceof DOMException && error.name === 'AbortError')) return
     errorMessage.value = error instanceof Error ? error.message : readableError(0, 'write')
@@ -316,7 +359,79 @@ function beginEdit() {
   editorText.value = selectedSnapshot.value.normalizedText
   editorMessage.value = ''
   refreshAvailable.value = false
+  manualFallback.value = false
   editing.value = true
+}
+
+async function beginManualFallback(materialId: string) {
+  if (busy.value || editing.value || props.archived) return
+  await loadMaterial(materialId)
+  if (detailState.value !== 'ready' || selectedMaterial.value?.id !== materialId) return
+  editorText.value = ''
+  editorMessage.value = ''
+  refreshAvailable.value = false
+  manualFallback.value = true
+  editing.value = true
+  await nextTick()
+  document.getElementById('source-edit-text')?.focus()
+}
+
+let reimportCommand: { materialId: string; revision: number; key: string } | null = null
+async function startNewImport(materialId: string) {
+  if (busy.value || editing.value || props.archived) return
+  reimportCommand = null
+  if (!materials.value.some(material => material.id === materialId)) await loadMaterials()
+  if (!materials.value.some(material => material.id === materialId)) { errorMessage.value = 'Оновіть список джерел перед новим запуском імпорту.'; return }
+  await reimportMaterial(materialId)
+}
+
+async function reimportMaterial(materialId = selectedMaterial.value?.id) {
+  if (!materialId || busy.value || editing.value || props.archived) return
+  const material = materials.value.find(item => item.id === materialId) ?? (selectedMaterial.value?.id === materialId ? selectedMaterial.value : null)
+  if (!material) return
+  if (reimportCommand?.materialId !== materialId || reimportCommand.revision !== material.revision) reimportCommand = { materialId, revision: material.revision, key: crypto.randomUUID() }
+  busy.value = true
+  errorMessage.value = ''
+  externalNoticeRequired.value = false
+  const { signal, version } = startRequest()
+  try {
+    const response = await fetch(`/api/v1/projects/${encodeURIComponent(props.projectId)}/materials/${encodeURIComponent(materialId)}/reimport`, {
+      method: 'POST', credentials: 'same-origin', signal, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken },
+      body: JSON.stringify({ expectedRevision: material.revision, commandKey: reimportCommand.key }),
+    })
+    if (!stillCurrent(version)) return
+    if (handleUnauthorized(response)) return
+    if (!response.ok) {
+      if (response.status === 403) externalNoticeRequired.value = true
+      throw new Error(readableError(response.status, 'write'))
+    }
+    reimportCommand = null
+    importRevision.value += 1
+    importMessage.value = 'Новий імпорт прийнято. Попередня копія залишається доступною; результат буде окремою версією.'
+    await loadMaterials()
+  } catch (cause) { if (stillCurrent(version) && !(cause instanceof DOMException && cause.name === 'AbortError')) errorMessage.value = cause instanceof Error ? cause.message : readableError(0, 'write') }
+  finally { busy.value = false }
+}
+
+async function importCompleted(materialId: string) {
+  if (busy.value || editing.value) { importMessage.value = 'Імпорт завершено. Збережіть або скасуйте редагування, щоб відкрити новий текст.'; return }
+  importMessage.value = ''
+  const selectedId = selectedMaterial.value?.id
+  await loadMaterials()
+  if (selectedId === materialId) await loadMaterial(materialId)
+}
+
+async function closeComparison() {
+  comparisonOpen.value = false
+  await nextTick()
+  const element = comparisonButton.value?.$el as HTMLElement | undefined
+  element?.focus()
+}
+
+async function openComparison() {
+  comparisonOpen.value = true
+  await nextTick()
+  document.querySelector<HTMLElement>('.comparison-controls select')?.focus()
 }
 
 async function saveSnapshot() {
@@ -403,7 +518,7 @@ async function refreshLatestAndKeepDraft() {
   }
 }
 
-async function downloadOriginal(snapshot: Snapshot) {
+async function downloadOriginal(snapshot: { originalAssetId?: string | null; originalFilename?: string | null }) {
   if (!snapshot.originalAssetId || busy.value || editing.value) return
   const { signal, version } = startRequest()
   errorMessage.value = ''
@@ -500,6 +615,22 @@ onBeforeUnmount(() => {
           >
             TXT / Markdown
           </button>
+          <button
+            type="button"
+            :aria-pressed="mode === 'url'"
+            :disabled="busy"
+            @click="mode = 'url'"
+          >
+            Посилання
+          </button>
+          <button
+            type="button"
+            :aria-pressed="mode === 'document'"
+            :disabled="busy"
+            @click="mode = 'document'"
+          >
+            PDF / DOCX
+          </button>
         </div>
       </div>
 
@@ -565,20 +696,39 @@ onBeforeUnmount(() => {
           <FieldDescription>{{ textCount.toLocaleString('uk-UA') }} / {{ TEXT_LIMIT.toLocaleString('uk-UA') }} символів · зберігається як окрема версія.</FieldDescription>
         </Field>
         <Field
-          v-else
+          v-else-if="mode === 'upload' || mode === 'document'"
           class="source-field"
         >
           <FieldLabel for="source-file">
-            Файл TXT або Markdown
+            {{ mode === 'document' ? 'Файл PDF або DOCX' : 'Файл TXT або Markdown' }}
           </FieldLabel>
           <input
             id="source-file"
             class="source-file"
             type="file"
-            accept=".txt,.md,.markdown,text/plain,text/markdown"
+            :accept="mode === 'document' ? '.pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : '.txt,.md,.markdown,text/plain,text/markdown'"
             :disabled="busy || archived"
           >
-          <FieldDescription>UTF-8, до 1 МБ. Оригінал зберігається для завантаження.</FieldDescription>
+          <FieldDescription>{{ mode === 'document' ? 'До 10 МБ. Виділяється доступний текст; для сканів можна ввести текст вручну. Оригінал зберігається.' : 'UTF-8, до 1 МБ. Оригінал зберігається для завантаження.' }}</FieldDescription>
+        </Field>
+        <Field
+          v-else
+          class="source-field"
+        >
+          <FieldLabel for="source-url">
+            Посилання на сторінку
+          </FieldLabel>
+          <input
+            id="source-url"
+            v-model="sourceUrl"
+            class="source-input"
+            type="url"
+            maxlength="2048"
+            placeholder="https://example.com/article"
+            required
+            :disabled="busy || archived"
+          >
+          <FieldDescription>Одна доступна сторінка. Збережений текст можна читати без повторного завантаження.</FieldDescription>
         </Field>
 
         <div class="source-form-actions">
@@ -591,7 +741,28 @@ onBeforeUnmount(() => {
           </Button>
         </div>
       </form>
+      <p
+        v-if="importMessage"
+        class="source-state"
+        role="status"
+      >
+        {{ importMessage }}
+      </p>
     </section>
+
+    <ImportJobs
+      :project-id="projectId"
+      :csrf-token="csrfToken"
+      :archived="archived"
+      :disabled="busy || editing"
+      :revision="importRevision"
+      :materials="materials"
+      @session-expired="emit('session-expired')"
+      @completed="importCompleted"
+      @open="loadMaterial"
+      @fallback="beginManualFallback"
+      @restart="startNewImport"
+    />
 
     <div class="sources-columns">
       <section
@@ -688,7 +859,7 @@ onBeforeUnmount(() => {
               </h3>
             </div>
             <Button
-              v-if="!editing && !archived"
+              v-if="!editing && !archived && selectedSnapshot"
               class="source-button"
               variant="outline"
               :disabled="busy || detailState !== 'ready' || !selectedSnapshot || selectedSnapshot.id !== selectedMaterial.currentSnapshotId"
@@ -696,6 +867,20 @@ onBeforeUnmount(() => {
             >
               Редагувати текст
             </Button>
+          </div>
+          <div
+            v-if="!editing && !archived && canReimport"
+            class="source-form-actions source-import-actions"
+          >
+            <Button
+              class="source-button"
+              variant="ghost"
+              :disabled="busy || detailState !== 'ready'"
+              @click="reimportMaterial()"
+            >
+              Імпортувати знову
+            </Button>
+            <span class="source-action-hint">Зберігає нову копію, попередні версії залишаються.</span>
           </div>
 
           <p
@@ -719,7 +904,7 @@ onBeforeUnmount(() => {
           >
             <Field class="source-field">
               <FieldLabel for="source-edit-text">
-                Нова версія тексту
+                {{ manualFallback ? 'Текст із оригінального джерела' : 'Нова версія тексту' }}
               </FieldLabel>
               <Textarea
                 id="source-edit-text"
@@ -731,6 +916,12 @@ onBeforeUnmount(() => {
               />
               <FieldDescription>{{ editorCount.toLocaleString('uk-UA') }} / {{ TEXT_LIMIT.toLocaleString('uk-UA') }} символів. Попередній текст залишиться в історії.</FieldDescription>
             </Field>
+            <p
+              v-if="manualFallback"
+              class="source-state"
+            >
+              Текст буде позначено як введений вручну та пов’язано з оригіналом цього джерела.
+            </p>
             <p
               v-if="editorMessage"
               class="source-inline-error"
@@ -783,7 +974,30 @@ onBeforeUnmount(() => {
                 Завантажити оригінал
               </Button>
             </div>
-            <pre class="source-plain-text">{{ selectedSnapshot.normalizedText }}</pre>
+            <pre
+              v-if="!comparisonOpen"
+              class="source-plain-text"
+            >{{ selectedSnapshot.normalizedText }}</pre>
+            <Button
+              v-if="snapshots.length > 1 && !comparisonOpen"
+              ref="comparisonButton"
+              class="source-button source-compare-trigger"
+              variant="ghost"
+              :disabled="busy || editing"
+              @click="openComparison"
+            >
+              Порівняти версії
+            </Button>
+            <SourceComparison
+              v-if="comparisonOpen"
+              :key="selectedMaterial.id"
+              :project-id="projectId"
+              :material-id="selectedMaterial.id"
+              :snapshots="snapshots"
+              :current-snapshot-id="selectedMaterial.currentSnapshotId"
+              @close="closeComparison"
+              @session-expired="emit('session-expired')"
+            />
             <details class="source-history">
               <summary>Історія версій <span>({{ snapshots.length }})</span></summary>
               <ol>
@@ -812,6 +1026,27 @@ onBeforeUnmount(() => {
                 <dt>Походження</dt><dd>{{ originLabel(selectedSnapshot.origin) }}</dd>
                 <dt>Автор версії</dt><dd>{{ selectedSnapshot.createdBy || 'Не вказано' }}</dd>
                 <dt>Фрагментів</dt><dd>{{ selectedSnapshot.fragments.length }}</dd>
+                <template v-if="originalUrl">
+                  <dt>Оригінальна сторінка</dt><dd>
+                    <a
+                      :href="originalUrl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >Перейти до оригіналу</a>
+                  </dd>
+                </template>
+                <template v-if="selectedSnapshot.retrievedAt">
+                  <dt>Отримано</dt><dd>{{ dateLabel(selectedSnapshot.retrievedAt) }}</dd>
+                </template>
+                <template v-if="selectedSnapshot.jobId">
+                  <dt>Імпорт</dt><dd>{{ selectedSnapshot.jobId }}</dd>
+                </template>
+                <template v-if="selectedSnapshot.providerMetadata?.provider">
+                  <dt>Обробка</dt><dd>{{ selectedSnapshot.providerMetadata.provider }}</dd>
+                </template>
+                <template v-if="selectedSnapshot.providerMetadata?.retrievedAt">
+                  <dt>Отримано</dt><dd>{{ dateLabel(String(selectedSnapshot.providerMetadata.retrievedAt)) }}</dd>
+                </template>
               </dl>
               <details
                 v-if="selectedSnapshot.fragments.length"
@@ -843,12 +1078,39 @@ onBeforeUnmount(() => {
               </details>
             </details>
           </div>
-          <p
+          <div
             v-else
             class="source-state"
           >
-            У цього джерела ще немає збереженого тексту.
-          </p>
+            <p>У цього джерела ще немає збереженого тексту. Стан імпорту показано вище.</p>
+            <div class="source-form-actions">
+              <Button
+                v-if="!archived"
+                class="source-button"
+                variant="outline"
+                :disabled="busy"
+                @click="beginManualFallback(selectedMaterial.id)"
+              >
+                Ввести текст вручну
+              </Button>
+              <Button
+                v-if="selectedMaterial.originalAssetId"
+                class="source-button"
+                variant="ghost"
+                :disabled="busy"
+                @click="downloadOriginal(selectedMaterial)"
+              >
+                Завантажити оригінал
+              </Button>
+              <a
+                v-if="originalUrl"
+                class="source-notice-link"
+                :href="originalUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Перейти до оригіналу</a>
+            </div>
+          </div>
         </template>
         <div
           v-else
@@ -873,6 +1135,7 @@ onBeforeUnmount(() => {
 .sources-heading h2 { margin: 0; font-family: var(--serif); font-size: 31px; font-weight: 500; line-height: 1.2; }
 .sources-lead { max-width: 640px; margin: 9px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
 .source-add { padding: 22px 0 25px; border-block: 1px solid var(--rule); }
+.source-add > .source-state { margin-top: 12px; }
 .source-section-heading, .source-reader-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .source-section-heading { margin-bottom: 20px; }
 .source-section-heading h3, .source-reader-heading h3, .source-reader-empty h3 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 500; line-height: 1.28; overflow-wrap: anywhere; }
@@ -890,6 +1153,10 @@ onBeforeUnmount(() => {
 .source-textarea { min-height: 155px; resize: vertical; line-height: 1.6; }
 .source-file { width: 100%; padding: 12px; border: 1px dashed var(--rule); background: var(--document); color: var(--ink); font: inherit; font-size: 12px; }
 .source-form-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.source-import-actions { align-items: center; margin: 0 0 14px; }
+.source-action-hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.source-compare-trigger { margin-top: 10px; }
+.source-metadata a { color: var(--copper); text-underline-offset: 3px; }
 .source-button { min-height: 38px; border-radius: 2px; font-size: 12px; }
 .source-button-primary { background: var(--copper); color: var(--document); }
 .sources-columns { display: grid; grid-template-columns: minmax(250px, .75fr) minmax(0, 1.55fr); gap: 38px; padding-top: 28px; }
@@ -939,7 +1206,7 @@ onBeforeUnmount(() => {
 .source-inline-error { color: var(--error); font-size: 12px; line-height: 1.5; }
 .source-alert { margin: 0 0 18px; }
 .source-notice-link { display: inline-block; margin-top: 10px; color: var(--copper); font-size: 12px; text-underline-offset: 3px; }
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .sources-columns { grid-template-columns: minmax(0, 1fr); gap: 27px; }
   .source-reader { min-height: unset; padding: 24px 0 0; border-top: 1px solid var(--rule); border-left: 0; }
 }
@@ -947,7 +1214,7 @@ onBeforeUnmount(() => {
   .sources-heading h2 { font-size: 28px; }
   .source-section-heading { align-items: flex-start; flex-direction: column; }
   .source-mode { width: 100%; }
-  .source-mode button { flex: 1; }
+  .source-mode button { flex: 1 1 40%; }
   .source-form-row { grid-template-columns: minmax(0, 1fr); }
   .source-reader-heading { align-items: flex-start; flex-direction: column; }
   .source-reader-heading .source-button { width: 100%; }

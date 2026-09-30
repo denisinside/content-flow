@@ -30,6 +30,17 @@ model UserProfile {
   createdAssets Asset[] @relation("AssetCreator")
   createdMaterials Material[] @relation("MaterialCreator")
   createdSnapshots SourceSnapshot[] @relation("SnapshotCreator")
+  requestedJobs Job[] @relation("JobRequester")
+  claims Claim[] @relation("ClaimCreator")
+  claimRevisions ClaimRevision[] @relation("ClaimRevisionCreator")
+  approvedClaims ClaimRevision[] @relation("ClaimApprover")
+  rejectedClaims ClaimRevision[] @relation("ClaimRejector")
+  withdrawnClaims ClaimRevision[] @relation("ClaimWithdrawer")
+  claimEvidence ClaimEvidence[] @relation("EvidenceCreator")
+  invalidatedEvidence ClaimEvidence[] @relation("EvidenceInvalidator")
+  claimConflicts ClaimConflict[] @relation("ConflictCreator")
+  resolvedConflicts ClaimConflict[] @relation("ConflictResolver")
+  factualBases FactualBasisRevision[] @relation("BasisCreator")
 
   @@schema("contextflow")
 }
@@ -124,6 +135,7 @@ enum AssetPurpose {
 enum MaterialKind {
   TEXT
   FILE
+  URL
   @@schema("contextflow")
 }
 
@@ -139,6 +151,8 @@ enum MaterialPurpose {
 enum SourceOrigin {
   MANUAL_TEXT
   LOCAL_FILE
+  WEB_IMPORT
+  DOCUMENT_IMPORT
   @@schema("contextflow")
 }
 
@@ -157,6 +171,10 @@ model Project {
   members ProjectMember[]
   assets Asset[]
   materials Material[]
+  jobs Job[]
+  claims Claim[]
+  claimConflicts ClaimConflict[]
+  factualBases FactualBasisRevision[]
   @@index([createdBy])
   @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([createdAt(sort: Desc), id(sort: Desc)])
@@ -190,6 +208,7 @@ model Asset {
   creator UserProfile @relation("AssetCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   sourceSnapshots SourceSnapshot[]
+  originalMaterials Material[] @relation("MaterialOriginal")
   @@unique([projectId, id])
   @@unique([bucket, objectKey])
   @@index([projectId, state, createdAt])
@@ -207,6 +226,10 @@ model Material {
   included Boolean @default(true)
   revision Int @default(1)
   currentSnapshotId String? @db.Uuid
+  sourceUrl String? @db.VarChar(2048)
+  originalAssetId String? @db.Uuid
+  originalFilename String? @db.VarChar(255)
+  originalAsset Asset? @relation("MaterialOriginal", fields: [projectId, originalAssetId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
   createdBy String @db.Uuid
   creator UserProfile @relation("MaterialCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
@@ -231,6 +254,9 @@ model SourceSnapshot {
   sha256 String @db.Char(64)
   bytes Int
   origin SourceOrigin
+  providerMetadata Json?
+  jobId String? @db.Uuid
+  job Job? @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
   originalAssetId String? @db.Uuid
   originalFilename String? @db.VarChar(255)
   originalAsset Asset? @relation(fields: [projectId, originalAssetId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
@@ -241,13 +267,100 @@ model SourceSnapshot {
   creator UserProfile @relation("SnapshotCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   fragments SourceFragment[]
+  claimEvidence ClaimEvidence[]
 
   @@unique([projectId, id])
+  @@unique([projectId, jobId])
   @@unique([projectId, materialId, id])
   @@unique([projectId, materialId, sequence])
   @@unique([projectId, materialId, previousSnapshotId])
   @@index([projectId, materialId, createdAt, id])
   @@index([projectId, originalAssetId])
+  @@schema("contextflow")
+}
+
+enum JobOperation {
+  WEB_IMPORT
+  DOCUMENT_IMPORT
+  CLAIM_EXTRACTION
+  @@schema("contextflow")
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  RETRY_WAIT
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  OUTCOME_UNKNOWN
+  @@schema("contextflow")
+}
+
+enum ProviderOutcome {
+  NOT_SUBMITTED
+  KNOWN_FAILED
+  KNOWN_SUCCEEDED
+  MAY_STILL_RUN
+  UNKNOWN
+  @@schema("contextflow")
+}
+
+model Job {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  requestedBy String @db.Uuid
+  requester UserProfile @relation("JobRequester", fields: [requestedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  operation JobOperation
+  contractVersion String @db.VarChar(64)
+  commandKey String @db.VarChar(128)
+  inputManifest Json
+  inputHash String @db.Char(64)
+  status JobStatus @default(QUEUED)
+  attemptCount Int @default(0)
+  fencingToken Int @default(0)
+  nextAttemptAt DateTime @default(now()) @db.Timestamptz(3)
+  deadlineAt DateTime @db.Timestamptz(3)
+  cancelRequestedAt DateTime? @db.Timestamptz(3)
+  publishedAt DateTime? @db.Timestamptz(3)
+  progressStage String @default("WAITING") @db.VarChar(64)
+  resultRefs Json?
+  errorCategory String? @db.VarChar(64)
+  providerOutcome ProviderOutcome @default(NOT_SUBMITTED)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  attempts JobAttempt[]
+  sourceSnapshots SourceSnapshot[]
+  claimRevisions ClaimRevision[]
+  aiExecutions AIExecution[]
+  @@unique([projectId, id])
+  @@unique([projectId, operation, commandKey])
+  @@index([status, nextAttemptAt])
+  @@index([projectId, createdAt, id])
+  @@schema("contextflow")
+}
+
+model JobAttempt {
+  id String @id @default(uuid()) @db.Uuid
+  jobId String @db.Uuid
+  job Job @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  ordinal Int
+  fencingToken Int
+  leaseOwner String @db.VarChar(128)
+  leaseExpiresAt DateTime @db.Timestamptz(3)
+  heartbeatAt DateTime @db.Timestamptz(3)
+  providerSubmittedAt DateTime? @db.Timestamptz(3)
+  providerRunId String? @db.VarChar(200)
+  providerOutcome ProviderOutcome @default(NOT_SUBMITTED)
+  errorCategory String? @db.VarChar(64)
+  startedAt DateTime @default(now()) @db.Timestamptz(3)
+  finishedAt DateTime? @db.Timestamptz(3)
+  aiExecutions AIExecution[]
+  @@unique([jobId, id])
+  @@unique([jobId, ordinal])
+  @@unique([jobId, fencingToken])
+  @@index([leaseExpiresAt, finishedAt])
   @@schema("contextflow")
 }
 
@@ -260,8 +373,10 @@ model SourceFragment {
   startOffset Int
   endOffset Int
   sha256 String @db.Char(64)
+  claimEvidence ClaimEvidence[]
 
   @@unique([projectId, id])
+  @@unique([projectId, snapshotId, id])
   @@unique([projectId, snapshotId, ordinal])
   @@index([projectId, snapshotId, startOffset])
   @@schema("contextflow")
@@ -283,5 +398,227 @@ model AppSession {
 
   @@index([userId])
   @@index([expiresAt])
+  @@schema("contextflow")
+}
+
+enum ClaimStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  @@schema("contextflow")
+}
+enum EvidenceRelation {
+  SUPPORTS
+  CONTRADICTS
+  @@schema("contextflow")
+}
+enum ConflictOrigin {
+  MANUAL
+  DETECTED
+  @@schema("contextflow")
+}
+enum AIExecutionStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  OUTCOME_UNKNOWN
+  @@schema("contextflow")
+}
+model Claim {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  revision Int @default(1)
+  currentRevisionId String? @db.Uuid
+  currentRevision ClaimRevision? @relation("CurrentClaimRevision", fields: [projectId, id, currentRevisionId], references: [projectId, claimId, id], onDelete: Restrict, onUpdate: NoAction)
+  revisions ClaimRevision[] @relation("ClaimRevisions")
+  createdBy String @db.Uuid
+  creator UserProfile @relation("ClaimCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  conflictParticipants ClaimConflictParticipant[]
+  basisClaims BasisClaim[]
+  @@unique([projectId, id])
+  @@index([projectId, createdAt, id])
+  @@schema("contextflow")
+}
+model ClaimRevision {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  claimId String @db.Uuid
+  claim Claim @relation("ClaimRevisions", fields: [projectId, claimId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  currentFor Claim[] @relation("CurrentClaimRevision")
+  number Int
+  wording String @db.VarChar(2000)
+  sha256 String @db.Char(64)
+  status ClaimStatus @default(PROPOSED)
+  jobId String? @db.Uuid
+  providerClaimKey String? @db.VarChar(64)
+  job Job? @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("ClaimRevisionCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  approvedBy String? @db.Uuid
+  approver UserProfile? @relation("ClaimApprover", fields: [approvedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  approvedAt DateTime? @db.Timestamptz(3)
+  rejectedBy String? @db.Uuid
+  rejector UserProfile? @relation("ClaimRejector", fields: [rejectedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  rejectedAt DateTime? @db.Timestamptz(3)
+  withdrawnBy String? @db.Uuid
+  withdrawer UserProfile? @relation("ClaimWithdrawer", fields: [withdrawnBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  withdrawnAt DateTime? @db.Timestamptz(3)
+  withdrawalReason String? @db.VarChar(2000)
+  evidence ClaimEvidence[]
+  conflictParticipants ClaimConflictParticipant[]
+  selectedForConflicts ClaimConflict[] @relation("ConflictSelection")
+  basisClaims BasisClaim[]
+  @@unique([projectId, id])
+  @@unique([projectId, claimId, id])
+  @@unique([claimId, number])
+  @@unique([jobId, providerClaimKey])
+  @@schema("contextflow")
+}
+model ClaimEvidence {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  claimRevisionId String @db.Uuid
+  claimRevision ClaimRevision @relation(fields: [projectId, claimRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotId String @db.Uuid
+  snapshot SourceSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  fragmentId String @db.Uuid
+  fragment SourceFragment @relation(fields: [projectId, snapshotId, fragmentId], references: [projectId, snapshotId, id], onDelete: Restrict, onUpdate: NoAction)
+  startOffset Int
+  endOffset Int
+  quote String @db.VarChar(10000)
+  sha256 String @db.Char(64)
+  relation EvidenceRelation
+  capturedPurpose MaterialPurpose @default(FACTUAL_SOURCE)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("EvidenceCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  invalidatedBy String? @db.Uuid
+  invalidator UserProfile? @relation("EvidenceInvalidator", fields: [invalidatedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  invalidatedAt DateTime? @db.Timestamptz(3)
+  invalidationReason String? @db.VarChar(2000)
+  selectedForConflicts ConflictResolutionEvidence[]
+  basisEvidence BasisClaimEvidence[]
+  @@unique([projectId, id])
+  @@unique([projectId, claimRevisionId, id])
+  @@index([projectId, snapshotId])
+  @@schema("contextflow")
+}
+model ClaimConflict {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  revision Int @default(1)
+  supersedesId String? @db.Uuid
+  supersedes ClaimConflict? @relation("ConflictSuccession", fields: [projectId, supersedesId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  supersededBy ClaimConflict? @relation("ConflictSuccession")
+  origin ConflictOrigin
+  rationale String @db.VarChar(2000)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("ConflictCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  resolvedBy String? @db.Uuid
+  resolver UserProfile? @relation("ConflictResolver", fields: [resolvedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  resolvedAt DateTime? @db.Timestamptz(3)
+  selectedRevisionId String? @db.Uuid
+  selectedRevision ClaimRevision? @relation("ConflictSelection", fields: [projectId, selectedRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  formulation String? @db.VarChar(2000)
+  resolutionRationale String? @db.VarChar(2000)
+  participants ClaimConflictParticipant[]
+  selectedEvidence ConflictResolutionEvidence[]
+  @@unique([projectId, id])
+  @@unique([projectId, supersedesId])
+  @@unique([projectId, id, selectedRevisionId])
+  @@index([projectId, resolvedAt])
+  @@schema("contextflow")
+}
+model ClaimConflictParticipant {
+  projectId String @db.Uuid
+  conflictId String @db.Uuid
+  conflict ClaimConflict @relation(fields: [projectId, conflictId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  claimId String @db.Uuid
+  claim Claim @relation(fields: [projectId, claimId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  revisionId String @db.Uuid
+  revision ClaimRevision @relation(fields: [projectId, claimId, revisionId], references: [projectId, claimId, id], onDelete: Restrict, onUpdate: NoAction)
+  @@id([conflictId, revisionId])
+  @@unique([conflictId, claimId])
+  @@index([projectId, claimId])
+  @@schema("contextflow")
+}
+model ConflictResolutionEvidence {
+  projectId String @db.Uuid
+  conflictId String @db.Uuid
+  claimRevisionId String @db.Uuid
+  conflict ClaimConflict @relation(fields: [projectId, conflictId, claimRevisionId], references: [projectId, id, selectedRevisionId], onDelete: Restrict, onUpdate: NoAction)
+  evidenceId String @db.Uuid
+  evidence ClaimEvidence @relation(fields: [projectId, claimRevisionId, evidenceId], references: [projectId, claimRevisionId, id], onDelete: Restrict, onUpdate: NoAction)
+  @@id([conflictId, evidenceId])
+  @@schema("contextflow")
+}
+model FactualBasisRevision {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  sequence Int
+  manifest Json
+  sha256 String @db.Char(64)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("BasisCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  claims BasisClaim[]
+  @@unique([projectId, id])
+  @@unique([projectId, sequence])
+  @@schema("contextflow")
+}
+model BasisClaim {
+  projectId String @db.Uuid
+  basisId String @db.Uuid
+  basis FactualBasisRevision @relation(fields: [projectId, basisId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  claimId String @db.Uuid
+  claim Claim @relation(fields: [projectId, claimId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  claimRevisionId String @db.Uuid
+  claimRevision ClaimRevision @relation(fields: [projectId, claimId, claimRevisionId], references: [projectId, claimId, id], onDelete: Restrict, onUpdate: NoAction)
+  evidence BasisClaimEvidence[]
+  @@id([basisId, claimRevisionId])
+  @@unique([basisId, claimId])
+  @@unique([projectId, basisId, claimRevisionId])
+  @@schema("contextflow")
+}
+model BasisClaimEvidence {
+  projectId String @db.Uuid
+  basisId String @db.Uuid
+  claimRevisionId String @db.Uuid
+  claim BasisClaim @relation(fields: [projectId, basisId, claimRevisionId], references: [projectId, basisId, claimRevisionId], onDelete: Restrict, onUpdate: NoAction)
+  evidenceId String @db.Uuid
+  evidence ClaimEvidence @relation(fields: [projectId, claimRevisionId, evidenceId], references: [projectId, claimRevisionId, id], onDelete: Restrict, onUpdate: NoAction)
+  @@id([basisId, claimRevisionId, evidenceId])
+  @@schema("contextflow")
+}
+model AIExecution {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  jobId String @db.Uuid
+  job Job @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  attemptId String @db.Uuid
+  attempt JobAttempt @relation(fields: [jobId, attemptId], references: [jobId, id], onDelete: Restrict, onUpdate: NoAction)
+  provider String @default("dify") @db.VarChar(64)
+  workflowId String @db.VarChar(200)
+  releaseId String @db.VarChar(100)
+  configDigest String @db.Char(64)
+  contractVersion String @db.VarChar(64)
+  promptTemplateVersion String @db.VarChar(64)
+  inputManifest Json
+  inputHash String @db.Char(64)
+  providerRunId String? @db.VarChar(200)
+  model String? @db.VarChar(200)
+  status AIExecutionStatus @default(RUNNING)
+  startedAt DateTime @default(now()) @db.Timestamptz(3)
+  finishedAt DateTime? @db.Timestamptz(3)
+  errorCategory String? @db.VarChar(64)
+  @@unique([attemptId])
+  @@index([projectId, jobId])
   @@schema("contextflow")
 }

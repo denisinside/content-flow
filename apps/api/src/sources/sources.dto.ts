@@ -10,6 +10,9 @@ export class MaterialDto {
   @ApiProperty() included!: boolean;
   @ApiProperty({ minimum: 1 }) revision!: number;
   @ApiProperty({ type: String, format: 'uuid', nullable: true }) currentSnapshotId!: string | null;
+  @ApiProperty({ type: String, nullable: true }) sourceUrl!: string | null;
+  @ApiProperty({ type: String, format: 'uuid', nullable: true }) originalAssetId!: string | null;
+  @ApiProperty({ type: String, nullable: true }) originalFilename!: string | null;
   @ApiProperty({ type: String, format: 'uuid' }) createdBy!: string;
   @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string;
   @ApiProperty({ type: String, format: 'date-time' }) updatedAt!: string;
@@ -33,6 +36,8 @@ export class SnapshotSummaryDto {
   @ApiProperty({ type: String, format: 'uuid', nullable: true }) originalAssetId!: string | null;
   @ApiProperty({ type: String, format: 'uuid', nullable: true }) previousSnapshotId!: string | null;
   @ApiProperty({ type: String, nullable: true }) originalFilename!: string | null;
+  @ApiProperty({ type: Object, nullable: true }) providerMetadata!: Record<string, unknown> | null;
+  @ApiProperty({ type: String, format: 'uuid', nullable: true }) jobId!: string | null;
   @ApiProperty({ type: String, format: 'uuid' }) createdBy!: string;
   @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string;
 }

@@ -7,6 +7,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet 
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import SourceWorkspace from './SourceWorkspace.vue'
+import FactsWorkspace from './FactsWorkspace.vue'
 
 type ProjectFormat =
   | 'ARTICLE'
@@ -66,9 +67,10 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/sources)?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts))?\/?$/i)?.[1] ?? null)
 const isDetail = computed(() => page.value !== null)
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
+const isFacts = computed(() => /\/facts\/?$/i.test(pathname.value))
 const canSave = computed(() => topic.value.trim().length > 0 && topic.value.trim().length <= 500 && selectedFormats.value.length > 0 && selectedFormats.value.length <= formats.length)
 const hasChanges = computed(() => {
   if (!currentProject.value) return false
@@ -574,7 +576,19 @@ onBeforeUnmount(() => {
       </Alert>
 
       <template v-else-if="currentProject">
-        <template v-if="isSources">
+        <template v-if="isFacts">
+          <FactsWorkspace
+            :key="currentProject.id"
+            :project-id="currentProject.id"
+            :project-topic="currentProject.topic"
+            :csrf-token="csrfToken"
+            :archived="currentProject.archivedAt !== null"
+            @session-expired="emit('session-expired')"
+            @back="routeTo(`/projects/${currentProject.id}`)"
+            @projects="routeTo('/projects')"
+          />
+        </template>
+        <template v-else-if="isSources">
           <SourceWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
@@ -724,6 +738,24 @@ onBeforeUnmount(() => {
                 @click="routeTo(`/projects/${currentProject.id}/sources`)"
               >
                 Відкрити джерела
+              </Button>
+            </div>
+            <div class="project-sources-entry">
+              <div>
+                <p class="eyebrow">
+                  Перевірка
+                </p>
+                <h2>Факти та докази</h2>
+                <p class="project-detail-copy">
+                  Перевіряйте твердження й затверджуйте фактичну базу.
+                </p>
+              </div>
+              <Button
+                class="workspace-button workspace-button-secondary"
+                variant="outline"
+                @click="routeTo(`/projects/${currentProject.id}/facts`)"
+              >
+                Відкрити факти
               </Button>
             </div>
             <div

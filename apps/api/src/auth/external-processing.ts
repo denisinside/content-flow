@@ -1,13 +1,10 @@
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Inject, Injectable, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { DependencyHealthService } from '@contextflow/backend';
+import { DependencyHealthService, EXTERNAL_PROCESSING_NOTICE } from '@contextflow/backend';
 import { z } from 'zod';
 import { SessionGuard, type AuthenticatedRequest } from './session.guard.js';
 
-export const EXTERNAL_PROCESSING_NOTICE = Object.freeze({
-  version: '2026-09-28-v1',
-  text: 'Вибрані вами матеріали можуть передаватися зовнішнім сервісам для імпорту, перетворення документів і роботи ШІ. Передаються лише матеріали, потрібні для обраної дії. Перевіряйте отримані результати перед використанням.',
-});
+export { EXTERNAL_PROCESSING_NOTICE };
 const acceptanceInput = z.object({ noticeVersion: z.literal(EXTERNAL_PROCESSING_NOTICE.version) }).strict();
 
 @Injectable()

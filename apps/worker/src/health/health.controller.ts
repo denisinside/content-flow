@@ -4,7 +4,7 @@ import {
   Inject,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { DependencyHealthService } from '@contextflow/backend';
+import { DependencyHealthService, DurableJobWorker } from '@contextflow/backend';
 
 class WorkerLivenessResponse {
   status!: 'ok';
@@ -16,6 +16,7 @@ class WorkerReadinessResponse {
   checks!: {
     database: 'up' | 'down';
     redis: 'up' | 'down';
+    dispatcher: 'up' | 'down';
   };
 }
 
@@ -24,6 +25,7 @@ export class HealthController {
   constructor(
     @Inject(DependencyHealthService)
     private readonly dependencyHealth: DependencyHealthService,
+    @Inject(DurableJobWorker) private readonly jobs: DurableJobWorker,
   ) {}
 
   @Get('live')
@@ -33,7 +35,10 @@ export class HealthController {
 
   @Get('ready')
   async ready(): Promise<WorkerReadinessResponse> {
-    const readiness = await this.dependencyHealth.check();
+    const dependencies = await this.dependencyHealth.check();
+    const dispatcher = this.jobs.lastReconcileAt !== null && this.jobs.lastDispatchError === null ? 'up' : 'down';
+    const readiness: WorkerReadinessResponse = { status: dependencies.status === 'ready' && dispatcher === 'up' ? 'ready' : 'not_ready',
+      checks: { ...dependencies.checks, dispatcher } };
     if (readiness.status === 'not_ready') {
       throw new ServiceUnavailableException(readiness);
     }

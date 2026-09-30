@@ -110,6 +110,18 @@ async function checkRuntime(runtimeUrl) {
       ['Material', ['SELECT', 'INSERT', 'UPDATE']],
       ['SourceSnapshot', ['SELECT', 'INSERT']],
       ['SourceFragment', ['SELECT', 'INSERT']],
+      ['Job', ['SELECT', 'INSERT', 'UPDATE']],
+      ['JobAttempt', ['SELECT', 'INSERT', 'UPDATE']],
+      ['Claim', ['SELECT', 'INSERT', 'UPDATE']],
+      ['ClaimRevision', ['SELECT', 'INSERT', 'UPDATE']],
+      ['ClaimEvidence', ['SELECT', 'INSERT', 'UPDATE']],
+      ['ClaimConflict', ['SELECT', 'INSERT', 'UPDATE']],
+      ['ClaimConflictParticipant', ['SELECT', 'INSERT']],
+      ['ConflictResolutionEvidence', ['SELECT', 'INSERT']],
+      ['FactualBasisRevision', ['SELECT', 'INSERT']],
+      ['BasisClaim', ['SELECT', 'INSERT']],
+      ['BasisClaimEvidence', ['SELECT', 'INSERT']],
+      ['AIExecution', ['SELECT', 'INSERT', 'UPDATE']],
     ]) {
       for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
         const result = await runtime.query('SELECT has_table_privilege(current_user, $1, $2) AS allowed', [`contextflow."${table}"`, privilege]);
@@ -268,6 +280,46 @@ async function checkMigrationSourceGuards(migrationUrl) {
     await assertGuarded('snapshot_immutability_guard', () => migration.query(`UPDATE contextflow."SourceSnapshot" SET "normalizedText" = 'edited' WHERE "id" = $1`, [snapshotId]), 'source-snapshot-update-trigger');
     await assertGuarded('fragment_immutability_guard', () => migration.query(`UPDATE contextflow."SourceFragment" SET "endOffset" = 2 WHERE "snapshotId" = $1`, [snapshotId]), 'source-fragment-update-trigger');
     await assertGuarded('asset_metadata_guard', () => migration.query(`UPDATE contextflow."Asset" SET "objectKey" = $1 WHERE "id" = $2`, [projectId + '/changed.txt', assetId]), 'referenced-asset-metadata-trigger');
+    const jobId = '00000000-0000-4000-8000-000000000038';
+    await migration.query(`INSERT INTO contextflow."Job" ("id", "projectId", "requestedBy", "operation", "contractVersion", "commandKey", "inputManifest", "inputHash", "deadlineAt") VALUES ($1, $2, $3, 'WEB_IMPORT', 'source-import-v1', 'guard-command', '{}', repeat('a', 64), CURRENT_TIMESTAMP + interval '1 minute')`, [jobId, projectId, userId]);
+    await assertGuarded('job_manifest_guard', () => migration.query(`UPDATE contextflow."Job" SET "inputManifest" = '{"changed":true}' WHERE "id" = $1`, [jobId]), 'job-frozen-input-trigger');
+    await assertGuarded('job_attempt_limit', () => migration.query(`UPDATE contextflow."Job" SET "attemptCount" = 4, "fencingToken" = 4 WHERE "id" = $1`, [jobId]), 'job-three-attempt-limit');
+    await migration.query(`UPDATE contextflow."Job" SET "status" = 'SUCCEEDED', "resultRefs" = '{"snapshotId":"synthetic"}' WHERE "id" = $1`, [jobId]);
+    await assertGuarded('job_accepted_result_guard', () => migration.query(`UPDATE contextflow."Job" SET "resultRefs" = '{}' WHERE "id" = $1`, [jobId]), 'job-accepted-result-immutability');
+    const claimId = '00000000-0000-4000-8000-000000000039';
+    const revisionId = '00000000-0000-4000-8000-000000000040';
+    const evidenceId = '00000000-0000-4000-8000-000000000041';
+    const basisId = '00000000-0000-4000-8000-000000000042';
+    await migration.query(`INSERT INTO contextflow."Claim" ("id", "projectId", "createdBy") VALUES ($1, $2, $3)`, [claimId, projectId, userId]);
+    await migration.query(`INSERT INTO contextflow."ClaimRevision" ("id", "projectId", "claimId", "number", "wording", "sha256", "createdBy") VALUES ($1, $2, $3, 1, 'abc', encode(sha256(convert_to('abc', 'UTF8')), 'hex'), $4)`, [revisionId, projectId, claimId, userId]);
+    await migration.query(`UPDATE contextflow."Claim" SET "currentRevisionId" = $1, "revision" = 2 WHERE "id" = $2`, [revisionId, claimId]);
+    await migration.query(`INSERT INTO contextflow."ClaimEvidence" ("id", "projectId", "claimRevisionId", "snapshotId", "fragmentId", "startOffset", "endOffset", "quote", "sha256", "relation", "createdBy") VALUES ($1, $2, $3, $4, '00000000-0000-4000-8000-000000000037', 0, 3, 'abc', encode(sha256(convert_to('abc', 'UTF8')), 'hex'), 'SUPPORTS', $5)`, [evidenceId, projectId, revisionId, snapshotId, userId]);
+    await migration.query(`UPDATE contextflow."ClaimRevision" SET "status" = 'APPROVED', "approvedBy" = $1, "approvedAt" = CURRENT_TIMESTAMP WHERE "id" = $2`, [userId, revisionId]);
+    await assertGuarded('claim_wording_guard', () => migration.query(`UPDATE contextflow."ClaimRevision" SET "wording" = 'edited' WHERE "id" = $1`, [revisionId]), 'claim-wording-immutability');
+    await assertGuarded('claim_approval_guard', () => migration.query(`UPDATE contextflow."ClaimRevision" SET "approvedAt" = "approvedAt" + interval '1 second' WHERE "id" = $1`, [revisionId]), 'first-approval-immutability');
+    await assertGuarded('evidence_quote_guard', () => migration.query(`UPDATE contextflow."ClaimEvidence" SET "quote" = 'edited' WHERE "id" = $1`, [evidenceId]), 'exact-evidence-immutability');
+    await migration.query(`INSERT INTO contextflow."FactualBasisRevision" ("id", "projectId", "sequence", "manifest", "sha256", "createdBy") VALUES ($1, $2, 1, '{}', repeat('a', 64), $3)`, [basisId, projectId, userId]);
+    await migration.query(`INSERT INTO contextflow."BasisClaim" ("projectId", "basisId", "claimId", "claimRevisionId") VALUES ($1, $2, $3, $4)`, [projectId, basisId, claimId, revisionId]);
+    await migration.query(`INSERT INTO contextflow."BasisClaimEvidence" ("projectId", "basisId", "claimRevisionId", "evidenceId") VALUES ($1, $2, $3, $4)`, [projectId, basisId, revisionId, evidenceId]);
+    await assertGuarded('basis_manifest_guard', () => migration.query(`UPDATE contextflow."FactualBasisRevision" SET "manifest" = '{"changed":true}' WHERE "id" = $1`, [basisId]), 'frozen-basis-immutability');
+    await migration.query(`UPDATE contextflow."ClaimRevision" SET "withdrawnBy" = $1, "withdrawnAt" = CURRENT_TIMESTAMP WHERE "id" = $2`, [userId, revisionId]);
+    await assertGuarded('claim_withdrawal_guard', () => migration.query(`UPDATE contextflow."ClaimRevision" SET "withdrawnBy" = NULL, "withdrawnAt" = NULL WHERE "id" = $1`, [revisionId]), 'terminal-withdrawal');
+    await migration.query(`UPDATE contextflow."ClaimEvidence" SET "invalidatedBy" = $1, "invalidatedAt" = CURRENT_TIMESTAMP, "invalidationReason" = 'invalid quote' WHERE "id" = $2`, [userId, evidenceId]);
+    await assertGuarded('evidence_invalidation_guard', () => migration.query(`UPDATE contextflow."ClaimEvidence" SET "invalidatedBy" = NULL, "invalidatedAt" = NULL, "invalidationReason" = NULL WHERE "id" = $1`, [evidenceId]), 'terminal-evidence-invalidation');
+    const conflictId = '00000000-0000-4000-8000-000000000045';
+    const successorId = '00000000-0000-4000-8000-000000000046';
+    await migration.query(`INSERT INTO contextflow."ClaimConflict" ("id", "projectId", "origin", "rationale", "createdBy") VALUES ($1, $2, 'MANUAL', 'guard fixture', $3)`, [conflictId, projectId, userId]);
+    await migration.query(`UPDATE contextflow."ClaimConflict" SET "resolvedBy" = $1, "resolvedAt" = CURRENT_TIMESTAMP, "selectedRevisionId" = $2, "formulation" = 'abc', "resolutionRationale" = 'reviewed fixture', "revision" = 2 WHERE "id" = $3`, [userId, revisionId, conflictId]);
+    await assertGuarded('conflict_resolution_guard', () => migration.query(`UPDATE contextflow."ClaimConflict" SET "resolutionRationale" = 'rewritten decision' WHERE "id" = $1`, [conflictId]), 'terminal-conflict-resolution');
+    await migration.query(`INSERT INTO contextflow."ClaimConflict" ("id", "projectId", "origin", "rationale", "createdBy", "supersedesId") VALUES ($1, $2, 'MANUAL', 'new review', $3, $4)`, [successorId, projectId, userId, conflictId]);
+    await assertGuarded('conflict_successor_guard', () => migration.query(`UPDATE contextflow."ClaimConflict" SET "supersedesId" = NULL WHERE "id" = $1`, [successorId]), 'conflict-successor-identity-immutability');
+    const attemptId = '00000000-0000-4000-8000-000000000043';
+    const executionId = '00000000-0000-4000-8000-000000000044';
+    await migration.query(`INSERT INTO contextflow."JobAttempt" ("id", "jobId", "ordinal", "fencingToken", "leaseOwner", "leaseExpiresAt", "heartbeatAt") VALUES ($1, $2, 1, 1, 'guard verifier', CURRENT_TIMESTAMP + interval '1 minute', CURRENT_TIMESTAMP)`, [attemptId, jobId]);
+    await migration.query(`INSERT INTO contextflow."AIExecution" ("id", "projectId", "jobId", "attemptId", "workflowId", "releaseId", "configDigest", "contractVersion", "promptTemplateVersion", "inputManifest", "inputHash") VALUES ($1, $2, $3, $4, 'fixture-workflow', 'fixture-release', repeat('a', 64), 'claims-v1', 'prompt-v1', '{}', repeat('a', 64))`, [executionId, projectId, jobId, attemptId]);
+    await assertGuarded('execution_input_guard', () => migration.query(`UPDATE contextflow."AIExecution" SET "inputManifest" = '{"changed":true}' WHERE "id" = $1`, [executionId]), 'execution-input-immutability');
+    await migration.query(`UPDATE contextflow."AIExecution" SET "providerRunId" = 'captured-run' WHERE "id" = $1`, [executionId]);
+    await assertGuarded('execution_run_identity_guard', () => migration.query(`UPDATE contextflow."AIExecution" SET "providerRunId" = 'different-run' WHERE "id" = $1`, [executionId]), 'execution-run-identity-immutability');
     await migration.query('ROLLBACK');
   } finally {
     await migration.query('ROLLBACK').catch(() => {});
@@ -337,8 +389,8 @@ try {
       && actualMigrations.every((row, index) => row.migration_name === expectedMigrations[index] && row.finished_at !== null && row.rolled_back_at === null);
     const checks = await migrated.query(`
       SELECT
-        (SELECT count(*) = 12 FROM information_schema.tables
-          WHERE table_schema = 'contextflow' AND table_name IN ('UserProfile', 'AppSession', 'Workspace', 'WorkspaceMember', 'WorkspaceInvite', 'WorkspaceStyleRevision', 'Project', 'ProjectMember', 'Asset', 'Material', 'SourceSnapshot', 'SourceFragment')) AS app_tables_ok,
+        (SELECT count(*) = 24 FROM information_schema.tables
+          WHERE table_schema = 'contextflow' AND table_name IN ('UserProfile', 'AppSession', 'Workspace', 'WorkspaceMember', 'WorkspaceInvite', 'WorkspaceStyleRevision', 'Project', 'ProjectMember', 'Asset', 'Material', 'SourceSnapshot', 'SourceFragment', 'Job', 'JobAttempt', 'Claim', 'ClaimRevision', 'ClaimEvidence', 'ClaimConflict', 'ClaimConflictParticipant', 'ConflictResolutionEvidence', 'FactualBasisRevision', 'BasisClaim', 'BasisClaimEvidence', 'AIExecution')) AS app_tables_ok,
         (SELECT count(*) = 7 FROM pg_constraint c
           JOIN pg_class t ON t.oid = c.conrelid
           JOIN pg_namespace n ON n.oid = t.relnamespace

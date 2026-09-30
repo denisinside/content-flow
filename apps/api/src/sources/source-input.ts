@@ -14,7 +14,13 @@ export const appendSnapshotInput = z.object({
   expectedRevision: z.number().int().positive().max(2_147_483_646), text,
 }).strict();
 export const uploadSourceInput = z.object({ label, purpose }).strict();
+export const importUrlInput = z.object({ label, purpose, url: z.string().min(1).max(2048), commandKey: z.uuid() }).strict();
+export const importDocumentInput = z.object({ label, purpose, commandKey: z.uuid() }).strict();
+export const reimportSourceInput = z.object({ expectedRevision: z.number().int().positive().max(2_147_483_646), commandKey: z.uuid() }).strict();
 export type CreateTextSourceInput = z.infer<typeof createTextSourceInput>;
 export type UpdateMaterialInput = z.infer<typeof updateMaterialInput>;
 export type AppendSnapshotInput = z.infer<typeof appendSnapshotInput>;
 export type UploadSourceInput = z.infer<typeof uploadSourceInput>;
+export type ImportUrlInput = z.infer<typeof importUrlInput>;
+export type ImportDocumentInput = z.infer<typeof importDocumentInput>;
+export type ReimportSourceInput = z.infer<typeof reimportSourceInput>;

@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module.js';
 import { StorageModule } from '../storage/storage.module.js';
 import { SourceService } from './source.service.js';
 import { SourcesController } from './sources.controller.js';
+import { JobsModule } from '../jobs/jobs.module.js';
 
-@Module({ imports: [FoundationModule, AuthModule, StorageModule], controllers: [SourcesController], providers: [SourceService], exports: [SourceService] })
+@Module({ imports: [FoundationModule, AuthModule, StorageModule, JobsModule], controllers: [SourcesController], providers: [SourceService], exports: [SourceService] })
 export class SourcesModule {}

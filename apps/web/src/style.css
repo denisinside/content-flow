@@ -622,66 +622,66 @@ button { color: inherit; }
 
 /* Sources is a focused editorial task. Keep account and policy controls close,
    while leaving Workspace management available from the Projects route. */
-.signed-in-layout:has(.sources-workspace) {
+.signed-in-layout:has(:is(.sources-workspace, .facts-workspace)) {
   padding-top: 12px;
   padding-bottom: 36px;
 }
-.signed-in-workspace:has(.sources-workspace) .signed-in-account {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .signed-in-account {
   align-items: center;
   gap: 14px;
   margin-bottom: 12px;
   padding: 0;
   border: 0;
 }
-.signed-in-workspace:has(.sources-workspace) .signed-in-account .eyebrow,
-.signed-in-workspace:has(.sources-workspace) .account-email {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .signed-in-account .eyebrow,
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .account-email {
   display: none;
 }
-.signed-in-workspace:has(.sources-workspace) .signed-in-account .account-name {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .signed-in-account .account-name {
   font-size: 17px;
   letter-spacing: 0;
 }
-.signed-in-workspace:has(.sources-workspace) .signed-in-account .logout-button {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .signed-in-account .logout-button {
   min-height: 34px;
   padding-inline: 12px;
 }
-.signed-in-workspace:has(.sources-workspace) .external-notice {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice {
   width: min(100%, 1220px);
   margin: 0 auto 7px;
   padding: 8px 12px;
   border-left-width: 2px;
 }
-.signed-in-workspace:has(.sources-workspace) .external-notice-heading h2 {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice-heading h2 {
   font-size: 15px;
 }
-.signed-in-workspace:has(.sources-workspace) .external-notice-copy,
-.signed-in-workspace:has(.sources-workspace) .external-notice-error,
-.signed-in-workspace:has(.sources-workspace) .external-notice-accepted {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice-copy,
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice-error,
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice-accepted {
   margin-top: 5px;
   font-size: 11px;
   line-height: 1.45;
 }
-.signed-in-workspace:has(.sources-workspace) .external-notice-footer {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice-footer {
   margin-top: 7px;
 }
-.signed-in-workspace:has(.sources-workspace) .external-notice-button {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .external-notice-button {
   min-height: 32px;
   padding-block: 5px;
 }
-.signed-in-workspace:has(.sources-workspace) .session-settings {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .session-settings {
   width: min(100%, 1220px);
   margin: 0 auto 7px;
   border-bottom: 0;
 }
-.signed-in-workspace:has(.sources-workspace) .session-settings summary {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .session-settings summary {
   padding-bottom: 0;
   font-size: 11px;
 }
-.signed-in-workspace:has(.sources-workspace) .session-settings-current {
+.signed-in-workspace:has(:is(.sources-workspace, .facts-workspace)) .session-settings-current {
   font-size: 11px;
 }
-.workspace-hub:has(.sources-workspace) > .workspace-switcher,
-.workspace-hub:has(.sources-workspace) > .workspace-management {
+.workspace-hub:has(:is(.sources-workspace, .facts-workspace)) > .workspace-switcher,
+.workspace-hub:has(:is(.sources-workspace, .facts-workspace)) > .workspace-management {
   display: none;
 }
 

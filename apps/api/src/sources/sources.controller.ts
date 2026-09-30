@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, Inject, Param, Patch, Post, Req, Res, UnauthorizedException, ServiceUnavailableException, UploadedFile, UseGuards, UseInterceptors,
+  BadRequestException, Body, Controller, Get, Inject, Param, Patch, Post, Query, Req, Res, UnauthorizedException, ServiceUnavailableException, UploadedFile, UseGuards, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBody, ApiConsumes, ApiCookieAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -10,7 +10,7 @@ import { cookieValue, SESSION_COOKIE, setCookie } from '../auth/csrf.js';
 import { STORAGE_MAX_BYTES } from '../storage/private-asset-store.js';
 import { SourceService } from './source.service.js';
 import { CreateSourceResultDto, MaterialDetailDto, MaterialResultDto, SnapshotResultDto, SourcesPageDto } from './sources.dto.js';
-import { appendSnapshotInput, createTextSourceInput, resourceIdInput, updateMaterialInput, uploadSourceInput } from './source-input.js';
+import { appendSnapshotInput, createTextSourceInput, resourceIdInput, updateMaterialInput, uploadSourceInput, importUrlInput, importDocumentInput, reimportSourceInput } from './source-input.js';
 
 type UploadedFile = { originalname: string; mimetype: string; buffer: Buffer; size: number };
 function id(value: string): string {
@@ -67,6 +67,41 @@ export class SourcesController {
     const cookie = cookieValue(request, SESSION_COOKIE);
     if (!cookie) throw new UnauthorizedException('Session expired');
     return this.sources.upload(request.sessionUser.id, id(projectId), cookie, parsed.data, file);
+  }
+
+  @Post('projects/:projectId/materials/url')
+  @ApiOperation({ summary: 'Create a URL source and durable single-page import using an explicit command key' })
+  async importUrl(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) {
+    const parsed = importUrlInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('URL import requires a label, purpose, URL, and command key');
+    return this.sources.importUrl(request.sessionUser.id, id(projectId), parsed.data);
+  }
+
+  @Post('projects/:projectId/materials/document')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: STORAGE_MAX_BYTES, files: 1, fields: 3 } }))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Retain validated private PDF/DOCX bytes and submit a durable digital-text import with OCR disabled' })
+  async importDocument(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown, @UploadedFile() file?: UploadedFile) {
+    const parsed = importDocumentInput.safeParse(body);
+    if (!parsed.success || !file) throw new BadRequestException('Document import requires a file, label, purpose, and command key');
+    const cookie = cookieValue(request, SESSION_COOKIE);
+    if (!cookie) throw new UnauthorizedException('Session expired');
+    return this.sources.importDocument(request.sessionUser.id, id(projectId), cookie, parsed.data, file);
+  }
+
+  @Post('projects/:projectId/materials/:materialId/reimport')
+  @ApiOperation({ summary: 'Explicitly import the frozen original again, preserving all earlier snapshots' })
+  async reimport(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Param('materialId') materialId: string, @Body() body: unknown) {
+    const parsed = reimportSourceInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('Reimport requires the current revision and a new command key');
+    return this.sources.reimport(request.sessionUser.id, id(projectId), id(materialId), parsed.data);
+  }
+
+  @Get('projects/:projectId/materials/:materialId/compare')
+  @ApiOperation({ summary: 'Compare exact saved source versions and their provenance' })
+  compare(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Param('materialId') materialId: string,
+    @Query('left') left: string, @Query('right') right: string) {
+    return this.sources.compare(request.sessionUser.id, id(projectId), id(materialId), id(left), id(right));
   }
 
   @Patch('projects/:projectId/materials/:materialId')
