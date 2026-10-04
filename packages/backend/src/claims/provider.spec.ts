@@ -45,7 +45,7 @@ describe('Dify claim workflow boundary', () => {
     expect(configDigest).toBe(claimWorkflowRelease(env).configDigest);
   });
 
-  it('captures workflow_run_id from a split UTF-8 SSE stream and validates exact published workflow identity', async () => {
+  it('captures workflow_run_id from a split UTF-8 SSE stream and validates the pinned published workflow identity', async () => {
     const payload = { ...run, data: { ...run.data, outputs: { claims_json: JSON.stringify({ schemaVersion: CLAIMS_CONTRACT, claims: [], conflicts: [] }) } } };
     const encoded = event({ event: 'workflow_finished', workflow_run_id: runId, data: payload.data });
     // Split in the middle of a multibyte character to exercise streaming TextDecoder state.
@@ -59,7 +59,7 @@ describe('Dify claim workflow boundary', () => {
     const result = await provider.execute(claimWorkflowSettings(env), runId, source, new AbortController().signal, vi.fn(), async id => { recorded.push(id); });
     expect(recorded).toEqual([runId]);
     expect(result.output).toEqual({ schemaVersion: CLAIMS_CONTRACT, claims: [], conflicts: [] });
-    expect(transport).toHaveBeenCalledWith(`http://127.0.0.1:8080/v1/workflows/${workflowId}/run`, expect.objectContaining({ method: 'POST' }));
+    expect(transport).toHaveBeenCalledWith('http://127.0.0.1:8080/v1/workflows/run', expect.objectContaining({ method: 'POST' }));
     expect(result.model).toBeNull();
   });
 
@@ -93,6 +93,11 @@ describe('Dify claim workflow boundary', () => {
     const provider = new DifyClaimProvider(vi.fn().mockResolvedValue(stream([event({ event: 'workflow_started', workflow_run_id: runId }),
       event({ event: 'workflow_finished', workflow_run_id: runId, data: malformed.data })])));
     await expect(provider.execute(claimWorkflowSettings(env), runId, source, new AbortController().signal, vi.fn(), vi.fn()))
+      .rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });
+    const wrongVersion = { ...run, data: { ...run.data, workflow_id: 'c31081a2-114a-4ce9-91d8-21241a03b70c' } };
+    const versionProvider = new DifyClaimProvider(vi.fn().mockResolvedValue(stream([event({ event: 'workflow_started', workflow_run_id: runId }),
+      event({ event: 'workflow_finished', workflow_run_id: runId, data: wrongVersion.data })])));
+    await expect(versionProvider.execute(claimWorkflowSettings(env), runId, source, new AbortController().signal, vi.fn(), vi.fn()))
       .rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });
     const oversized = new DifyClaimProvider(vi.fn().mockResolvedValue(response(new Uint8Array(512 * 1024 + 1), 'application/json')));
     await expect(oversized.resume(claimWorkflowSettings(env), runId, new AbortController().signal)).rejects.toThrow();

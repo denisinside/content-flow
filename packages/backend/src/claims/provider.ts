@@ -206,7 +206,10 @@ export class DifyClaimProvider {
     if (inputBytes > MAX_INPUT_BYTES || sources.length === 0 || sources.some(source => source.fragments.length === 0))
       throw new ClaimProviderError('INVALID_INPUT', 'Frozen factual-source input is empty or exceeds its limit', 'NOT_SUBMITTED');
     const origin = settings.endpoint;
-    const url = `${origin}/workflows/${encodeURIComponent(settings.workflowId)}/run`;
+    // Dify Cloud's version-specific execution route is plan-gated. Run the
+    // currently published app, then accept output only if its returned version
+    // matches the workflow ID frozen into this job's release manifest.
+    const url = `${origin}/workflows/run`;
     await beforeSubmit();
     let response: Response;
     try {
