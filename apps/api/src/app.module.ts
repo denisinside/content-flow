@@ -7,9 +7,10 @@ import { WorkspacesModule } from './workspaces/workspaces.module.js';
 import { SourcesModule } from './sources/sources.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
 import { ClaimsModule } from './claims/claims.module.js';
+import { EditorialModule } from './editorial/editorial.module.js';
 
 @Module({
-  imports: [FoundationModule, AuthModule, WorkspacesModule, ProjectsModule, SourcesModule, JobsModule, ClaimsModule],
+  imports: [FoundationModule, AuthModule, WorkspacesModule, ProjectsModule, SourcesModule, JobsModule, ClaimsModule, EditorialModule],
   controllers: [HealthController],
 })
 export class AppModule {}

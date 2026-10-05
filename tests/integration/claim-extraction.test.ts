@@ -16,7 +16,7 @@ type Identity = { id: string; cookie: string };
 type Reply<T> = { response: Response; body: T };
 type Extracted = { job: { id: string; status: string; errorCategory: string | null } };
 const workflowId = 'b21081a2-114a-4ce9-91d8-21241a03b70c';
-const configDigest = '9c8619e05041a0de3c3eb4fb925b96c68bb7b0166d6be1dfc7f259e750f9af3c';
+const configDigest = '4cab7b15c51c6c79ecaa8976aaaa5b7a589ca9c7cea6de58e7cc2066b366d034';
 const sourceText = 'Київ має населення 3 мільйони осіб.';
 const hash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -212,7 +212,7 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     expect(candidate.currentRevision?.evidence[0]).toMatchObject({ snapshotId: manifest.snapshots[0]?.snapshotId, relation: 'SUPPORTS', quote: sourceText });
     const execution = await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: job.job.id } });
     expect(execution).toMatchObject({ status: 'SUCCEEDED', provider: 'dify', providerRunId: expect.any(String), model: null,
-      releaseId: 'claim-extraction-2026-09-30.1', configDigest });
+      releaseId: 'claim-extraction-2026-10-05.1', configDigest });
     expect(JSON.stringify(execution.inputManifest)).not.toContain('synthetic-claim-key');
   });
 

@@ -31,15 +31,17 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'CLAIM_EXTRACTION', releaseId: 'claim-extraction-2026-09-30.1',
-  configDigest: '9c8619e05041a0de3c3eb4fb925b96c68bb7b0166d6be1dfc7f259e750f9af3c', publishedWorkflowIdEnv: 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'CLAIM_EXTRACTION', releaseId: 'claim-extraction-2026-10-05.1',
+  configDigest: '4cab7b15c51c6c79ecaa8976aaaa5b7a589ca9c7cea6de58e7cc2066b366d034', publishedWorkflowIdEnv: 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_CLAIM_EXTRACTION_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_CLAIM_EXTRACTION_API_KEY', contractVersion: CLAIMS_CONTRACT,
   promptTemplateVersion: 'claims-extraction-prompt-v1', promptTemplateFile: 'prompt.md', inputVariable: 'sources_json',
   outputVariable: 'claims_json', responseMode: 'streaming', provider: 'dify',
-  model: { provider: 'openai', name: 'gpt-4.1-mini', mode: 'chat', completionParams: { temperature: 0, max_tokens: 8192 } },
+  model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
+    max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
+    grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'claim-extraction-v1.yml',
-  workflowDslSha256: 'fd2cb307a0fdbba610365378316687b66777c2506f57a86c3ec1dacc17bb853d',
+  workflowDslSha256: '4d67045fa6c9c048f9068a685580e287b23f06f0f66652011294b881d1270ba3',
 };
 
 function testEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {

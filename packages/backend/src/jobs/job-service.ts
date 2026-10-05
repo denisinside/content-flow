@@ -153,11 +153,12 @@ export class DurableJobService {
     await this.prisma.$transaction(async tx => { await this.owned(tx, job, attempt);
       await tx.job.update({ where: { id: job.id }, data: { progressStage: stage, updatedAt: new Date() } }); });
   }
-  async providerIntent(job: Job, attempt: JobAttempt, runId?: string): Promise<void> {
+  async providerIntent(job: Job, attempt: JobAttempt, runId?: string, validate?: (tx: Prisma.TransactionClient) => Promise<void>): Promise<void> {
     if (runId !== undefined && (!runId || runId.length > 200)) throw new JobFailure('INVALID_CONTRACT');
     await this.prisma.$transaction(async tx => {
       await this.owned(tx, job, attempt);
       await this.assertEffects(tx, job.projectId, job.requestedBy);
+      if (validate) await validate(tx);
       await tx.jobAttempt.update({ where: { id: attempt.id }, data: { providerSubmittedAt: new Date(),
         providerOutcome: 'MAY_STILL_RUN', ...(runId ? { providerRunId: runId } : {}) } });
       await tx.job.update({ where: { id: job.id }, data: { providerOutcome: 'MAY_STILL_RUN', progressStage: 'PROCESSING', updatedAt: new Date() } });
@@ -168,7 +169,7 @@ export class DurableJobService {
       const current = await this.owned(tx, job, attempt);
       // Claim commits serialize with review/basis edits before acquiring shared
       // ancestry locks, avoiding concurrent shared-to-exclusive lock upgrades.
-      if (job.operation === 'CLAIM_EXTRACTION') {
+      if (job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION') {
         await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id" = ${job.projectId}::uuid FOR UPDATE`;
       }
       await this.assertEffects(tx, job.projectId, job.requestedBy);

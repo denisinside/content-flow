@@ -245,7 +245,12 @@ export class FactualBasisService {
       createdAt: basis.createdAt.toISOString(), valid: reasons.size === 0 && basis.claims.length > 0, blockingReasons: [...reasons] };
   }
   async basis(userId: string, projectId: string, mode: 'FACTUAL' | 'CREATIVE') {
-    return this.command(userId, projectId, async tx => {
+    return this.command(userId, projectId, tx => this.inspectBasis(tx, projectId, mode), false);
+  }
+  // Callers must hold the Project lock and authorize its actual Workspace ancestry.
+  // Reuse eligibility in the caller's transaction so a concurrent withdrawal cannot
+  // pass a generation/approval check on a different database snapshot.
+  async inspectBasis(tx: Prisma.TransactionClient, projectId: string, mode: 'FACTUAL' | 'CREATIVE') {
       const claims = await tx.claim.findMany({ where: { projectId, currentRevision: { status: 'APPROVED', withdrawnAt: null } }, include: claimInclude });
       const eligibleClaims: ReturnType<typeof claimView>[] = [];
       for (const claim of claims) if (claim.currentRevision && !(await this.eligible(tx, claim.currentRevision, claim.currentRevisionId)).length) eligibleClaims.push(claimView(claim));
@@ -253,7 +258,11 @@ export class FactualBasisService {
       const basis = latest ? await this.basisView(tx, latest.id) : null;
       return { mode, basis, eligibleClaims, missingBasis: mode === 'FACTUAL' && (!basis || !basis.valid), unverified: mode === 'CREATIVE',
         blockingReasons: mode === 'FACTUAL' ? basis?.blockingReasons.length ? basis.blockingReasons : !basis ? ['MISSING_BASIS'] : [] : [] };
-    }, false);
+  }
+  async inspectBasisRevision(tx: Prisma.TransactionClient, projectId: string, basisId: string) {
+    const row = await tx.factualBasisRevision.findFirst({ where: { id: basisId, projectId }, select: { id: true } });
+    if (!row) throw new NotFoundException('Factual basis not found');
+    return this.basisView(tx, row.id);
   }
   async freezeBasis(userId: string, projectId: string, input: { claimRevisionIds: string[] }) {
     return this.command(userId, projectId, async tx => {

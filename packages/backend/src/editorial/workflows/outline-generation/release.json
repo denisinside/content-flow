@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "contextflow-dify-release-v1",
+  "operation": "OUTLINE_GENERATION",
+  "releaseId": "outline-generation-2026-10-05.2",
+  "contractVersion": "outline-v1",
+  "promptTemplateVersion": "outline-generation-prompt-v1",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "e2fbabb7dd5e55ab03978dac414749e8c4c643745ae1f2e6a04f56295b65af22",
+  "workflowDslFile": "outline-generation-v1.yml",
+  "workflowDslSha256": "7cf6eb314bf37a4bcebb193a46602a6b95c6f2f48b1fa1db7d2ab5b4549885eb",
+  "apiBaseEnv": "DIFY_API_BASE_URL",
+  "apiKeyEnv": "DIFY_OUTLINE_GENERATION_API_KEY",
+  "publishedWorkflowIdEnv": "DIFY_OUTLINE_GENERATION_PUBLISHED_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_OUTLINE_GENERATION_CONFIG_SHA256",
+  "inputVariable": "editorial_json",
+  "outputVariable": "outline_json",
+  "responseMode": "streaming",
+  "provider": "dify",
+  "model": {
+    "provider": "langgenius/gemini/google",
+    "name": "gemini-3.8-flash",
+    "mode": "chat",
+    "completionParams": {
+      "max_output_tokens": 4096,
+      "thinking_level": "Low",
+      "include_thoughts": false,
+      "media_resolution": "Default",
+      "grounding": false,
+      "url_context": false,
+      "code_execution": false,
+      "service_tier": "standard"
+    }
+  },
+  "configDigest": "6145cb5d88ff0fc1dfc929505ca82fad5ae4889b3923b916a87b9dbebe8ea416"
+}

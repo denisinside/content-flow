@@ -9,7 +9,7 @@ const run = { workflow_run_id: runId, data: { workflow_id: workflowId, status: '
   claims_json: { schemaVersion: CLAIMS_CONTRACT, claims: [], conflicts: [] },
 } } };
 const env = { NODE_ENV: 'test', TEST_DIFY_API_BASE_URL: 'http://127.0.0.1:8080/v1', TEST_DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID: workflowId,
-  TEST_DIFY_CLAIM_EXTRACTION_CONFIG_SHA256: '9c8619e05041a0de3c3eb4fb925b96c68bb7b0166d6be1dfc7f259e750f9af3c',
+  TEST_DIFY_CLAIM_EXTRACTION_CONFIG_SHA256: '4cab7b15c51c6c79ecaa8976aaaa5b7a589ca9c7cea6de58e7cc2066b366d034',
   TEST_DIFY_CLAIM_EXTRACTION_API_KEY: 'synthetic-test-key' };
 const source = [{ snapshotId: 'a11081a2-114a-4ce9-91d8-21241a03b70c', materialId: 'c21081a2-114a-4ce9-91d8-21241a03b70c',
   sha256: 'a'.repeat(64), fragments: [{ id: 'd21081a2-114a-4ce9-91d8-21241a03b70c', startOffset: 0, endOffset: 6, sha256: 'b'.repeat(64), text: 'Kyiv is a city' }] }];

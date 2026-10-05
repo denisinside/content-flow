@@ -103,7 +103,8 @@ export class DurableJobWorker {
     deadline.unref();
     const handler = this.handlers.find(candidate => candidate.operation === job.operation);
     const context = { job, attempt, signal: controller.signal,
-      recordSubmissionIntent: () => this.service.providerIntent(job, attempt),
+      recordSubmissionIntent: () => this.service.providerIntent(job, attempt, undefined,
+        handler?.validateSubmission ? tx => handler.validateSubmission!(tx, job) : undefined),
       recordProviderRun: (id: string) => this.service.providerIntent(job, attempt, id),
       setProgress: (stage: string) => this.service.progress(job, attempt, stage) };
     try {

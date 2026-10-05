@@ -1,6 +1,6 @@
 # ContextFlow agent guide
 
-ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1 and M2 are DONE locally; next work is docs/PLAN.md M3. Read docs/STATUS.md and docs/modules/factual-basis.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
+ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1, M2 and M3.1 are DONE locally; next work is docs/PLAN.md M3.2. Read docs/STATUS.md and docs/modules/factual-basis.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
 
 ## Read only what the task needs
 

@@ -1,5 +1,5 @@
 app:
-  description: ContentFlow claim extraction. Accepts a JSON string of frozen source fragments and returns the claims-v1 object. Configure the OpenAI model provider in Dify before running.
+  description: ContentFlow claim extraction. Accepts a JSON string of frozen source fragments and returns the claims-v1 object. Configure the Gemini model provider in Dify before running.
   icon: book_open
   icon_background: '#D1E9FF'
   icon_type: emoji
@@ -99,11 +99,17 @@ workflow:
           variable_selector: []
         model:
           completion_params:
-            max_tokens: 8192
-            temperature: 0
+            code_execution: false
+            grounding: false
+            include_thoughts: false
+            max_output_tokens: 8192
+            media_resolution: Default
+            service_tier: standard
+            thinking_level: Low
+            url_context: false
           mode: chat
-          name: gpt-4.1-mini
-          provider: langgenius/openai/openai
+          name: gemini-3.8-flash
+          provider: langgenius/gemini/google
         prompt_template:
         - id: sys-claim-extraction-v1
           role: system

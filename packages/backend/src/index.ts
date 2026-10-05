@@ -36,3 +36,11 @@ export type { EvidenceInput, CreateClaimInput, EditClaimInput, ClaimInputManifes
 export { DifyClaimProvider, ClaimProviderError, claimWorkflowRelease, claimWorkflowSettings, CLAIMS_CONTRACT } from './claims/provider.js';
 export { FactualBasisService } from './claims/factual-basis.service.js';
 export { createClaimJobHandler } from './claims/jobs-handler.js';
+export { ContentMode, EditorialOrigin } from './generated/prisma/enums.js';
+export { EditorialService, canonicalBriefHash } from './editorial/editorial.service.js';
+export { saveBriefInput, manualOutlineInput, reviewOutlineInput, generateOutlineInput, outlineContentSchema,
+  outlineOutputSchema, outlineInputManifestSchema } from './editorial/contracts.js';
+export type { SaveBriefInput, ManualOutlineInput, OutlineContent, OutlineOutput, OutlineWorkflowRelease, OutlineInputManifest } from './editorial/contracts.js';
+export { DifyOutlineProvider, OutlineProviderError, outlineWorkflowRelease, outlineWorkflowSettings, OUTLINE_CONTRACT } from './editorial/provider.js';
+export type { OutlineProviderInput, OutlineWorkflowSettings } from './editorial/provider.js';
+export { createOutlineJobHandler } from './editorial/jobs-handler.js';

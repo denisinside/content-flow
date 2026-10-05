@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import SourceWorkspace from './SourceWorkspace.vue'
 import FactsWorkspace from './FactsWorkspace.vue'
+import BriefWorkspace from './BriefWorkspace.vue'
 
 type ProjectFormat =
   | 'ARTICLE'
@@ -67,9 +68,10 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts))?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief))?\/?$/i)?.[1] ?? null)
 const isDetail = computed(() => page.value !== null)
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
+const isBrief = computed(() => /\/brief\/?$/i.test(pathname.value))
 const isFacts = computed(() => /\/facts\/?$/i.test(pathname.value))
 const canSave = computed(() => topic.value.trim().length > 0 && topic.value.trim().length <= 500 && selectedFormats.value.length > 0 && selectedFormats.value.length <= formats.length)
 const hasChanges = computed(() => {
@@ -576,7 +578,33 @@ onBeforeUnmount(() => {
       </Alert>
 
       <template v-else-if="currentProject">
-        <template v-if="isFacts">
+        <nav
+          class="editorial-navigation"
+          aria-label="Робота над проєктом"
+        >
+          <a
+            :href="`/projects/${currentProject.id}/sources`"
+            :aria-current="isSources ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/sources`)"
+          >Джерела</a><a
+            :href="`/projects/${currentProject.id}/facts`"
+            :aria-current="isFacts ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/facts`)"
+          >Факти</a><a
+            :href="`/projects/${currentProject.id}/brief`"
+            :aria-current="isBrief ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/brief`)"
+          >Бриф</a>
+        </nav><template v-if="isBrief">
+          <BriefWorkspace
+            :key="currentProject.id"
+            :project-id="currentProject.id"
+            :project-topic="currentProject.topic"
+            :csrf-token="csrfToken"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+          />
+        </template><template v-else-if="isFacts">
           <FactsWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
@@ -786,3 +814,10 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.editorial-navigation { display: flex; flex-wrap: wrap; gap: 24px; border-bottom: 1px solid var(--rule, #d4d9d1); padding: 12px 0; margin: 8px 0 28px; }
+.editorial-navigation a { color: inherit; padding: 8px 0; text-decoration: none; font-size: 14px; }
+.editorial-navigation a[aria-current] { color: var(--accent, #9b482f); font-weight: 600; border-bottom: 2px solid currentColor; }
+.editorial-navigation a:focus-visible { outline: 2px solid var(--accent, #9b482f); outline-offset: 4px; }
+</style>

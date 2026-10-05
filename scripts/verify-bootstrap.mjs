@@ -61,7 +61,7 @@ for (const p of authoredMd) {
 }
 const cfg = read('.codex/config.toml');
 const expectedSettings = { enabled: 'true', max_concurrent_threads_per_session: '6', default_subagent_model: '"gpt-6-luna"', default_subagent_reasoning_effort: '"high"', interrupt_message: 'true' };
-const cfgLines = cfg.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+const cfgLines = cfg.replace(/\[[ \t\r\n]*([^\[\]]*)\]/g, (match, values) => values.includes('"') ? `[${values.split(',').map(v => v.trim()).filter(Boolean).join(', ')}]` : match).split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
 const tables = {};
 let table;
 for (const line of cfgLines) {
@@ -84,6 +84,7 @@ const expectedTables = {
     args: '[".codex/tools/run-mcp.mjs", "playwright", "--headless", "--isolated", "--browser", "chrome", "--output-dir", ".codex/artifacts/playwright"]',
     startup_timeout_sec: '30', tool_timeout_sec: '60',
   },
+  'mcp_servers.dify-docs': { type: '"http"', url: '"https://docs.dify.ai/mcp"' },
 };
 check(Object.keys(tables).length === Object.keys(expectedTables).length, 'Unexpected project config table/root model');
 for (const [name, settings] of Object.entries(expectedTables)) {

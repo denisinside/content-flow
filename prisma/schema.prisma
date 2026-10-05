@@ -41,6 +41,10 @@ model UserProfile {
   claimConflicts ClaimConflict[] @relation("ConflictCreator")
   resolvedConflicts ClaimConflict[] @relation("ConflictResolver")
   factualBases FactualBasisRevision[] @relation("BasisCreator")
+  briefRevisions BriefRevision[] @relation("BriefCreator")
+  outlineRevisions OutlineRevision[] @relation("OutlineCreator")
+  approvedOutlines OutlineRevision[] @relation("OutlineApprover")
+  withdrawnOutlines OutlineRevision[] @relation("OutlineWithdrawer")
 
   @@schema("contextflow")
 }
@@ -101,6 +105,7 @@ model WorkspaceStyleRevision {
   createdBy String @db.Uuid
   creator UserProfile @relation(fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
+  briefRevisions BriefRevision[]
   @@id([workspaceId, revision])
   @@schema("contextflow")
 }
@@ -175,6 +180,10 @@ model Project {
   claims Claim[]
   claimConflicts ClaimConflict[]
   factualBases FactualBasisRevision[]
+  brief Brief?
+  briefRevisions BriefRevision[]
+  outline Outline?
+  @@unique([id, workspaceId])
   @@index([createdBy])
   @@index([workspaceId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([createdAt(sort: Desc), id(sort: Desc)])
@@ -268,6 +277,7 @@ model SourceSnapshot {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   fragments SourceFragment[]
   claimEvidence ClaimEvidence[]
+  briefContexts BriefContextSnapshot[]
 
   @@unique([projectId, id])
   @@unique([projectId, jobId])
@@ -283,6 +293,7 @@ enum JobOperation {
   WEB_IMPORT
   DOCUMENT_IMPORT
   CLAIM_EXTRACTION
+  OUTLINE_GENERATION
   @@schema("contextflow")
 }
 
@@ -334,6 +345,7 @@ model Job {
   sourceSnapshots SourceSnapshot[]
   claimRevisions ClaimRevision[]
   aiExecutions AIExecution[]
+  outlineRevisions OutlineRevision[]
   @@unique([projectId, id])
   @@unique([projectId, operation, commandKey])
   @@index([status, nextAttemptAt])
@@ -472,6 +484,7 @@ model ClaimRevision {
   conflictParticipants ClaimConflictParticipant[]
   selectedForConflicts ClaimConflict[] @relation("ConflictSelection")
   basisClaims BasisClaim[]
+  requiredByBriefs BriefRequiredClaim[]
   @@unique([projectId, id])
   @@unique([projectId, claimId, id])
   @@unique([claimId, number])
@@ -569,6 +582,7 @@ model FactualBasisRevision {
   creator UserProfile @relation("BasisCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   claims BasisClaim[]
+  outlineRevisions OutlineRevision[]
   @@unique([projectId, id])
   @@unique([projectId, sequence])
   @@schema("contextflow")
@@ -618,7 +632,138 @@ model AIExecution {
   startedAt DateTime @default(now()) @db.Timestamptz(3)
   finishedAt DateTime? @db.Timestamptz(3)
   errorCategory String? @db.VarChar(64)
+  outlineRevisions OutlineRevision[]
+  @@unique([projectId, id])
   @@unique([attemptId])
   @@index([projectId, jobId])
+  @@schema("contextflow")
+}
+
+enum ContentMode {
+  FACTUAL
+  CREATIVE
+  @@schema("contextflow")
+}
+
+enum EditorialOrigin {
+  MANUAL
+  AI
+  @@schema("contextflow")
+}
+
+model Brief {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @unique @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  revision Int @default(1)
+  currentRevisionId String? @db.Uuid
+  currentRevision BriefRevision? @relation("CurrentBriefRevision", fields: [projectId, id, currentRevisionId], references: [projectId, briefId, id], onDelete: Restrict, onUpdate: NoAction)
+  revisions BriefRevision[] @relation("BriefRevisions")
+  @@unique([projectId, id])
+  @@schema("contextflow")
+}
+
+model BriefRevision {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  briefId String @db.Uuid
+  number Int
+  brief Brief @relation("BriefRevisions", fields: [projectId, briefId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  currentFor Brief[] @relation("CurrentBriefRevision")
+  contentMode ContentMode
+  topic String @db.VarChar(500)
+  audience String @db.VarChar(2000)
+  centralMessage String @db.VarChar(4000)
+  category String @db.VarChar(120)
+  tone String @db.VarChar(10000)
+  targetLength Int
+  cta String @db.VarChar(2000)
+  exclusions Json
+  notes String @db.Text
+  workspaceId String @db.Uuid
+  project Project @relation(fields: [projectId, workspaceId], references: [id, workspaceId], onDelete: Restrict, onUpdate: NoAction)
+  workspaceStyleRevision Int
+  style WorkspaceStyleRevision @relation(fields: [workspaceId, workspaceStyleRevision], references: [workspaceId, revision], onDelete: Restrict, onUpdate: NoAction)
+  sha256 String @db.Char(64)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("BriefCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  requiredClaims BriefRequiredClaim[]
+  contextSnapshots BriefContextSnapshot[]
+  outlineRevisions OutlineRevision[]
+  @@unique([projectId, id])
+  @@unique([projectId, briefId, id])
+  @@unique([briefId, number])
+  @@schema("contextflow")
+}
+
+model BriefRequiredClaim {
+  projectId String @db.Uuid
+  briefRevisionId String @db.Uuid
+  claimRevisionId String @db.Uuid
+  briefRevision BriefRevision @relation(fields: [projectId, briefRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  claimRevision ClaimRevision @relation(fields: [projectId, claimRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  @@id([briefRevisionId, claimRevisionId])
+  @@schema("contextflow")
+}
+
+model BriefContextSnapshot {
+  projectId String @db.Uuid
+  briefRevisionId String @db.Uuid
+  snapshotId String @db.Uuid
+  capturedPurpose MaterialPurpose
+  briefRevision BriefRevision @relation(fields: [projectId, briefRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  snapshot SourceSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  @@id([briefRevisionId, snapshotId])
+  @@schema("contextflow")
+}
+
+model Outline {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @unique @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  revision Int @default(1)
+  currentRevisionId String? @db.Uuid
+  currentApprovedRevisionId String? @db.Uuid
+  currentRevision OutlineRevision? @relation("CurrentOutlineRevision", fields: [projectId, id, currentRevisionId], references: [projectId, outlineId, id], onDelete: Restrict, onUpdate: NoAction)
+  currentApprovedRevision OutlineRevision? @relation("ApprovedOutlineRevision", fields: [projectId, id, currentApprovedRevisionId], references: [projectId, outlineId, id], onDelete: Restrict, onUpdate: NoAction)
+  revisions OutlineRevision[] @relation("OutlineRevisions")
+  @@unique([projectId, id])
+  @@schema("contextflow")
+}
+
+model OutlineRevision {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  outlineId String @db.Uuid
+  number Int
+  outline Outline @relation("OutlineRevisions", fields: [projectId, outlineId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  currentFor Outline[] @relation("CurrentOutlineRevision")
+  approvedFor Outline[] @relation("ApprovedOutlineRevision")
+  briefRevisionId String @db.Uuid
+  briefRevision BriefRevision @relation(fields: [projectId, briefRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  basisRevisionId String? @db.Uuid
+  basisRevision FactualBasisRevision? @relation(fields: [projectId, basisRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  contentMode ContentMode
+  content Json
+  sha256 String @db.Char(64)
+  origin EditorialOrigin
+  createdBy String @db.Uuid
+  creator UserProfile @relation("OutlineCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  jobId String? @unique @db.Uuid
+  job Job? @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  aiExecutionId String? @db.Uuid
+  execution AIExecution? @relation(fields: [projectId, aiExecutionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  approvedBy String? @db.Uuid
+  approver UserProfile? @relation("OutlineApprover", fields: [approvedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  approvedAt DateTime? @db.Timestamptz(3)
+  withdrawnBy String? @db.Uuid
+  withdrawer UserProfile? @relation("OutlineWithdrawer", fields: [withdrawnBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  withdrawnAt DateTime? @db.Timestamptz(3)
+  withdrawalReason String? @db.VarChar(2000)
+  @@unique([projectId, id])
+  @@unique([projectId, outlineId, id])
+  @@unique([outlineId, number])
   @@schema("contextflow")
 }

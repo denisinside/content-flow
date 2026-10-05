@@ -15,6 +15,7 @@ export interface JobContext {
 export type JobCommitResult = Prisma.InputJsonValue;
 export interface JobHandler {
   operation: JobOperation;
+  validateSubmission?(tx: Prisma.TransactionClient, job: Job): Promise<void>;
   execute(context: JobContext): Promise<unknown>;
   resume?(context: JobContext, providerRunId: string): Promise<unknown>;
   failed?(context: JobContext, error: unknown): Promise<void>;
