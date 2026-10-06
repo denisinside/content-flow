@@ -44,3 +44,10 @@ export type { SaveBriefInput, ManualOutlineInput, OutlineContent, OutlineOutput,
 export { DifyOutlineProvider, OutlineProviderError, outlineWorkflowRelease, outlineWorkflowSettings, OUTLINE_CONTRACT } from './editorial/provider.js';
 export type { OutlineProviderInput, OutlineWorkflowSettings } from './editorial/provider.js';
 export { createOutlineJobHandler } from './editorial/jobs-handler.js';
+export { ArticleService } from './editorial/article.service.js';
+export { articleContentSchema, articleDocumentDetails, saveArticleDraftInput, importArticleInput, checkpointArticleInput,
+  reviewArticleInput, generateArticleInput, articleInputManifestSchema, articleOutputSchema, articleWorkflowReleaseSchema } from './editorial/article-contracts.js';
+export type { ArticleContent, ArticleNode, ArticleMark, ArticleMapping, ArticleInputManifest, ArticleOutput, ArticleWorkflowRelease } from './editorial/article-contracts.js';
+export { DifyArticleProvider, ArticleProviderError, articleWorkflowRelease, articleWorkflowSettings, ARTICLE_CONTRACT } from './editorial/article-provider.js';
+export type { ArticleProviderInput, ArticleWorkflowSettings } from './editorial/article-provider.js';
+export { createArticleJobHandler } from './editorial/article-jobs-handler.js';

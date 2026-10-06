@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { defineAsyncComponent, computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea'
 import SourceWorkspace from './SourceWorkspace.vue'
 import FactsWorkspace from './FactsWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
+const ArticleWorkspace = defineAsyncComponent(() => import('./ArticleWorkspace.vue'))
 
 type ProjectFormat =
   | 'ARTICLE'
@@ -33,6 +34,7 @@ interface Project {
 
 interface Props {
   csrfToken: string
+  userId: string
   workspaceId: string
 }
 
@@ -54,6 +56,7 @@ const pathname = ref(window.location.pathname)
 const projects = ref<Project[]>([])
 const nextCursor = ref<string | null>(null)
 const currentProject = ref<Project | null>(null)
+const historicalArticle = ref(false)
 const listLoading = ref(true)
 const detailLoading = ref(false)
 const saving = ref(false)
@@ -68,7 +71,8 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief))?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article))?\/?$/i)?.[1] ?? null)
+const isArticle = computed(() => /\/article\/?$/i.test(pathname.value))
 const isDetail = computed(() => page.value !== null)
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
 const isBrief = computed(() => /\/brief\/?$/i.test(pathname.value))
@@ -193,6 +197,7 @@ async function loadProject(id: string) {
   detailLoading.value = true
   detailError.value = ''
   currentProject.value = null
+  historicalArticle.value = false
   editing.value = false
   conflict.value = false
   try {
@@ -207,6 +212,13 @@ async function loadProject(id: string) {
     if (!requestIsCurrent(version)) return
     currentProject.value = result.project
     emit('project-workspace', result.project.workspaceId)
+    if (!result.project.formats.includes('ARTICLE')) {
+      void fetch(`/api/v1/projects/${encodeURIComponent(id)}/article`, { credentials: 'same-origin', signal: controller.signal }).then(async response => {
+        if (!response.ok || !requestIsCurrent(version)) return
+        const articleState = await response.json() as { article: unknown }
+        if (requestIsCurrent(version)) historicalArticle.value = Boolean(articleState.article)
+      }).catch(() => { /* Project navigation remains usable during optional history lookup. */ })
+    }
   } catch (error) {
     if (!requestIsCurrent(version) || (error instanceof DOMException && error.name === 'AbortError')) return
     detailError.value = error instanceof Error ? error.message : 'Не вдалося завантажити проєкт.'
@@ -594,8 +606,23 @@ onBeforeUnmount(() => {
             :href="`/projects/${currentProject.id}/brief`"
             :aria-current="isBrief ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}/brief`)"
-          >Бриф</a>
-        </nav><template v-if="isBrief">
+          >Бриф</a><a
+            v-if="currentProject.formats.includes('ARTICLE') || historicalArticle || isArticle"
+            :href="`/projects/${currentProject.id}/article`"
+            :aria-current="isArticle ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/article`)"
+          >Стаття</a>
+        </nav><template v-if="isArticle">
+          <ArticleWorkspace
+            :key="currentProject.id"
+            :project-id="currentProject.id"
+            :project-topic="currentProject.topic"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+          />
+        </template><template v-else-if="isBrief">
           <BriefWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"

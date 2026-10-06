@@ -71,6 +71,16 @@ function clearPreferences() {
   preferenceEditing.value = false
 }
 
+function clearArticleRecovery() {
+  window.dispatchEvent(new Event('cf:article-session-ended'))
+  try {
+    for (let index = sessionStorage.length - 1; index >= 0; index--) {
+      const key = sessionStorage.key(index)
+      if (key?.startsWith('cf:article:')) sessionStorage.removeItem(key)
+    }
+  } catch { /* Browser storage may be disabled; server-side saves remain canonical. */ }
+}
+
 async function loadPreferences() {
   preferenceAbort?.abort()
   const controller = new AbortController()
@@ -166,6 +176,7 @@ function cancelPreferenceEdit() {
 function applySession(result: SessionResponse) {
   csrfToken.value = result.csrfToken
   if (result.authenticated && result.user) {
+    if (user.value && user.value.id !== result.user.id) clearArticleRecovery()
     const needsPreferences = user.value?.id !== result.user.id || state.value !== 'signed-in'
     if (needsPreferences) clearPreferences()
     user.value = result.user
@@ -173,6 +184,7 @@ function applySession(result: SessionResponse) {
     message.value = ''
     if (needsPreferences) void loadPreferences()
   } else {
+    clearArticleRecovery()
     clearPreferences()
     user.value = null
     state.value = 'signed-out'
@@ -195,6 +207,7 @@ async function checkSession() {
     if (requestGeneration !== generation) return
     if (!response.ok) {
       if (response.status === 401) {
+        clearArticleRecovery()
         clearPreferences()
         state.value = 'signed-out'
         user.value = null
@@ -292,6 +305,7 @@ async function logout() {
   sessionCheckAbort?.abort()
   const logoutGeneration = ++generation
   const token = csrfToken.value
+  clearArticleRecovery()
   clearPreferences()
   state.value = 'loading'
   busy.value = true
@@ -336,6 +350,7 @@ async function recordActivity(event: Event) {
     if (requestGeneration !== generation) return
     if (response.status === 401) {
       user.value = null
+      clearArticleRecovery()
       state.value = 'signed-out'
       await checkSession()
     }

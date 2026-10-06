@@ -174,7 +174,7 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await expect(channelsOnlyRow).not.toContainText('Стаття');
   await channelsOnlyRow.getByRole('link', { name: longTopic, exact: true }).click();
   await expect(page.getByRole('heading', { name: longTopic, exact: true })).toBeVisible();
-  await expect(page.getByText('Стаття', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Усі проєкти' }).click();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
@@ -187,11 +187,11 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await expect(page).toHaveURL(/\/projects\/[^/]+$/);
   await expect(page.getByRole('heading', { name: articleTopic, exact: true })).toBeVisible();
-  await expect(page.getByText('Стаття', { exact: true })).toBeVisible();
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toBeVisible();
   await expect(page.getByText('Публікація у LinkedIn', { exact: true })).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole('heading', { name: articleTopic, exact: true })).toBeVisible();
-  await expect(page.getByText('Стаття', { exact: true })).toBeVisible();
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toBeVisible();
 
   // Add a channel beside Article, then remove Article in a later revision.
   // The persisted display after reload must follow only the current selection.
@@ -199,19 +199,19 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await setFormats(page, ['Стаття', 'Публікація у LinkedIn']);
   await captureAtWidths(page, 'article-and-channel-settings');
   await page.getByRole('button', { name: 'Зберегти зміни' }).click();
-  await expect(page.getByText('Стаття', { exact: true })).toBeVisible();
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toBeVisible();
   await expect(page.getByText('Публікація у LinkedIn', { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByText('Стаття', { exact: true })).toBeVisible();
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toBeVisible();
   await expect(page.getByText('Публікація у LinkedIn', { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Редагувати проєкт' }).click();
   await setFormats(page, ['Публікація у LinkedIn']);
   await page.getByRole('button', { name: 'Зберегти зміни' }).click();
-  await expect(page.getByText('Стаття', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Публікація у LinkedIn', { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByText('Стаття', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.format-list').getByText('Стаття', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Публікація у LinkedIn', { exact: true })).toBeVisible();
   await page.goto('/projects');
   const articleProjectRow = page.locator('.project-row').filter({ hasText: articleTopic });

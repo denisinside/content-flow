@@ -591,6 +591,7 @@ onMounted(() => {
       :key="selected.id"
       :csrf-token="csrfToken"
       :workspace-id="selected.id"
+      :user-id="userId"
       @session-expired="emit('session-expired')"
       @project-workspace="onProjectWorkspace"
     />

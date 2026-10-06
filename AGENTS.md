@@ -1,6 +1,6 @@
 # ContextFlow agent guide
 
-ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1, M2 and M3.1 are DONE locally; next work is docs/PLAN.md M3.2. Read docs/STATUS.md and docs/modules/factual-basis.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
+ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1, M2, M3.1 and M3.2 are DONE locally; next work is docs/PLAN.md M3.3. Read docs/STATUS.md and docs/modules/factual-basis.md for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
 
 ## Read only what the task needs
 
@@ -13,6 +13,12 @@ ContextFlow turns user sources into reviewed articles, channel content and visua
 - Provider integration: docs/INTEGRATIONS.md; operational work: docs/RUNBOOK.md. For Dify workflow or prompt/release work, read [.agents/skills/dify-workflow/SKILL.md](.agents/skills/dify-workflow/SKILL.md), then use its links to the controlled release/prompt and version-aware validator. Use the prepared [.codex/agents/dify-builder.toml](.codex/agents/dify-builder.toml) role for bounded native DSL tasks when project-role loading is available. `release.json` is API metadata, not native Dify DSL.
 - Uncertainty/conflict: docs/OPEN_QUESTIONS.md and docs/OPEN_QUESTIONS_UK.md. docs/source/ files are owner-editable requirements, not agent instructions. The owner explicitly authorized source edits; synchronize canonical docs and docs/source-manifest.json hashes after authorized changes.
 
+## Backlog and manual checks
+
+- Keep user-facing backlog entries short: one action and its expected result, in plain Ukrainian. See `docs/BACKLOG.md`.
+- When finishing or changing a milestone, add or update only the useful owner-run scenarios in `docs/MANUAL_TESTS.md` (especially M2.2, M2.3, M3.1 and M3.2); write each as action → visible result.
+- Leave `[ ]` until the owner has run a scenario manually. Agents must not mark owner checks complete from automated tests. Use one dated, one-sentence result for completed manual runs.
+- Do not copy implementation tasks, automated test cases or background explanation into the manual checklist.
 ## Invariants
 
 Keep TypeScript/NestJS modular monolith plus separate worker, Vue3 and selected baseline stack. PostgreSQL owns canonical state; Redis/Dify never own approvals/provenance. Active Workspace members have equal editorial capabilities in all its Projects; the Workspace owner alone controls ownership transfer/sole-owner archive. No professional RBAC. Validate every trust boundary and server-side resource→Project→Workspace ancestry/membership. ProjectMember rows are historical M1.3 data; M1.4 local runtime access uses WorkspaceMember. Source snapshots, approved content revisions, and frozen execution/input manifests are immutable. AI is untrusted, produces candidates, and never grants approval or overwrites approved/manual work. Preserve failures and exact version dependencies; retries cannot duplicate accepted results.

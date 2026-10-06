@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "contextflow-dify-release-v1",
+  "operation": "ARTICLE_GENERATION",
+  "releaseId": "article-generation-2026-10-06.1",
+  "contractVersion": "article-v1",
+  "promptTemplateVersion": "article-generation-prompt-v1",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "0a4620fb5b76148a5399d88883878e3d6d4e045a9b5ce5cf7d4461c25d928e18",
+  "workflowDslFile": "article-generation-v1.yml",
+  "workflowDslSha256": "c6be669fa4b126ed5d1d3f3be1d8224fd7a59f37cdbf4fa7dde6f0ec288895a2",
+  "apiBaseEnv": "DIFY_API_BASE_URL",
+  "apiKeyEnv": "DIFY_ARTICLE_GENERATION_API_KEY",
+  "publishedWorkflowIdEnv": "DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_ARTICLE_GENERATION_CONFIG_SHA256",
+  "inputVariable": "editorial_json",
+  "outputVariable": "article_json",
+  "responseMode": "streaming",
+  "provider": "dify",
+  "model": {
+    "provider": "langgenius/gemini/google",
+    "name": "gemini-3.8-flash",
+    "mode": "chat",
+    "completionParams": {
+      "max_output_tokens": 8192,
+      "thinking_level": "Low",
+      "include_thoughts": false,
+      "media_resolution": "Default",
+      "grounding": false,
+      "url_context": false,
+      "code_execution": false,
+      "service_tier": "standard"
+    }
+  },
+  "configDigest": "e7c7006b74b3215fddead8e9d3a4eb0272056b6c1b558e02a5fbc47c253cae35"
+}
