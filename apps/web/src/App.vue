@@ -121,7 +121,7 @@ function clearArticleRecovery() {
   try {
     for (let index = sessionStorage.length - 1; index >= 0; index--) {
       const key = sessionStorage.key(index)
-      if (key?.startsWith('cf:article:')) sessionStorage.removeItem(key)
+      if (key?.startsWith('cf:article:') || key?.startsWith('cf:telegram:')) sessionStorage.removeItem(key)
     }
   } catch { /* Browser storage may be disabled; server-side saves remain canonical. */ }
 }

@@ -51,3 +51,10 @@ export type { ArticleContent, ArticleNode, ArticleMark, ArticleMapping, ArticleI
 export { DifyArticleProvider, ArticleProviderError, articleWorkflowRelease, articleWorkflowSettings, ARTICLE_CONTRACT } from './editorial/article-provider.js';
 export type { ArticleProviderInput, ArticleWorkflowSettings } from './editorial/article-provider.js';
 export { createArticleJobHandler } from './editorial/article-jobs-handler.js';
+export { TelegramService } from './editorial/telegram.service.js';
+export { telegramContentSchema, telegramOutputSchema, telegramInputManifestSchema, telegramWorkflowReleaseSchema,
+  saveTelegramDraftInput, checkpointTelegramInput, reviewTelegramInput, rereviewTelegramInput, generateTelegramInput } from './editorial/telegram-contracts.js';
+export type { TelegramContent, TelegramOutput, TelegramInputManifest, TelegramWorkflowRelease, SaveTelegramDraftInput, ReviewTelegramInput, GenerateTelegramInput } from './editorial/telegram-contracts.js';
+export { DifyTelegramProvider, TelegramProviderError, telegramWorkflowRelease, telegramWorkflowSettings, TELEGRAM_CONTRACT } from './editorial/telegram-provider.js';
+export type { TelegramProviderInput, TelegramWorkflowSettings } from './editorial/telegram-provider.js';
+export { createTelegramJobHandler } from './editorial/telegram-jobs-handler.js';

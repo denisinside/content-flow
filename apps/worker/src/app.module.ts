@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ArticleService, createArticleJobHandler, createClaimJobHandler, createOutlineJobHandler, createImportJobHandlers, DependencyHealthService, DurableJobService, DurableJobWorker, EditorialService, EXTERNAL_PROCESSING_NOTICE, FactualBasisService, FoundationModule, loadRuntimeConfig, PrivateAssetStore } from '@contextflow/backend';
+import { ArticleService, TelegramService, createTelegramJobHandler, createArticleJobHandler, createClaimJobHandler, createOutlineJobHandler, createImportJobHandlers, DependencyHealthService, DurableJobService, DurableJobWorker, EditorialService, EXTERNAL_PROCESSING_NOTICE, FactualBasisService, FoundationModule, loadRuntimeConfig, PrivateAssetStore } from '@contextflow/backend';
 import { HealthController } from './health/health.controller.js';
 
 @Module({
@@ -18,6 +18,7 @@ import { HealthController } from './health/health.controller.js';
           new DurableJobService(health.prisma, { noticeVersion: EXTERNAL_PROCESSING_NOTICE.version })) }),
         createOutlineJobHandler({ prisma: health.prisma, editorial, factualBasis: facts }),
         createArticleJobHandler({ prisma: health.prisma, editorial: article, factualBasis: facts }),
+        createTelegramJobHandler({ prisma: health.prisma, telegram: new TelegramService(health.prisma, jobs, facts, article), articles: article, factualBasis: facts }),
       ]);
     } }],
 })

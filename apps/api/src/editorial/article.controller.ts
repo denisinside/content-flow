@@ -32,5 +32,10 @@ export class ArticleController {
   approve(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Param('versionId') version: string, @Body() body: unknown): Promise<ArticleState> { return this.articles.review(request.sessionUser.id, id(project), id(version), 'approve', parse(reviewArticleInput, body)); }
   @Post(':versionId/withdraw')
   withdraw(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Param('versionId') version: string, @Body() body: unknown): Promise<ArticleState> { return this.articles.review(request.sessionUser.id, id(project), id(version), 'withdraw', parse(reviewArticleInput, body)); }
+  @Post(':versionId/rereview')
+  rereview(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Param('versionId') version: string, @Body() body: unknown): Promise<ArticleState> {
+    const input = parse(z.object({ expectedRevision: z.number().int().nonnegative(), expectedReviewCounter: z.number().int().nonnegative(), acknowledgeUnmapped: z.boolean().optional() }).strict(), body);
+    return this.articles.rereview(request.sessionUser.id, id(project), id(version), input);
+  }
 }
 

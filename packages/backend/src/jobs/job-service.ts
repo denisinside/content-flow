@@ -179,7 +179,7 @@ export class DurableJobService {
       const current = await this.owned(tx, job, attempt);
       // Claim commits serialize with review/basis edits before acquiring shared
       // ancestry locks, avoiding concurrent shared-to-exclusive lock upgrades.
-      if (job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION' || job.operation === 'ARTICLE_GENERATION') {
+      if (job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION' || job.operation === 'ARTICLE_GENERATION' || job.operation === 'TELEGRAM_GENERATION') {
         await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id" = ${job.projectId}::uuid FOR UPDATE`;
       }
       await this.assertEffects(tx, job.projectId, job.requestedBy);

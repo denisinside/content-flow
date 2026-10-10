@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import ArticlePreview from './ArticlePreview.vue'
 
 interface Content { title: string; document: JSONContent }
-interface Version { id: string; number: number; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string; status: string; sourceArticleRevision: number; approvedAt?: string; withdrawnAt?: string }
+interface Version { id: string; number: number; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string; status: string; sourceArticleRevision: number; approvedAt?: string; withdrawnAt?: string; reviewCounter?: number; staleReasons?: string[]; blockingReasons?: string[]; eligible?: boolean; hasUnmapped?: boolean }
 interface Draft { baseVersionId?: string | null; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string }
 interface Evidence { claimRevisionId: string; evidenceId: string; wording: string; quote: string; snapshotId: string; materialTitle: string }
 interface State { article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleEvidence: Evidence[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { contentMode: string } } | null; outline: { currentApprovedRevisionId: string | null } | null } }
@@ -91,6 +91,10 @@ const completedJobs = computed(() => jobs.value.filter(job => ['SUCCEEDED', 'CAN
 const proposals = computed(() => state.value?.article?.versions.filter(version => version.origin === 'AI' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
 const saveStatus = computed(() => saving.value ? 'Зберігаємо…' : conflict.value ? 'Потрібно узгодити зміни' : error.value && dirty.value ? 'Не збережено' : dirty.value ? 'Є незбережені зміни' : 'Збережено')
 const approval = computed(() => state.value?.article?.versions.find(version => version.id === state.value?.article?.currentApprovedVersionId))
+function dependencyStatus(reasons: string[]) {
+  const labels: Record<string, string> = { WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', BRIEF_CHANGED: 'змінився бриф', MISSING_FACTUAL_BASIS: 'немає придатної фактичної основи', INVALID_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', INVALID_ORIGINAL_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', FACTUAL_BASIS_CHANGED: 'змінилася фактична основа', OUTLINE_CHANGED: 'змінилася погоджена структура', INVALID_ORIGINAL_EVIDENCE: 'початкові докази статті втратили придатність' }
+  return reasons.map(reason => labels[reason] ?? 'змінилися редакційні залежності').join('; ')
+}
 watch(readonly, value => editor.value?.setEditable(!value))
 watch([title, contentMode], () => changed())
 function resizeTitle() {
@@ -296,7 +300,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
         v-if="state.staleReasons.length"
         class="article-notice"
       >
-        Потребує перегляду: {{ state.staleReasons.map(reason => ({ WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', BRIEF_CHANGED: 'змінився бриф', MISSING_FACTUAL_BASIS: 'немає придатної фактичної основи', INVALID_FACTUAL_BASIS: 'попередня фактична основа втратила придатність', FACTUAL_BASIS_CHANGED: 'змінилася фактична основа', OUTLINE_CHANGED: 'змінилася погоджена структура' } as Record<string, string>)[reason] ?? 'змінився контекст статті').join('; ') }}. Перевірте текст перед оновленням контексту. <Button
+        Потребує перегляду: {{ dependencyStatus(state.staleReasons) }}. Перевірте текст перед оновленням контексту. <Button
           class="workspace-button"
           variant="outline"
           :disabled="busy || conflict || readonly"
@@ -552,16 +556,37 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               :key="version.id"
               class="article-version"
             >
-              <h3>Версія {{ version.number }}</h3><p>{{ version.origin === 'AI' ? (version.id === state.article?.draft?.baseVersionId ? 'Створено AI · Застосовано до чернетки' : 'Пропозиція AI · Не застосовано') : version.origin === 'UNVERIFIED_IMPORTED' ? 'Готова стаття · Не перевірено' : 'Редакторська версія' }} · {{ version.status === 'APPROVED' ? 'Погоджено' : version.status === 'WITHDRAWN' ? 'Відкликано' : 'Очікує перегляду' }}</p><p>{{ version.content.title }}</p><details><summary>Переглянути текст версії</summary><ArticlePreview :document="version.content.document" /></details><template v-if="version.status === 'PROPOSED' && version.id === state.article?.draft?.baseVersionId && !readonly">
-                <label v-if="state.hasUnmapped"><input
+              <h3>Версія {{ version.number }}</h3><p>{{ version.origin === 'AI' ? (version.id === state.article?.draft?.baseVersionId ? 'Створено AI · Застосовано до чернетки' : 'Пропозиція AI · Не застосовано') : version.origin === 'UNVERIFIED_IMPORTED' ? 'Готова стаття · Не перевірено' : 'Редакторська версія' }} · {{ version.status === 'APPROVED' ? 'Погоджено' : version.status === 'WITHDRAWN' ? 'Відкликано' : 'Очікує перегляду' }}</p><p
+                v-if="version.staleReasons?.length"
+                class="article-notice"
+              >
+                Потребує перегляду: {{ dependencyStatus(version.staleReasons) }}.
+              </p><p
+                v-if="version.blockingReasons?.length"
+                class="article-notice"
+              >
+                Не можна погодити: {{ dependencyStatus(version.blockingReasons) }}.
+              </p><p>{{ version.content.title }}</p><details><summary>Переглянути текст версії</summary><ArticlePreview :document="version.content.document" /></details><template v-if="version.status === 'PROPOSED' && version.id === state.article?.draft?.baseVersionId && !readonly">
+                <label v-if="version.hasUnmapped"><input
                   v-model="acknowledgeUnmapped"
                   type="checkbox"
                 > Переглянув твердження без посилань</label><Button
                   class="workspace-button workspace-button-primary"
-                  :disabled="busy || dirty || conflict || !!state.mappingIssues.length || (state.hasUnmapped && !acknowledgeUnmapped)"
-                  @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped })"
+                  :disabled="busy || dirty || conflict || !!version.blockingReasons?.length || !!state.mappingIssues.length || (version.hasUnmapped && !acknowledgeUnmapped)"
+                  @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped, expectedReviewCounter: version.reviewCounter ?? 0 })"
                 >
                   Погодити версію {{ version.number }}
+                </Button>
+              </template><template v-if="version.status === 'APPROVED' && version.id === state.article?.currentApprovedVersionId && version.staleReasons?.length && !readonly">
+                <label v-if="version.hasUnmapped"><input
+                  v-model="acknowledgeUnmapped"
+                  type="checkbox"
+                > Переглянув твердження без посилань</label><Button
+                  class="workspace-button workspace-button-primary"
+                  :disabled="busy || dirty || conflict || !!version.blockingReasons?.length || (version.hasUnmapped && !acknowledgeUnmapped)"
+                  @click="action(`/article/${version.id}/rereview`, { acknowledgeUnmapped, expectedRevision: state.article?.revision, expectedReviewCounter: version.reviewCounter ?? 0 })"
+                >
+                  Переглянути без зміни тексту
                 </Button>
               </template><Button
                 v-if="version.status === 'APPROVED' && !readonly"

@@ -53,7 +53,7 @@ authoredMd.push(...walk(path.join(root, '.agents/skills')).filter(p => p.endsWit
 let links = 0;
 for (const p of authoredMd) {
   for (const m of fs.readFileSync(p, 'utf8').matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
-    const target = m[1].replace(/^<|>$/g, '').split('#')[0];
+    const target = m[1].replace(/^<|>$/g, '').split(/[?#]/)[0];
     if (!target || /^[a-z]+:/i.test(target)) continue;
     links++;
     check(fs.existsSync(path.resolve(path.dirname(p), decodeURIComponent(target))), `Broken link ${path.relative(root, p)} → ${target}`);

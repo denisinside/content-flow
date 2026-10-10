@@ -47,6 +47,12 @@ model UserProfile {
   articleVersions ArticleVersion[] @relation("ArticleVersionCreator")
   articleApprovals ArticleVersion[] @relation("ArticleApprover")
   articleWithdrawals ArticleVersion[] @relation("ArticleWithdrawer")
+  adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftEditor")
+  adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionCreator")
+  adaptationApprovals AdaptationRevision[] @relation("AdaptationApprover")
+  adaptationWithdrawals AdaptationRevision[] @relation("AdaptationWithdrawer")
+  articleReviewReceipts ArticleVersion[] @relation("ArticleReviewer")
+  adaptationReviewReceipts AdaptationRevision[] @relation("AdaptationReviewer")
   approvedOutlines OutlineRevision[] @relation("OutlineApprover")
   withdrawnOutlines OutlineRevision[] @relation("OutlineWithdrawer")
 
@@ -111,7 +117,11 @@ model WorkspaceStyleRevision {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   briefRevisions BriefRevision[]
   articleDrafts ArticleDraft[]
-  articleVersions ArticleVersion[]
+  articleVersions ArticleVersion[] @relation("ArticleVersionStyle")
+  reviewedArticleVersions ArticleVersion[] @relation("ArticleVersionReviewedStyle")
+  adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftStyle")
+  adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionStyle")
+  reviewedAdaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionReviewedStyle")
   @@id([workspaceId, revision])
   @@schema("contextflow")
 }
@@ -190,6 +200,9 @@ model Project {
   briefRevisions BriefRevision[]
   articleDrafts ArticleDraft[]
   articleVersions ArticleVersion[]
+  adaptations Adaptation[]
+  adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftProjectWorkspace")
+  adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionProjectWorkspace")
   outline Outline?
   article Article?
   @@unique([id, workspaceId])
@@ -306,6 +319,7 @@ enum JobOperation {
   CLAIM_EXTRACTION
   OUTLINE_GENERATION
   ARTICLE_GENERATION
+  TELEGRAM_GENERATION
   @@schema("contextflow")
 }
 
@@ -359,6 +373,7 @@ model Job {
   aiExecutions AIExecution[]
   outlineRevisions OutlineRevision[]
   articleVersions ArticleVersion[]
+  adaptationRevisions AdaptationRevision[]
   @@unique([projectId, id])
   @@unique([projectId, operation, commandKey])
   @@index([status, nextAttemptAt])
@@ -499,6 +514,7 @@ model ClaimRevision {
   basisClaims BasisClaim[]
   requiredByBriefs BriefRequiredClaim[]
   articleMappings ArticleVersionClaim[]
+  adaptationMappings AdaptationRevisionClaim[]
   @@unique([projectId, id])
   @@unique([projectId, claimId, id])
   @@unique([claimId, number])
@@ -530,6 +546,7 @@ model ClaimEvidence {
   selectedForConflicts ConflictResolutionEvidence[]
   basisEvidence BasisClaimEvidence[]
   articleMappings ArticleVersionClaim[]
+  adaptationMappings AdaptationRevisionClaim[]
   @@unique([projectId, id])
   @@unique([projectId, claimRevisionId, id])
   @@index([projectId, snapshotId])
@@ -598,7 +615,11 @@ model FactualBasisRevision {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   claims BasisClaim[]
   outlineRevisions OutlineRevision[]
-  articleVersions ArticleVersion[]
+  articleVersions ArticleVersion[] @relation("ArticleVersionBasis")
+  reviewedArticleVersions ArticleVersion[] @relation("ArticleVersionReviewedBasis")
+  adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftBasis")
+  adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionBasis")
+  reviewedAdaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionReviewedBasis")
   @@unique([projectId, id])
   @@unique([projectId, sequence])
   @@schema("contextflow")
@@ -651,6 +672,7 @@ model AIExecution {
   errorCategory String? @db.VarChar(64)
   outlineRevisions OutlineRevision[]
   articleVersions ArticleVersion[]
+  adaptationRevisions AdaptationRevision[]
   @@unique([projectId, id])
   @@unique([attemptId])
   @@index([projectId, jobId])
@@ -666,6 +688,12 @@ enum ContentMode {
 enum EditorialOrigin {
   MANUAL
   AI
+  @@schema("contextflow")
+}
+
+enum AdaptationInputMode {
+  DIRECT
+  ARTICLE_DERIVED
   @@schema("contextflow")
 }
 
@@ -709,7 +737,11 @@ model BriefRevision {
   requiredClaims BriefRequiredClaim[]
   contextSnapshots BriefContextSnapshot[]
   outlineRevisions OutlineRevision[]
-  articleVersions ArticleVersion[]
+  articleVersions ArticleVersion[] @relation("ArticleVersionBrief")
+  reviewedArticleVersions ArticleVersion[] @relation("ArticleVersionReviewedBrief")
+  adaptationDrafts AdaptationDraft[]
+  adaptationRevisions AdaptationRevision[]
+  reviewedAdaptationRevisions AdaptationRevision[] @relation("AdaptationReviewedBrief")
   @@unique([projectId, id])
   @@unique([projectId, briefId, id])
   @@unique([briefId, number])
@@ -760,7 +792,8 @@ model OutlineRevision {
   outline Outline @relation("OutlineRevisions", fields: [projectId, outlineId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
   currentFor Outline[] @relation("CurrentOutlineRevision")
   articleDrafts ArticleDraft[]
-  articleVersions ArticleVersion[]
+  articleVersions ArticleVersion[] @relation("ArticleVersionOutline")
+  reviewedArticleVersions ArticleVersion[] @relation("ArticleVersionReviewedOutline")
   approvedFor Outline[] @relation("ApprovedOutlineRevision")
   briefRevisionId String @db.Uuid
   briefRevision BriefRevision @relation(fields: [projectId, briefRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
@@ -821,15 +854,15 @@ model ArticleDraft {
  baseVersionId String? @db.Uuid
  baseVersion ArticleVersion? @relation("ArticleDraftBase",fields:[projectId,articleId,baseVersionId],references:[projectId,articleId,id],onDelete:Restrict,onUpdate:NoAction)
  briefRevisionId String? @db.Uuid
- briefRevision BriefRevision? @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  briefRevision BriefRevision? @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  basisRevisionId String? @db.Uuid
- basisRevision FactualBasisRevision? @relation(fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  basisRevision FactualBasisRevision? @relation(fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  outlineRevisionId String? @db.Uuid
- outlineRevision OutlineRevision? @relation(fields:[projectId,outlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  outlineRevision OutlineRevision? @relation(fields:[projectId,outlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  workspaceId String @db.Uuid
  project Project @relation(fields:[projectId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
  workspaceStyleRevision Int
- style WorkspaceStyleRevision @relation(fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+  style WorkspaceStyleRevision @relation(fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
  sourceSnapshotId String? @db.Uuid
  sourceSnapshot SourceSnapshot? @relation(fields:[projectId,sourceSnapshotId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  updatedBy String @db.Uuid
@@ -854,15 +887,15 @@ model ArticleVersion {
  origin ArticleOrigin
  sourceArticleRevision Int
  briefRevisionId String? @db.Uuid
- briefRevision BriefRevision? @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ briefRevision BriefRevision? @relation("ArticleVersionBrief",fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  basisRevisionId String? @db.Uuid
- basisRevision FactualBasisRevision? @relation(fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ basisRevision FactualBasisRevision? @relation("ArticleVersionBasis",fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  outlineRevisionId String? @db.Uuid
- outlineRevision OutlineRevision? @relation(fields:[projectId,outlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ outlineRevision OutlineRevision? @relation("ArticleVersionOutline",fields:[projectId,outlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  workspaceId String @db.Uuid
  project Project @relation(fields:[projectId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
  workspaceStyleRevision Int
- style WorkspaceStyleRevision @relation(fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ style WorkspaceStyleRevision @relation("ArticleVersionStyle",fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
  sourceSnapshotId String? @db.Uuid
  sourceSnapshot SourceSnapshot? @relation(fields:[projectId,sourceSnapshotId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  createdBy String @db.Uuid
@@ -881,7 +914,22 @@ model ArticleVersion {
  withdrawer UserProfile? @relation("ArticleWithdrawer",fields:[withdrawnBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  withdrawnAt DateTime? @db.Timestamptz(3)
  withdrawalReason String? @db.VarChar(2000)
+ reviewCounter Int @default(0)
+ reviewedBriefRevisionId String? @db.Uuid
+ reviewedBriefRevision BriefRevision? @relation("ArticleVersionReviewedBrief", fields:[projectId,reviewedBriefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedBasisRevisionId String? @db.Uuid
+ reviewedBasisRevision FactualBasisRevision? @relation("ArticleVersionReviewedBasis", fields:[projectId,reviewedBasisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedOutlineRevisionId String? @db.Uuid
+ reviewedOutlineRevision OutlineRevision? @relation("ArticleVersionReviewedOutline", fields:[projectId,reviewedOutlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedWorkspaceStyleRevision Int?
+ reviewedStyle WorkspaceStyleRevision? @relation("ArticleVersionReviewedStyle", fields:[workspaceId,reviewedWorkspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ reviewedBy String? @db.Uuid
+ reviewer UserProfile? @relation("ArticleReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedAt DateTime? @db.Timestamptz(3)
  claims ArticleVersionClaim[]
+ sourceAdaptations AdaptationRevision[] @relation("AdaptationArticleSource")
+ reviewedSourceAdaptations AdaptationRevision[] @relation("AdaptationReviewedArticle")
+ draftAdaptations AdaptationDraft[] @relation("AdaptationDraftArticleSource")
  @@unique([projectId,id])
  @@unique([projectId,articleId,id])
  @@unique([articleId,number])
@@ -899,5 +947,124 @@ model ArticleVersionClaim {
  quote String @db.VarChar(10000)
  linkedText String @db.Text
  @@id([articleVersionId,locator])
+ @@schema("contextflow")
+}
+
+model Adaptation {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ format ProjectFormat
+ revision Int @default(0)
+ currentApprovedRevisionId String? @db.Uuid
+ currentApprovedRevision AdaptationRevision? @relation("ApprovedAdaptationRevision",fields:[projectId,id,currentApprovedRevisionId],references:[projectId,adaptationId,id],onDelete:Restrict,onUpdate:NoAction)
+ revisions AdaptationRevision[] @relation("AdaptationRevisions")
+ draft AdaptationDraft?
+ @@unique([projectId,format])
+ @@unique([projectId,id])
+ @@schema("contextflow")
+}
+
+model AdaptationDraft {
+ adaptationId String @id @db.Uuid
+ projectId String @db.Uuid
+ adaptation Adaptation @relation(fields:[projectId,adaptationId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ content Json
+ sha256 String @db.Char(64)
+ baseRevisionId String? @db.Uuid
+ baseRevision AdaptationRevision? @relation("AdaptationDraftBase",fields:[projectId,adaptationId,baseRevisionId],references:[projectId,adaptationId,id],onDelete:Restrict,onUpdate:NoAction)
+ inputMode AdaptationInputMode
+ contentMode ContentMode
+ origin EditorialOrigin
+ briefRevisionId String @db.Uuid
+ briefRevision BriefRevision @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ basisRevisionId String? @db.Uuid
+ basisRevision FactualBasisRevision? @relation("AdaptationDraftBasis",fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceArticleVersionId String? @db.Uuid
+ sourceArticleVersion ArticleVersion? @relation("AdaptationDraftArticleSource",fields:[projectId,sourceArticleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ workspaceId String @db.Uuid
+ projectWorkspace Project @relation("AdaptationDraftProjectWorkspace",fields:[projectId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
+ workspaceStyleRevision Int
+ style WorkspaceStyleRevision @relation("AdaptationDraftStyle",fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ includeLink Boolean @default(false)
+ updatedBy String @db.Uuid
+ editor UserProfile @relation("AdaptationDraftEditor",fields:[updatedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ updatedAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([projectId,adaptationId])
+ @@schema("contextflow")
+}
+
+model AdaptationRevision {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ adaptationId String @db.Uuid
+ adaptation Adaptation @relation("AdaptationRevisions",fields:[projectId,adaptationId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ currentFor Adaptation[] @relation("ApprovedAdaptationRevision")
+ draftBases AdaptationDraft[] @relation("AdaptationDraftBase")
+ number Int
+ sourceAdaptationRevision Int
+ content Json
+ sha256 String @db.Char(64)
+ inputMode AdaptationInputMode
+ contentMode ContentMode
+ origin EditorialOrigin
+ briefRevisionId String @db.Uuid
+ briefRevision BriefRevision @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ basisRevisionId String? @db.Uuid
+ basisRevision FactualBasisRevision? @relation("AdaptationRevisionBasis",fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceArticleVersionId String? @db.Uuid
+ sourceArticleVersion ArticleVersion? @relation("AdaptationArticleSource",fields:[projectId,sourceArticleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedSourceArticleVersionId String? @db.Uuid
+ reviewedSourceArticleVersion ArticleVersion? @relation("AdaptationReviewedArticle",fields:[projectId,reviewedSourceArticleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ workspaceId String @db.Uuid
+ projectWorkspace Project @relation("AdaptationRevisionProjectWorkspace",fields:[projectId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
+ workspaceStyleRevision Int
+ style WorkspaceStyleRevision @relation("AdaptationRevisionStyle",fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ includeLink Boolean @default(false)
+ createdBy String @db.Uuid
+ creator UserProfile @relation("AdaptationRevisionCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ jobId String? @unique @db.Uuid
+ job Job? @relation(fields:[projectId,jobId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ aiExecutionId String? @db.Uuid
+ execution AIExecution? @relation(fields:[projectId,aiExecutionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ claimsSealed Boolean @default(false)
+ approvedBy String? @db.Uuid
+ approver UserProfile? @relation("AdaptationApprover",fields:[approvedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ approvedAt DateTime? @db.Timestamptz(3)
+ acknowledgedUnmapped Boolean @default(false)
+ withdrawnBy String? @db.Uuid
+ withdrawer UserProfile? @relation("AdaptationWithdrawer",fields:[withdrawnBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ withdrawnAt DateTime? @db.Timestamptz(3)
+ withdrawalReason String? @db.VarChar(2000)
+ reviewCounter Int @default(0)
+ reviewedBriefRevisionId String? @db.Uuid
+ reviewedBriefRevision BriefRevision? @relation("AdaptationReviewedBrief",fields:[projectId,reviewedBriefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedBasisRevisionId String? @db.Uuid
+ reviewedBasisRevision FactualBasisRevision? @relation("AdaptationRevisionReviewedBasis",fields:[projectId,reviewedBasisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedWorkspaceStyleRevision Int?
+ reviewedStyle WorkspaceStyleRevision? @relation("AdaptationRevisionReviewedStyle",fields:[workspaceId,reviewedWorkspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ reviewedBy String? @db.Uuid
+ reviewer UserProfile? @relation("AdaptationReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedAt DateTime? @db.Timestamptz(3)
+ claims AdaptationRevisionClaim[]
+ @@unique([projectId,id])
+ @@unique([projectId,adaptationId,id])
+ @@unique([adaptationId,number])
+ @@schema("contextflow")
+}
+
+model AdaptationRevisionClaim {
+ projectId String @db.Uuid
+ revisionId String @db.Uuid
+ revision AdaptationRevision @relation(fields:[projectId,revisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ locator String @db.VarChar(200)
+ claimRevisionId String @db.Uuid
+ claimRevision ClaimRevision @relation(fields:[projectId,claimRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ evidenceId String @db.Uuid
+ evidence ClaimEvidence @relation(fields:[projectId,claimRevisionId,evidenceId],references:[projectId,claimRevisionId,id],onDelete:Restrict,onUpdate:NoAction)
+ quote String @db.VarChar(10000)
+ linkedText String @db.Text
+ @@id([revisionId,locator])
  @@schema("contextflow")
 }

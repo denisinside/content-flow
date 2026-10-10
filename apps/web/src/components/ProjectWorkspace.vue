@@ -10,6 +10,7 @@ import SourceWorkspace from './SourceWorkspace.vue'
 import FactsWorkspace from './FactsWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
 const ArticleWorkspace = defineAsyncComponent(() => import('./ArticleWorkspace.vue'))
+const TelegramWorkspace = defineAsyncComponent(() => import('./TelegramWorkspace.vue'))
 
 type ProjectFormat =
   | 'ARTICLE'
@@ -71,8 +72,9 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article))?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|telegram))?\/?$/i)?.[1] ?? null)
 const isArticle = computed(() => /\/article\/?$/i.test(pathname.value))
+const isTelegram = computed(() => /\/telegram\/?$/i.test(pathname.value))
 const isDetail = computed(() => page.value !== null)
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
 const isBrief = computed(() => /\/brief\/?$/i.test(pathname.value))
@@ -554,7 +556,7 @@ onBeforeUnmount(() => {
     <section
       v-else
       id="workspace-task"
-      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : 'project-detail-title') : undefined"
+      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isTelegram ? 'telegram-title' : 'project-detail-title') : undefined"
       class="workspace-content project-detail"
       tabindex="-1"
     >
@@ -573,7 +575,7 @@ onBeforeUnmount(() => {
         </Button>
 
         <a
-          v-if="currentProject && (isSources || isFacts || isBrief || isArticle)"
+          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isTelegram)"
           class="project-navigation-title"
           :href="`/projects/${currentProject.id}`"
           @click.prevent="routeTo(`/projects/${currentProject.id}`)"
@@ -586,7 +588,7 @@ onBeforeUnmount(() => {
         >
           <a
             :href="`/projects/${currentProject.id}`"
-            :aria-current="!isSources && !isFacts && !isBrief && !isArticle ? 'page' : undefined"
+            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isTelegram ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}`)"
           >Огляд</a>
           <a
@@ -610,6 +612,12 @@ onBeforeUnmount(() => {
             :aria-current="isArticle ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}/article`)"
           >Стаття</a>
+          <a
+            v-if="currentProject.formats.includes('TELEGRAM_POST')"
+            :href="`/projects/${currentProject.id}/telegram`"
+            :aria-current="isTelegram ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/telegram`)"
+          >Telegram</a>
         </nav>
       </aside>
 
@@ -647,6 +655,16 @@ onBeforeUnmount(() => {
       <template v-else-if="currentProject">
         <template v-if="isArticle">
           <ArticleWorkspace
+            :key="currentProject.id"
+            :project-id="currentProject.id"
+            :project-topic="currentProject.topic"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+          />
+        </template><template v-else-if="isTelegram">
+          <TelegramWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
             :project-topic="currentProject.topic"
@@ -874,6 +892,24 @@ onBeforeUnmount(() => {
                 @click="routeTo(`/projects/${currentProject.id}/article`)"
               >
                 Відкрити статтю
+              </Button>
+            </div>
+            <div
+              v-if="currentProject.formats.includes('TELEGRAM_POST')"
+              class="project-sources-entry"
+            >
+              <div>
+                <h2>Telegram</h2>
+                <p class="project-detail-copy">
+                  Створюйте самостійний допис або адаптуйте погоджену статтю. Стаття не обов’язкова.
+                </p>
+              </div>
+              <Button
+                class="workspace-button workspace-button-secondary"
+                variant="outline"
+                @click="routeTo(`/projects/${currentProject.id}/telegram`)"
+              >
+                Відкрити Telegram
               </Button>
             </div>
             <div

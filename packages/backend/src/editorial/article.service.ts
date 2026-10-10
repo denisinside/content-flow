@@ -86,8 +86,10 @@ export class ArticleService {
     const evidence = basis ? await tx.basisClaimEvidence.findMany({ where: { projectId: project, basisId: basis.id }, include: { evidence: { include: { claimRevision: true, snapshot: { include: { material: true } } } } } }) : [];
     const detail = article?.draft ? await this.mappings(tx, project, articleContentSchema.parse(article.draft.content), article.draft) : null;
     const staleReasons = article?.draft ? await this.stale(tx, project, article.draft) : [];
+    const versions = [];
+    for (const version of article?.versions ?? []) versions.push({ ...json(version), ...await this.inspectVersion(tx, project, version), status: version.withdrawnAt ? 'WITHDRAWN' : version.approvedAt ? 'APPROVED' : 'PROPOSED' });
     return { article: article ? { id: article.id, revision: article.revision, draft: json(article.draft), currentApprovedVersionId: article.currentApprovedVersionId,
-      versions: article.versions.map(version => ({ ...json(version), status: version.withdrawnAt ? 'WITHDRAWN' : version.approvedAt ? 'APPROVED' : 'PROPOSED' })) } : null,
+      versions } : null,
       articleSelected: p.formats.includes('ARTICLE'), editorial: { brief: brief ? { id: brief.id, revision: brief.revision, currentRevision: json(brief.currentRevision), history: json(brief.revisions) } : null,
         outline: outline ? { ...json(outline), revisions: outline.revisions.map(row => ({ ...json(row), status: row.withdrawnAt ? 'WITHDRAWN' : row.approvedAt ? 'APPROVED' : 'PROPOSED' })) } : null, style: json(style), prerequisites, articleSelected: p.formats.includes('ARTICLE') },
       eligibleEvidence: evidence.map(row => ({ claimRevisionId: row.claimRevisionId, evidenceId: row.evidenceId, wording: row.evidence.claimRevision.wording, quote: row.evidence.quote, snapshotId: row.evidence.snapshotId, materialTitle: row.evidence.snapshot.material.label })),
@@ -148,6 +150,69 @@ export class ArticleService {
     });
   }
   private sameInputs(a: Inputs, b: Inputs) { return ['briefRevisionId', 'basisRevisionId', 'outlineRevisionId', 'workspaceId', 'workspaceStyleRevision', 'sourceSnapshotId', 'contentMode', 'origin'].every(key => a[key as keyof Inputs] === b[key as keyof Inputs]); }
+  // Caller holds the authorized Project lock. Receipt freshness and factual
+  // safety are separate: a receipt can acknowledge changed parents, never
+  // invalid original evidence or a terminally withdrawn required approval.
+  async inspectVersion(tx: Prisma.TransactionClient, project: string, version: ArticleVersion) {
+    if (version.projectId !== project) throw new NotFoundException('Article version not found');
+    const current = await this.currentInputs(tx, project, version.contentMode, version.origin, version.sourceSnapshotId);
+    const tupleMatches = (candidate: Pick<Inputs, 'briefRevisionId' | 'basisRevisionId' | 'outlineRevisionId' | 'workspaceStyleRevision'>) =>
+      candidate.briefRevisionId === current.briefRevisionId && candidate.workspaceStyleRevision === current.workspaceStyleRevision
+      && (version.contentMode !== 'FACTUAL' || candidate.basisRevisionId === current.basisRevisionId)
+      && (!version.outlineRevisionId || candidate.outlineRevisionId === current.outlineRevisionId);
+    const receipt = version.reviewedAt && version.reviewCounter > 0 && tupleMatches({ briefRevisionId: version.reviewedBriefRevisionId,
+      basisRevisionId: version.reviewedBasisRevisionId, outlineRevisionId: version.reviewedOutlineRevisionId, workspaceStyleRevision: version.reviewedWorkspaceStyleRevision ?? -1 });
+    const staleReasons = receipt || tupleMatches(version) ? [] : (await this.stale(tx, project, version)).filter(reason => !['INVALID_FACTUAL_BASIS', 'MISSING_FACTUAL_BASIS'].includes(reason));
+    const blockingReasons: string[] = [];
+    if (canonicalManifestHash(version.content) !== version.sha256) blockingReasons.push('CONTENT_INTEGRITY');
+    if (version.withdrawnAt) blockingReasons.push('APPROVAL_WITHDRAWN');
+    const detail = await this.mappings(tx, project, articleContentSchema.parse(version.content), version);
+    if (!detail.plainText.trim()) blockingReasons.push('EMPTY_CONTENT');
+    if (detail.issues.length) blockingReasons.push('INVALID_EVIDENCE_MAPPING');
+    if (version.contentMode === 'FACTUAL') {
+      if (!version.basisRevisionId) blockingReasons.push('MISSING_FACTUAL_BASIS');
+      else if (!(await this.facts.inspectBasisRevision(tx, project, version.basisRevisionId)).valid) blockingReasons.push('INVALID_FACTUAL_BASIS');
+      if (!current.basisRevisionId || !(await this.facts.inspectBasisRevision(tx, project, current.basisRevisionId)).valid) blockingReasons.push('CURRENT_FACTUAL_BASIS_BLOCKED');
+    }
+    if (version.outlineRevisionId) {
+      const original = await tx.outlineRevision.findFirst({ where: { projectId: project, id: version.outlineRevisionId } });
+      if (!original?.approvedAt || original.withdrawnAt) blockingReasons.push('OUTLINE_APPROVAL_WITHDRAWN');
+      if (!current.outlineRevisionId) blockingReasons.push('CURRENT_OUTLINE_MISSING');
+    }
+    const reviewedInputs = receipt ? { ...version, ...current } : version;
+    if (reviewedInputs.briefRevisionId) {
+      const required = await tx.briefRequiredClaim.findMany({ where: { projectId: project, briefRevisionId: reviewedInputs.briefRevisionId } });
+      if (required.some(row => !detail.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) blockingReasons.push('REQUIRED_FACTS_MISSING');
+    }
+    return { staleReasons, blockingReasons, hasUnmapped: detail.hasUnmapped, eligible: !!version.approvedAt && !staleReasons.length && !blockingReasons.length };
+  }
+  rereview(user: string, project: string, versionId: string, input: { expectedRevision: number; expectedReviewCounter: number; acknowledgeUnmapped?: boolean | undefined }) {
+    return this.command(user, project, async tx => {
+      const article = await this.article(tx, project, input.expectedRevision, false);
+      const version = await tx.articleVersion.findFirst({ where: { projectId: project, articleId: article.id, id: versionId } });
+      if (!version) throw new NotFoundException('Article version not found');
+      if (article.currentApprovedVersionId !== version.id || !version.approvedAt || version.withdrawnAt || version.reviewCounter !== input.expectedReviewCounter) throw new ConflictException('Re-review only the current active approval with its exact review counter');
+      const inspection = await this.inspectVersion(tx, project, version);
+      if (inspection.blockingReasons.length) throw new ConflictException('Required factual evidence or approval blocks re-review');
+      const currentInputs = await this.currentInputs(tx, project, version.contentMode, version.origin, version.sourceSnapshotId);
+      // A supplied/manual version without an outline never acquires that
+      // optional dependency merely because an outline was later approved.
+      const current = { ...currentInputs, outlineRevisionId: version.outlineRevisionId ? currentInputs.outlineRevisionId : null };
+      if (!!current.briefRevisionId !== !!version.briefRevisionId || !!current.outlineRevisionId !== !!version.outlineRevisionId) throw new ConflictException('Changed parent shape needs a new article version');
+      const mappings = await this.mappings(tx, project, articleContentSchema.parse(version.content), current);
+      if (mappings.issues.length) throw new ConflictException('Current factual basis must support every retained mapping');
+      if (current.briefRevisionId) {
+        const required = await tx.briefRequiredClaim.findMany({ where: { projectId: project, briefRevisionId: current.briefRevisionId } });
+        if (required.some(row => !mappings.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) throw new ConflictException('Unchanged article omits current required facts');
+      }
+      if (mappings.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge unmapped wording during re-review');
+      await tx.articleVersion.update({ where: { id: version.id }, data: { reviewCounter: { increment: 1 }, reviewedBriefRevisionId: current.briefRevisionId,
+        reviewedBasisRevisionId: current.basisRevisionId, reviewedOutlineRevisionId: version.outlineRevisionId ? current.outlineRevisionId : null,
+        reviewedWorkspaceStyleRevision: current.workspaceStyleRevision, reviewedBy: user, reviewedAt: new Date() } });
+      await tx.article.update({ where: { id: article.id }, data: { revision: { increment: 1 } } });
+      return this.state(tx, project);
+    });
+  }
   private async reviewable(tx: Prisma.TransactionClient, project: string, version: ArticleVersion) {
     const stale = await this.stale(tx, project, version);
     if (stale.length) throw new ConflictException('Article inputs need a new version before review');

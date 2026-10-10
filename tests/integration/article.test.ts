@@ -7,7 +7,7 @@ describe('article draft checkpoints and exact human approval', () => {
   const config = loadRuntimeConfig(), health = new DependencyHealthService(config), jobs = new DurableJobService(health.prisma, { noticeVersion: EXTERNAL_PROCESSING_NOTICE.version });
   const facts = new FactualBasisService(health.prisma, jobs), articles = new ArticleService(health.prisma, jobs, facts), editorial = new EditorialService(health.prisma, jobs, facts);
   const migration = new Pool({ connectionString: config.directDatabaseUrl, ssl: false });
-  const user = randomUUID(), member = randomUUID(), outsider = randomUUID(), workspace = randomUUID(), projects = Array.from({ length: 6 }, () => randomUUID());
+  const user = randomUUID(), member = randomUUID(), outsider = randomUUID(), workspace = randomUUID(), projects = Array.from({ length: 8 }, () => randomUUID());
   function content(text = 'Редакційний текст без твердження про повну перевірку.'): ArticleContent { return { title: 'Стаття', document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] } }; }
   beforeAll(async () => {
     await health.prisma.userProfile.createMany({ data: [user, member, outsider].map(id => ({ id })) });
@@ -109,5 +109,56 @@ describe('article draft checkpoints and exact human approval', () => {
     expect(stillSaved.staleReasons).toContain('INVALID_FACTUAL_BASIS');
     await expect(articles.review(user, project, valid.article!.versions[0]!.id, 'approve', { expectedRevision: 6, acknowledgeUnmapped: true })).rejects.toMatchObject({ status: 409 });
     await expect(articles.saveDraft(user, projects[4]!, { expectedRevision: 0, contentMode: 'FACTUAL', content: mapped(text) })).rejects.toMatchObject({ status: 400 });
+  });
+  it('re-reviews unchanged approved content with one complete tuple and preserves original approval and inputs', async () => {
+    const project = projects[6]!;
+    const briefInput = { expectedRevision: 0, contentMode: 'CREATIVE' as const, topic: 'Початкова тема', audience: '', centralMessage: '', category: '', targetLength: 250, cta: '', exclusions: [], notes: '', requiredClaimRevisionIds: [] };
+    await editorial.saveBrief(user, project, briefInput);
+    await articles.saveDraft(user, project, { expectedRevision: 0, contentMode: 'CREATIVE', content: content() });
+    const saved = await articles.checkpoint(user, project, { expectedRevision: 1 }), original = saved.article!.versions[0]!;
+    const approved = await articles.review(member, project, original.id, 'approve', { expectedRevision: 2, acknowledgeUnmapped: true });
+    expect(approved.article!.versions[0]!.eligible).toBe(true);
+    await editorial.saveBrief(user, project, { ...briefInput, expectedRevision: 1, topic: 'Друга тема' });
+    expect((await articles.get(user, project)).article!.versions[0]!.staleReasons).toContain('BRIEF_CHANGED');
+    const currentBrief = (await editorial.get(user, project)).brief!.currentRevision!;
+    const optionalOutline = await editorial.manualOutline(user, project, { expectedRevision: 0, briefRevisionId: currentBrief.id,
+      content: { title: 'Необов’язкова структура', sections: [{ title: 'Вступ', purpose: 'Окрема робота над планом.', claimRevisionIds: [] }] } });
+    await editorial.reviewOutline(user, project, optionalOutline.outline!.currentRevision!.id, 'approve', { expectedRevision: optionalOutline.outline!.revision });
+    const reviewed = await articles.rereview(user, project, original.id, { expectedRevision: 3, expectedReviewCounter: 0, acknowledgeUnmapped: true });
+    const receipt = reviewed.article!.versions[0]!;
+    expect(receipt).toMatchObject({ eligible: true, reviewCounter: 1, approvedBy: member, sha256: original.sha256, briefRevisionId: original.briefRevisionId });
+    expect(receipt.content).toEqual(original.content);
+    expect(receipt.approvedAt).toEqual(approved.article!.versions[0]!.approvedAt);
+    expect(receipt.reviewedBriefRevisionId).not.toBe(original.briefRevisionId);
+    expect(receipt.reviewedOutlineRevisionId).toBeNull();
+    await expect(articles.rereview(member, project, original.id, { expectedRevision: 4, expectedReviewCounter: 0, acknowledgeUnmapped: true })).rejects.toMatchObject({ status: 409 });
+    await editorial.saveBrief(user, project, { ...briefInput, expectedRevision: 2, topic: 'Третя тема' });
+    expect((await articles.get(user, project)).article!.versions[0]!.eligible).toBe(false);
+    await expect(articles.rereview(outsider, project, original.id, { expectedRevision: 4, expectedReviewCounter: 1, acknowledgeUnmapped: true })).rejects.toMatchObject({ status: 404 });
+    const again = await articles.rereview(member, project, original.id, { expectedRevision: 4, expectedReviewCounter: 1, acknowledgeUnmapped: true });
+    expect(again.article!.versions[0]!.reviewCounter).toBe(2);
+    await articles.review(user, project, original.id, 'withdraw', { expectedRevision: 5 });
+    await expect(articles.rereview(member, project, original.id, { expectedRevision: 6, expectedReviewCounter: 2, acknowledgeUnmapped: true })).rejects.toMatchObject({ status: 409 });
+  });
+  it('cannot re-review approved factual prose after exact used evidence is invalidated', async () => {
+    const project = projects[7]!, material = randomUUID(), snapshot = randomUUID(), text = 'Точний перевірений факт.';
+    const fragment = importedFragments(text)[0]!;
+    await health.prisma.material.create({ data: { id: material, projectId: project, kind: 'TEXT', purpose: 'FACTUAL_SOURCE', label: 'Повторний перегляд', createdBy: user } });
+    await health.prisma.sourceSnapshot.create({ data: { id: snapshot, projectId: project, materialId: material, sequence: 1, normalizedText: text, sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text), origin: 'MANUAL_TEXT', createdBy: user } });
+    await health.prisma.sourceFragment.create({ data: { ...fragment, projectId: project, snapshotId: snapshot } });
+    const proposed = await facts.create(user, project, { wording: text, evidence: [{ snapshotId: snapshot, fragmentId: fragment.id, startOffset: 0, endOffset: text.length, quote: text, sha256: fragment.sha256, relation: 'SUPPORTS' }] });
+    const claim = proposed.claim.currentRevision!, evidence = claim.evidence[0]!;
+    const approvedClaim = await facts.review(user, project, proposed.claim.id, claim.id, 'approve', { expectedRevision: proposed.claim.revision });
+    await facts.freezeBasis(user, project, { claimRevisionIds: [claim.id] });
+    const mapped: ArticleContent = { title: 'Факт', document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text, marks: [{ type: 'evidence', attrs: { claimRevisionId: claim.id, evidenceId: evidence.id, quote: text } }] }] }] } };
+    await articles.saveDraft(user, project, { expectedRevision: 0, contentMode: 'FACTUAL', content: mapped });
+    const checkpoint = await articles.checkpoint(user, project, { expectedRevision: 1 }), version = checkpoint.article!.versions[0]!;
+    await articles.review(user, project, version.id, 'approve', { expectedRevision: 2, acknowledgeUnmapped: true });
+    await facts.invalidate(user, project, proposed.claim.id, evidence.id, { expectedRevision: approvedClaim.claim.revision, reason: 'Доказ визнано недійсним' });
+    const blocked = (await articles.get(user, project)).article!.versions[0]!;
+    expect(blocked.eligible).toBe(false);
+    expect(blocked.blockingReasons).toContain('INVALID_FACTUAL_BASIS');
+    await expect(articles.rereview(user, project, version.id, { expectedRevision: 3, expectedReviewCounter: 0, acknowledgeUnmapped: true })).rejects.toMatchObject({ status: 409 });
+    expect((await articles.get(user, project)).article!.versions[0]!.reviewCounter).toBe(0);
   });
 });

@@ -5,7 +5,7 @@ const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const workspaceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const base = `/api/v1/projects/${id}`;
 type Content = { title: string; document: { type: string; content: unknown[] } };
-type Version = { id: string; number: number; sourceArticleRevision: number; status: string; origin: string; content: Content; contentMode: string };
+type Version = { id: string; number: number; sourceArticleRevision: number; status: string; origin: string; content: Content; contentMode: string; hasUnmapped: boolean };
 async function fixture(page: Page, selected = true) {
   let article: { id: string; revision: number; draft: { content: Content; contentMode: string; origin: string; baseVersionId: string | null }; currentApprovedVersionId: string | null; versions: Version[] } | null = null;
   let failSave = false, delaySave = false;
@@ -36,7 +36,7 @@ async function fixture(page: Page, selected = true) {
       if (delaySave) { delaySave = false; await new Promise(resolve => setTimeout(resolve, 900)); }
       return json(captured);
     }
-    if (path === `${base}/article/checkpoint`) { const version: Version = { id: `v${article!.versions.length + 1}`, number: article!.versions.length + 1, sourceArticleRevision: article!.revision, content: structuredClone(article!.draft.content), contentMode: article!.draft.contentMode, origin: article!.draft.origin, status: 'PROPOSED' }; article!.versions.unshift(version); article!.draft.baseVersionId = version.id; article!.revision++; return json(state()); }
+    if (path === `${base}/article/checkpoint`) { const version: Version = { id: `v${article!.versions.length + 1}`, number: article!.versions.length + 1, sourceArticleRevision: article!.revision, content: structuredClone(article!.draft.content), contentMode: article!.draft.contentMode, origin: article!.draft.origin, status: 'PROPOSED', hasUnmapped: true }; article!.versions.unshift(version); article!.draft.baseVersionId = version.id; article!.revision++; return json(state()); }
     if (path.endsWith('/approve')) { const version = article!.versions.find(item => path.includes(`/${item.id}/`))!; version.status = 'APPROVED'; article!.currentApprovedVersionId = version.id; article!.revision++; return json(state()); }
     if (path.endsWith('/withdraw')) { const version = article!.versions.find(item => path.includes(`/${item.id}/`))!; version.status = 'WITHDRAWN'; article!.currentApprovedVersionId = null; article!.revision++; return json(state()); }
     return json({});
@@ -44,7 +44,7 @@ async function fixture(page: Page, selected = true) {
   await page.goto(`/projects/${id}/article`);
   await expect(page.getByRole('heading', { name: 'Стаття', exact: true })).toBeVisible();
   if (selected) await expect(page.getByRole('textbox', { name: 'Текст статті' })).toBeVisible();
-  return { submitted, conflict: () => { failSave = true; }, delay: () => { delaySave = true; }, state, candidate: () => { article!.versions.unshift({ id: 'candidate', number: article!.versions.length + 1, sourceArticleRevision: article!.revision, content: { title: 'AI заголовок', document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'AI пропозиція для порівняння.' }] }] } }, contentMode: 'CREATIVE', origin: 'AI', status: 'PROPOSED' }); } };
+  return { submitted, conflict: () => { failSave = true; }, delay: () => { delaySave = true; }, state, candidate: () => { article!.versions.unshift({ id: 'candidate', number: article!.versions.length + 1, sourceArticleRevision: article!.revision, content: { title: 'AI заголовок', document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'AI пропозиція для порівняння.' }] }] } }, contentMode: 'CREATIVE', origin: 'AI', status: 'PROPOSED', hasUnmapped: true }); } };
 }
 const writing = (page: Page) => page.getByRole('textbox', { name: 'Текст статті' });
 
@@ -115,6 +115,7 @@ test('logout erases unsaved recovery and unmount does not recreate the prior use
   await writing(page).fill('Особистий незбережений текст попереднього користувача.');
   await expect(page.getByRole('alert')).toContainText('Ваш текст залишився');
   expect(await page.evaluate(() => sessionStorage.getItem('cf:article:editor:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'))).toContain('Особистий');
+  await page.locator('#account-title').click();
   await page.getByRole('button', { name: 'Вийти', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Реєстрація' })).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.getItem('cf:article:editor:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'))).toBeNull();
