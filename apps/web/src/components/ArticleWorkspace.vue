@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
-import { Mark, type JSONContent } from '@tiptap/core'
+import { Extension, Mark, type JSONContent } from '@tiptap/core'
+import type { Node as EditorNode } from '@tiptap/pm/model'
+import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import StarterKit from '@tiptap/starter-kit'
 import { Button } from '@/components/ui/button'
 import ArticlePreview from './ArticlePreview.vue'
@@ -16,6 +19,9 @@ const props = defineProps<{ projectId: string; projectTopic: string; csrfToken: 
 const emit = defineEmits<{ 'session-expired': [] }>()
 const state = ref<State | null>(null)
 const title = ref(props.projectTopic)
+const titleInput = ref<HTMLTextAreaElement | null>(null)
+let titleObserver: ResizeObserver | undefined
+let titleObservedWidth = 0
 const contentMode = ref<'FACTUAL' | 'CREATIVE'>('CREATIVE')
 const baseline = ref('')
 const expectedRevision = ref(0)
@@ -26,6 +32,11 @@ const loading = ref(true)
 const error = ref('')
 const conflict = ref(false)
 const inspector = ref<'history' | 'evidence' | 'proposal' | 'import' | null>(null)
+const inspectorHeading = ref<HTMLHeadingElement | null>(null)
+const contentsOpen = ref(false)
+let contentsViewport: MediaQueryList | undefined
+let inspectorOpener: HTMLElement | null = null
+let inspectorReadingPosition = { left: 0, top: 0 }
 const candidate = ref<Version | null>(null)
 const selectedEvidence = ref<Evidence | null>(null)
 const linkedWording = ref('')
@@ -43,8 +54,30 @@ let pollTimer: ReturnType<typeof setTimeout> | undefined
 let inFlight: Promise<boolean> | null = null
 let commandKey: string | null = null
 const controller = new AbortController()
+function articleSections(document: EditorNode) {
+  const sections: { id: string; title: string; level: number; position: number; size: number }[] = []
+  document.descendants((node, position) => {
+    if (node.type.name !== 'heading' || ![2, 3].includes(Number(node.attrs.level))) return
+    sections.push({ id: `article-section-${sections.length + 1}`, title: node.textContent.trim() || 'Без назви', level: Number(node.attrs.level), position, size: node.nodeSize })
+  })
+  return sections
+}
+const navigationKey = new PluginKey<DecorationSet>('articleNavigation')
+function sectionDecorations(document: EditorNode) {
+  return DecorationSet.create(document, articleSections(document).map(section => Decoration.node(section.position, section.position + section.size, { id: section.id })))
+}
+// Navigation anchors belong to the editor view, never the persisted manuscript.
+const articleNavigation = Extension.create({
+  name: 'articleNavigation',
+  addProseMirrorPlugins: () => [new Plugin<DecorationSet>({
+    key: navigationKey,
+    state: { init: (_, state) => sectionDecorations(state.doc), apply: (transaction, current) => transaction.docChanged ? sectionDecorations(transaction.doc) : current },
+    props: { decorations: state => navigationKey.getState(state) },
+  })],
+})
 const evidenceMark = Mark.create({ name: 'evidence', inclusive: false, addAttributes: () => ({ claimRevisionId: { default: null }, evidenceId: { default: null }, quote: { default: null } }), parseHTML: () => [], renderHTML: ({ HTMLAttributes }) => ['span', { class: 'article-evidence', 'data-evidence-id': HTMLAttributes.evidenceId, 'data-linked-wording': HTMLAttributes.quote, tabindex: 0, role: 'button', 'aria-label': 'Переглянути доказ для цього речення' }, 0] })
-const editor = useEditor({ injectCSS: false, extensions: [StarterKit.configure({ heading: { levels: [2, 3] }, code: false, codeBlock: false, horizontalRule: false, link: false, underline: false, trailingNode: false }), evidenceMark], content: { type: 'doc', content: [{ type: 'paragraph' }] }, editorProps: { attributes: { 'aria-label': 'Текст статті', role: 'textbox', 'aria-multiline': 'true' }, handleDOMEvents: { click: (_view, event) => inspectEvidence(event), keydown: (_view, event) => (event.key === 'Enter' || event.key === ' ') && inspectEvidence(event) } }, onUpdate: () => changed() })
+const editor = useEditor({ injectCSS: false, extensions: [StarterKit.configure({ heading: { levels: [2, 3] }, code: false, codeBlock: false, horizontalRule: false, link: false, underline: false, trailingNode: false }), evidenceMark, articleNavigation], content: { type: 'doc', content: [{ type: 'paragraph' }] }, editorProps: { attributes: { 'aria-label': 'Текст статті', role: 'textbox', 'aria-multiline': 'true' }, handleDOMEvents: { click: (_view, event) => inspectEvidence(event), keydown: (_view, event) => (event.key === 'Enter' || event.key === ' ') && inspectEvidence(event) } }, onUpdate: () => changed() })
+const sections = computed(() => { void editEpoch.value; return editor.value ? articleSections(editor.value.state.doc) : [] })
 function canonicalNode(node: JSONContent): JSONContent {
   return { type: node.type ?? 'doc', ...(node.type === 'heading' ? { attrs: { level: node.attrs?.level } } : {}), ...(node.text === undefined ? {} : { text: node.text }), ...(node.marks ? { marks: node.marks.map(mark => ({ type: mark.type, ...(mark.type === 'evidence' ? { attrs: { claimRevisionId: mark.attrs?.claimRevisionId, evidenceId: mark.attrs?.evidenceId, quote: mark.attrs?.quote } } : {}) })) } : {}), ...(node.content ? { content: node.content.map(canonicalNode) } : {}) }
 }
@@ -53,11 +86,59 @@ const serialized = computed(() => { void editEpoch.value; return JSON.stringify(
 const dirty = computed(() => baseline.value !== serialized.value)
 const readonly = computed(() => !!props.archived || !state.value?.articleSelected)
 const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
+const actionableJobs = computed(() => jobs.value.filter(job => !['SUCCEEDED', 'CANCELLED'].includes(job.status)))
+const completedJobs = computed(() => jobs.value.filter(job => ['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const proposals = computed(() => state.value?.article?.versions.filter(version => version.origin === 'AI' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
 const saveStatus = computed(() => saving.value ? 'Зберігаємо…' : conflict.value ? 'Потрібно узгодити зміни' : error.value && dirty.value ? 'Не збережено' : dirty.value ? 'Є незбережені зміни' : 'Збережено')
 const approval = computed(() => state.value?.article?.versions.find(version => version.id === state.value?.article?.currentApprovedVersionId))
 watch(readonly, value => editor.value?.setEditable(!value))
 watch([title, contentMode], () => changed())
+function resizeTitle() {
+  const input = titleInput.value
+  if (!input) return
+  input.style.height = 'auto'
+  input.style.height = `${Math.ceil(input.scrollHeight) + 2}px`
+}
+watch(titleInput, input => {
+  titleObserver?.disconnect()
+  titleObservedWidth = 0
+  if (!input) return
+  titleObserver ??= new ResizeObserver(entries => {
+    const width = entries[0]?.contentRect.width ?? 0
+    if (Math.abs(width - titleObservedWidth) < 0.5) return
+    titleObservedWidth = width
+    resizeTitle()
+  })
+  titleObserver.observe(input)
+})
+watch([title, titleInput, inspector], () => { void nextTick(resizeTitle) })
+function resetContents(event: MediaQueryListEvent) { contentsOpen.value = event.matches }
+function navigateArticle(id: string) { document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'instant' }) }
+watch(inspector, async (value, previous) => {
+  if (value && !previous) {
+    inspectorOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    inspectorReadingPosition = { left: window.scrollX, top: window.scrollY }
+  }
+  await nextTick()
+  if (disposed) return
+  if (value) {
+    inspectorHeading.value?.focus({ preventScroll: true })
+    if (!contentsViewport?.matches) inspectorHeading.value?.scrollIntoView({ block: 'start', behavior: 'instant' })
+  }
+  else if (previous) {
+    if (inspectorOpener?.isConnected) inspectorOpener.focus({ preventScroll: true })
+    else editor.value?.view.dom.focus({ preventScroll: true })
+    window.scrollTo({ ...inspectorReadingPosition, behavior: 'instant' })
+  }
+})
+onMounted(() => {
+  contentsViewport = window.matchMedia('(min-width: 901px)')
+  contentsOpen.value = contentsViewport.matches
+  contentsViewport.addEventListener('change', resetContents)
+  window.addEventListener('resize', resizeTitle)
+  void document.fonts.ready.then(() => { if (!disposed) resizeTitle() })
+})
+onBeforeUnmount(() => { titleObserver?.disconnect(); window.removeEventListener('resize', resizeTitle); contentsViewport?.removeEventListener('change', resetContents) })
 function retain() { if (sessionEnded || !props.userId || hydration || !dirty.value) return; try { sessionStorage.setItem(recoveryKey, JSON.stringify({ ...payload(), expectedRevision: expectedRevision.value })) } catch { /* Browser quota does not discard the live editor. */ } }
 function changed() { if (hydration || disposed) return; editEpoch.value++; retain(); clearTimeout(saveTimer); if (!conflict.value && !recovered.value) saveTimer = setTimeout(() => void save(), 700) }
 function populate(draft?: Draft | null) {
@@ -112,10 +193,10 @@ async function reconcile(useLocal: boolean) {
 }
 function discardRecovery() { recovered.value = null; sessionStorage.removeItem(recoveryKey) }
 function restore() { const data = recovered.value; if (!data) return; hydration = true; title.value = data.content.title; contentMode.value = data.contentMode; editor.value?.commands.setContent(data.content.document, { emitUpdate: false }); editEpoch.value++; hydration = false; recovered.value = null; expectedRevision.value = data.expectedRevision; conflict.value = expectedRevision.value !== (state.value?.article?.revision ?? 0); retain(); if (!conflict.value) void save() }
-function closeInspector() { inspector.value = null; editor.value?.commands.focus() }
+function closeInspector() { inspector.value = null }
 function format(kind: string) { const chain = editor.value?.chain().focus(); if (!chain) return; if (kind === 'bold') chain.toggleBold().run(); if (kind === 'italic') chain.toggleItalic().run(); if (kind === 'heading') chain.toggleHeading({ level: 2 }).run(); if (kind === 'list') chain.toggleBulletList().run() }
 function inspectEvidence(event: Event) { const target = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-evidence-id]'); if (!target) return false; const item = state.value?.eligibleEvidence.find(row => row.evidenceId === target.dataset.evidenceId); if (!item) return false; event.preventDefault(); selectedEvidence.value = item; linkedWording.value = target.dataset.linkedWording ?? ''; inspector.value = 'evidence'; return true }
-function linkEvidence(item: Evidence) { const current = editor.value; if (!current) return; const { from, to } = current.state.selection; const quote = current.state.doc.textBetween(from, to, '\n'); if (!quote.trim()) { error.value = 'Спочатку виділіть речення, яке підтверджує цей факт.'; return }; current.chain().focus().unsetMark('evidence').setMark('evidence', { claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId, quote }).run(); selectedEvidence.value = item }
+function linkEvidence(item: Evidence) { const current = editor.value; if (!current) return; const { from, to } = current.state.selection; const quote = current.state.doc.textBetween(from, to, '\n'); if (!quote.trim()) { error.value = 'Спочатку виділіть речення, яке підтверджує цей факт.'; return }; current.chain().focus().unsetMark('evidence').setMark('evidence', { claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId, quote }).run(); selectedEvidence.value = item; linkedWording.value = quote }
 async function generate() { if (!await save()) return; commandKey ??= crypto.randomUUID(); busy.value = true; try { await request('/article/generate', { expectedRevision: expectedRevision.value, commandKey }); commandKey = null; await poll() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося створити пропозицію.' } finally { busy.value = false } }
 async function importReady() { if (!importedText.value.trim() || busy.value) return; busy.value = true; try { const content: Content = { title: title.value || props.projectTopic, document: { type: 'doc', content: importedText.value.split(/\n\s*\n/).filter(Boolean).map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) } }; state.value = await request('/article/import', { expectedRevision: expectedRevision.value, contentMode: contentMode.value, content }) as State; populate(state.value.article?.draft); sessionStorage.removeItem(recoveryKey); importedText.value = ''; inspector.value = null } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося додати статтю.' } finally { busy.value = false } }
 async function poll() { clearTimeout(pollTimer); if (disposed) return; try { const result = await request('/jobs') as { jobs: Job[] }; jobs.value = result.jobs.filter(job => job.operation === 'ARTICLE_GENERATION'); await load() } catch { /* Saving errors remain the primary action boundary. */ } finally { if (!disposed) pollTimer = setTimeout(() => void poll(), activeJob.value ? 2000 : 5000) } }
@@ -129,19 +210,18 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 <template>
   <section
     class="article-workspace"
+    :data-workspace-leave-risk="!loading && (dirty || saving || busy || !!recovered)"
     aria-labelledby="article-heading"
   >
     <header class="article-boundary">
       <div>
-        <p class="eyebrow">
+        <h1 id="article-heading">
           Стаття
-        </p><h1 id="article-heading">
-          Редактор
         </h1>
       </div><span
         role="status"
         aria-live="polite"
-      >{{ saveStatus }}</span>
+      ><span v-if="!loading">{{ readonly ? 'Перегляд' : 'Чернетка' }} · </span><span>{{ loading ? 'Відкриваємо…' : saveStatus }}</span></span>
     </header>
     <p
       v-if="loading"
@@ -187,7 +267,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
       class="article-notice"
     >
       <p>Залишилася незбережена чернетка з попереднього відвідування.</p><Button
-        class="workspace-button"
+        class="workspace-button workspace-button-primary"
         @click="restore"
       >
         Відновити мою чернетку
@@ -268,12 +348,53 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
         class="article-layout"
         :class="{ 'with-inspector': inspector }"
       >
-        <main class="article-paper">
+        <aside
+          v-show="!inspector"
+          class="article-contents"
+        >
+          <details
+            :open="contentsOpen"
+            @toggle="contentsOpen = ($event.target as HTMLDetailsElement).open"
+          >
+            <summary>
+              Зміст <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+              ><path d="m6 9 6 6 6-6" /></svg>
+            </summary>
+            <nav aria-label="Зміст статті">
+              <a
+                href="#article-start"
+                @mousedown.prevent
+                @click.prevent="navigateArticle('article-start')"
+              >Вступ</a>
+              <a
+                v-for="section in sections"
+                :key="section.id"
+                :href="`#${section.id}`"
+                :class="{ subsection: section.level === 3 }"
+                @mousedown.prevent
+                @click.prevent="navigateArticle(section.id)"
+              >{{ section.title }}</a>
+            </nav>
+          </details>
+        </aside>
+        <article
+          id="article-start"
+          class="article-paper"
+          aria-label="Рукопис статті"
+        >
           <label
             class="sr-only"
             for="article-title"
           >Заголовок статті</label><textarea
             id="article-title"
+            ref="titleInput"
             v-model="title"
             maxlength="500"
             rows="2"
@@ -302,7 +423,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               <em>К</em>
             </button><button
               type="button"
-              :aria-pressed="editor?.isActive('heading')"
+              :aria-pressed="editor?.isActive('heading', { level: 2 })"
               @click="format('heading')"
             >
               Підзаголовок
@@ -336,7 +457,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 true-value="FACTUAL"
                 false-value="CREATIVE"
               > Матеріал на перевірених фактах</label><Button
-                class="workspace-button"
+                class="workspace-button workspace-button-primary"
                 :disabled="busy || saving || conflict || !!recovered || !title.trim()"
                 @click="action('/article/checkpoint')"
               >
@@ -344,20 +465,34 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               </Button>
             </div>
           </footer>
-        </main>
+        </article>
         <aside
           v-if="inspector"
           class="article-inspector"
-          aria-label="Контекст статті"
-          @keydown.esc="closeInspector"
+          aria-labelledby="article-inspector-heading"
+          @keydown.esc.stop="closeInspector"
         >
           <header>
-            <h2>{{ inspector === 'history' ? 'Версії статті' : inspector === 'evidence' ? 'Докази' : inspector === 'import' ? 'Готова стаття' : 'Пропозиція AI' }}</h2><button
+            <h2
+              id="article-inspector-heading"
+              ref="inspectorHeading"
+              tabindex="-1"
+            >
+              {{ inspector === 'history' ? 'Версії статті' : inspector === 'evidence' ? 'Докази' : inspector === 'import' ? 'Готова стаття' : 'Пропозиція AI' }}
+            </h2><button
               type="button"
               aria-label="Закрити контекст"
               @click="closeInspector"
             >
-              ×
+              <svg
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+              ><path d="m6 6 12 12M6 18 18 6" /></svg>
             </button>
           </header>
           <template v-if="inspector === 'import'">
@@ -366,7 +501,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               v-model="importedText"
               rows="12"
             /><Button
-              class="workspace-button"
+              class="workspace-button workspace-button-primary"
               :disabled="busy || dirty || !importedText.trim() || conflict"
               @click="importReady"
             >
@@ -374,6 +509,17 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             </Button>
           </template>
           <template v-if="inspector === 'evidence'">
+            <section
+              v-if="selectedEvidence"
+              class="article-selected-evidence"
+              aria-label="Вибраний доказ"
+            >
+              <h3>{{ selectedEvidence.materialTitle }}</h3>
+              <blockquote>{{ selectedEvidence.quote }}</blockquote>
+              <p v-if="linkedWording">
+                Спочатку прив’язане речення: «{{ linkedWording }}».
+              </p>
+            </section>
             <p>Виділіть речення в статті та виберіть факт. Повторне прив’язування означає, що ви переглянули саме ці слова.</p><p v-if="!state.eligibleEvidence.length">
               Немає придатних перевірених доказів. Перейдіть до фактів, щоб сформувати основу.
             </p><section
@@ -389,9 +535,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               >
                 Прив’язати виділення
               </Button>
-            </section><p v-if="selectedEvidence">
-              Прив’язано до «{{ selectedEvidence.materialTitle }}». <span v-if="linkedWording">Спочатку прив’язане речення: «{{ linkedWording }}».</span>
-            </p><Button
+            </section><Button
               class="workspace-button"
               variant="ghost"
               :disabled="readonly"
@@ -413,7 +557,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                   v-model="acknowledgeUnmapped"
                   type="checkbox"
                 > Переглянув твердження без посилань</label><Button
-                  class="workspace-button"
+                  class="workspace-button workspace-button-primary"
                   :disabled="busy || dirty || conflict || !!state.mappingIssues.length || (state.hasUnmapped && !acknowledgeUnmapped)"
                   @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped })"
                 >
@@ -441,7 +585,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             <p>Пропозиція AI · Не застосовано</p><h3>{{ candidate.content.title }}</h3><h4>Поточний текст</h4><ArticlePreview :document="payload().content.document" /><h4>Запропонований текст</h4><ArticlePreview :document="candidate.content.document" /><p v-if="candidate.sourceArticleRevision !== expectedRevision || dirty">
               Чернетка змінилася після запуску. Цю пропозицію не можна застосувати до поточного тексту.
             </p><Button
-              class="workspace-button"
+              class="workspace-button workspace-button-primary"
               :disabled="busy || dirty || conflict || readonly || candidate.sourceArticleRevision !== expectedRevision"
               @click="action(`/article/${candidate.id}/apply`, {}, true)"
             >
@@ -463,7 +607,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
         </Button>
       </div>
       <div
-        v-for="job in jobs"
+        v-for="job in actionableJobs"
         :key="job.id"
         class="article-job"
       >
@@ -483,12 +627,109 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           Повторити генерацію
         </Button>
       </div>
+      <details
+        v-if="completedJobs.length"
+        class="article-job-history"
+      >
+        <summary>Історія генерації</summary>
+        <ul>
+          <li
+            v-for="job in completedJobs"
+            :key="job.id"
+          >
+            {{ job.status === 'SUCCEEDED' ? 'Пропозицію створено' : 'Генерацію скасовано' }}
+          </li>
+        </ul>
+      </details>
     </template>
   </section>
 </template>
 
 <style scoped>
-.article-workspace{max-width:1160px;margin:0 auto}.article-boundary,.article-actions,.article-toolbar,.article-inspector>header,.article-review>div,.article-job{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.article-boundary{justify-content:space-between;margin:24px 0}.article-boundary h1{font-size:24px;margin:2px 0}.article-boundary>span{font-size:13px;color:var(--muted)}.article-actions{margin:0 0 18px}.article-layout{display:grid;grid-template-columns:minmax(0,840px);justify-content:center}.article-layout.with-inspector{grid-template-columns:minmax(0,1fr) 300px;gap:20px}.article-paper{background:var(--document);border:1px solid var(--rule);padding:44px 54px;min-width:0}.article-title{width:100%;resize:none;border:0;background:transparent;color:var(--ink);font-family:'Source Serif 4',serif;font-weight:500;font-size:42px;line-height:1.12;padding:0;outline-offset:5px}.article-toolbar{border-bottom:1px solid var(--rule);padding:12px 0;margin:12px 0 28px;gap:4px}.article-toolbar button{font-size:13px;padding:8px;min-height:38px;border-radius:4px}.article-toolbar button[aria-pressed=true]{background:var(--paper)}.article-writing :deep(.tiptap){font-family:'Source Serif 4',serif;font-size:19px;line-height:1.65;min-height:330px;outline-offset:8px;white-space:pre-wrap;overflow-wrap:anywhere}.article-writing :deep(p){margin:0 0 1em}.article-writing :deep(h2){font-size:28px;line-height:1.3;margin:1.4em 0 .6em}.article-writing :deep(ul),.article-writing :deep(ol){padding-left:26px}.article-writing :deep(.article-evidence){border-bottom:2px solid var(--success);background:color-mix(in srgb,var(--success) 8%,transparent)}.article-review{margin-top:34px;padding-top:18px;border-top:1px solid var(--rule);font-size:13px;color:var(--muted)}.article-mode{display:flex;gap:7px;align-items:center}.article-review>div{justify-content:space-between}.article-inspector{min-width:0;border-left:1px solid var(--rule);padding-left:20px;font-size:14px}.article-inspector>header{justify-content:space-between}.article-inspector h2{font-size:18px}.article-inspector>header button{font-size:26px;min-width:40px;min-height:40px}.article-inspector textarea{width:100%;border:1px solid var(--rule);padding:10px;background:var(--document);margin:10px 0}.article-version,.article-evidence-item{padding:18px 0;border-bottom:1px solid var(--rule)}.article-version h3,.article-evidence-item h3{font-size:15px;margin:0}.article-version p,.article-inspector p{line-height:1.55;margin:10px 0}.article-inspector blockquote{border-left:2px solid var(--rule);padding-left:12px;font-family:'Source Serif 4',serif}.article-inspector pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;max-height:380px;overflow:auto}.article-notice,.article-error{padding:14px 0;line-height:1.6;border-top:1px solid var(--rule)}.article-error{color:var(--error)}.article-proposals,.article-job{margin-top:18px;font-size:14px}.article-version label{display:block;margin:12px 0;line-height:1.5}
-@media(max-width:1050px){.article-layout.with-inspector{grid-template-columns:minmax(0,1fr)}.article-inspector{border-left:0;border-top:1px solid var(--rule);padding:20px 0}.article-paper{padding:36px}}
-@media(max-width:600px){.article-paper{padding:22px 18px}.article-title{font-size:32px}.article-writing :deep(.tiptap){font-size:18px}.article-actions{gap:8px}.article-boundary{align-items:flex-start}.article-toolbar{gap:0}.article-toolbar button{padding:7px}.article-review>div{align-items:flex-start}}
+.article-workspace { max-width: 1352px; margin: 0 auto; }
+.article-boundary, .article-actions, .article-toolbar, .article-inspector > header, .article-review > div, .article-job { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.article-boundary { justify-content: space-between; margin-bottom: 24px; }
+.article-boundary h1 { font-family: var(--serif); font-weight: 550; font-size: 39px; line-height: 1.2; letter-spacing: -.025em; margin: 0; }
+.article-boundary > span { font-size: 12px; color: var(--muted); }
+.article-actions { margin-bottom: 0; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
+.article-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 40px; align-items: start; }
+.article-layout.with-inspector { grid-template-columns: minmax(0, 1fr) 280px; gap: 40px; }
+.article-contents { position: sticky; top: 24px; padding-top: 60px; min-width: 0; font-size: 13px; }
+.article-contents summary { display: flex; align-items: center; justify-content: space-between; min-height: 44px; list-style: none; margin-bottom: 8px; font-weight: 500; cursor: pointer; }
+.article-contents summary::-webkit-details-marker { display: none; }
+.article-contents summary svg { display: none; }
+.article-contents nav a { display: block; padding: 10px 0; line-height: 1.6; color: var(--muted); text-decoration: none; overflow-wrap: anywhere; }
+.article-contents nav a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.article-contents nav a.subsection { padding-left: 14px; }
+.article-paper { width: 100%; max-width: 72ch; margin-inline: auto; min-width: 0; padding: 60px 55px 42px; font-family: var(--serif); font-size: 20px; background: var(--document); scroll-margin-top: 24px; }
+.article-title { width: 100%; min-height: 2.24em; overflow: hidden; resize: none; border: 0; background: transparent; color: var(--ink); font-family: var(--serif); font-weight: 550; font-size: 48px; line-height: 1.12; letter-spacing: -.025em; padding: 0; border-radius: 0; }
+.article-toolbar { font-family: var(--sans); border-bottom: 1px solid var(--rule); padding: 12px 0; margin: 12px 0 28px; gap: 4px; }
+.article-toolbar button { font-size: 13px; padding: 7px 10px; min-height: 34px; border-radius: 3px; }
+.article-toolbar button[aria-pressed=true] { background: var(--paper); }
+.article-writing :deep(.tiptap) { font-family: var(--serif); font-size: 20px; line-height: 1.7; min-height: 330px; outline-offset: 8px; white-space: pre-wrap; overflow-wrap: anywhere; caret-color: var(--ink); }
+.article-writing :deep(p) { line-height: 1.65; margin: 0 0 1em; }
+.article-writing :deep(.tiptap > p:first-child) { font-size: 25px; line-height: 1.5; margin-bottom: 36px; color: var(--lead-ink, var(--muted)); }
+.article-writing :deep(h2) { font-size: 30px; font-weight: 600; line-height: 1.35; margin: 1.4em 0 .6em; scroll-margin-top: 24px; }
+.article-writing :deep(h3) { font-size: 24px; font-weight: 600; line-height: 1.4; margin: 1.4em 0 .6em; scroll-margin-top: 24px; }
+.article-writing :deep(ul), .article-writing :deep(ol) { padding-left: 26px; }
+.article-writing :deep(blockquote) { border-left: 1px solid var(--rule); padding-left: 20px; margin: 32px 0; font-size: 29px; line-height: 1.5; }
+.article-writing :deep(.article-evidence) { border-bottom: 1px solid var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); cursor: pointer; }
+.article-review { margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--rule); font-family: var(--sans); font-size: 13px; color: var(--muted); }
+.article-mode { display: flex; gap: 7px; align-items: center; min-height: 44px; color: var(--ink); }
+.article-review > div { justify-content: space-between; }
+.article-inspector { min-width: 0; margin-top: 48px; border-left: 1px solid var(--rule); padding-left: 20px; font-size: 14px; overflow-wrap: anywhere; }
+.article-inspector > header { justify-content: space-between; flex-wrap: nowrap; }
+.article-inspector h2 { font-size: 18px; font-weight: 550; margin: 0; scroll-margin-top: 24px; }
+.article-inspector > header button { display: inline-flex; justify-content: center; align-items: center; min-width: 44px; min-height: 44px; flex-shrink: 0; }
+.article-inspector textarea { width: 100%; border: 1px solid var(--field-rule, var(--rule)); border-radius: 3px; padding: 10px; background: var(--document); margin: 10px 0; }
+.article-version, .article-evidence-item { padding: 18px 0; border-bottom: 1px solid var(--rule); }
+.article-version h3, .article-evidence-item h3 { font-size: 15px; margin: 0; }
+.article-version p, .article-inspector p { line-height: 1.55; margin: 10px 0; }
+.article-inspector blockquote { border-left: 1px solid var(--rule); margin-inline: 0; padding-left: 12px; font-family: var(--serif); font-size: 19px; line-height: 1.55; }
+.article-inspector pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 380px; overflow: auto; }
+.article-inspector details summary { cursor: pointer; min-height: 44px; padding-block: 12px; }
+.article-notice, .article-error { padding: 14px 0; line-height: 1.6; border-top: 1px solid var(--rule); }
+.article-error { color: var(--error); }
+.article-proposals, .article-job { margin-top: 18px; font-size: 14px; }
+.article-version label { display: block; margin: 12px 0; line-height: 1.5; }
+.article-selected-evidence { margin: 18px 0; padding: 18px 0; border-block: 1px solid var(--rule); }
+.article-selected-evidence h3 { font-family: var(--serif); font-size: 21px; font-weight: 550; margin: 0; }
+.article-job-history { margin-top: 24px; padding-block: 12px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
+.article-job-history summary { min-height: 44px; padding-block: 12px; cursor: pointer; color: var(--ink); }
+.article-job-history li { padding-block: 6px; }
+.with-inspector .article-paper { padding: 48px 22px 42px; font-size: 19px; }
+.with-inspector .article-title { font-size: 42px; }
+.with-inspector .article-writing :deep(.tiptap) { font-size: 19px; }
+.with-inspector .article-writing :deep(.tiptap > p:first-child) { font-size: 23px; }
+.article-workspace :is(button, a, summary, textarea):focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.article-writing :deep(.article-evidence:focus-visible) { outline: 2px solid var(--ink); outline-offset: 3px; }
+@media (max-width: 1150px) {
+  .article-layout { grid-template-columns: 160px minmax(0, 1fr); gap: 24px; }
+  .article-layout.with-inspector { grid-template-columns: minmax(0, 1fr) 280px; gap: 24px; }
+}
+@media (max-width: 900px) {
+  .article-layout, .article-layout.with-inspector { display: block; }
+  .article-contents { position: static; padding-top: 16px; border-bottom: 1px solid var(--rule); }
+  .article-contents summary { margin: 0; }
+  .article-contents summary svg { display: block; }
+  .article-contents details[open] summary svg { transform: rotate(180deg); }
+  .article-contents nav { padding-bottom: 14px; }
+  .article-contents nav a { min-height: 44px; }
+  .article-paper, .with-inspector .article-paper { padding: 36px 24px 28px; }
+  .article-inspector { border-left: 0; border-top: 1px solid var(--rule); margin-top: 24px; padding: 20px 0; }
+}
+@media (max-width: 760px) {
+  .article-boundary { align-items: flex-start; gap: 12px; }
+  .article-boundary h1 { font-size: 32px; }
+  .article-paper, .with-inspector .article-paper { padding: 36px 0 24px; }
+  .article-title, .with-inspector .article-title { font-size: 35px; line-height: 1.16; }
+  .article-writing :deep(.tiptap), .with-inspector .article-writing :deep(.tiptap) { font-size: 18px; }
+  .article-writing :deep(.tiptap > p:first-child), .with-inspector .article-writing :deep(.tiptap > p:first-child) { font-size: 21px; }
+  .article-writing :deep(h2) { font-size: 27px; }
+  .article-writing :deep(h3) { font-size: 23px; }
+  .article-writing :deep(blockquote) { font-size: 25px; }
+  .article-toolbar button { min-height: 44px; }
+  .article-actions { gap: 8px; }
+  .article-review > div { align-items: flex-start; }
+}
 </style>

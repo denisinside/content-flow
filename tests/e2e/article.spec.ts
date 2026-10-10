@@ -42,7 +42,7 @@ async function fixture(page: Page, selected = true) {
     return json({});
   });
   await page.goto(`/projects/${id}/article`);
-  await expect(page.getByRole('heading', { name: 'Редактор', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Стаття', exact: true })).toBeVisible();
   if (selected) await expect(page.getByRole('textbox', { name: 'Текст статті' })).toBeVisible();
   return { submitted, conflict: () => { failSave = true; }, delay: () => { delaySave = true; }, state, candidate: () => { article!.versions.unshift({ id: 'candidate', number: article!.versions.length + 1, sourceArticleRevision: article!.revision, content: { title: 'AI заголовок', document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'AI пропозиція для порівняння.' }] }] } }, contentMode: 'CREATIVE', origin: 'AI', status: 'PROPOSED' }); } };
 }

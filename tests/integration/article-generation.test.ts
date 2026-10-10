@@ -19,6 +19,7 @@ type Generated = { job: { id: string } };
 const workflowId = '186937fe-674d-469e-a0d9-141c0ef3dc39';
 const descriptor = JSON.parse(readFileSync(new URL('../../packages/backend/src/editorial/workflows/article-generation/release.json', import.meta.url), 'utf8')) as { configDigest: string; releaseId: string };
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+const readyReport = JSON.stringify({ schemaVersion: 'article-editorial-report-v1', status: 'ready' });
 
 describe('article API, pinned Dify SSE provider and durable candidate persistence', () => {
   const config = loadRuntimeConfig(), authConfig = loadAuthConfig(), health = new DependencyHealthService(config);
@@ -30,14 +31,16 @@ describe('article API, pinned Dify SSE provider and durable candidate persistenc
   let app!: NestExpressApplication, worker!: DurableJobWorker, baseUrl = '', workspaceId = '', factualProject = '', creativeProject = '';
   let owner!: Identity, member!: Identity, outsider!: Identity, requiredClaim = '';
   let notesSnapshot = '', excludedSnapshot = '', suppliedSnapshot = '', extraFactSnapshot = '';
-  let mode: 'valid' | 'malformed' | 'foreign' | 'missingRequired' | 'wrongRelease' | 'brokenStream' | 'blocked' | 'invalidateBeforeSubmit' = 'valid';
+  let mode: 'valid' | 'malformed' | 'foreign' | 'missingRequired' | 'wrongRelease' | 'brokenStream' | 'blocked' | 'invalidateBeforeSubmit' | 'needs_human' | 'insufficient_evidence' = 'valid';
   let sent!: ArticleProviderInput, lastOutput: unknown, lastRunId = '';
   let postStarted: (() => void) | undefined;
   const blocker = { release: () => {} };
   const transport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
+    const report = mode === 'needs_human' || mode === 'insufficient_evidence'
+      ? JSON.stringify({ schemaVersion: 'article-editorial-report-v1', status: mode }) : readyReport;
     if (url.includes('/workflows/run/')) return new Response(JSON.stringify({ id: lastRunId, workflow_id: workflowId, status: 'succeeded',
-      outputs: { article_json: JSON.stringify(lastOutput) }, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
+      outputs: { article_json: JSON.stringify(lastOutput), editorial_report: report }, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
     const body = JSON.parse(String(init?.body)) as { inputs: { editorial_json: string }; response_mode: string };
     expect(body.response_mode).toBe('streaming'); sent = JSON.parse(body.inputs.editorial_json) as ArticleProviderInput;
     const cited = sent.claims.flatMap(claim => claim.evidence.slice(0, 1).map(evidence => ({ claimRevisionId: claim.claimRevisionId, evidenceId: mode === 'foreign' ? randomUUID() : evidence.evidenceId, quote: claim.wording })));
@@ -46,7 +49,7 @@ describe('article API, pinned Dify SSE provider and durable candidate persistenc
     lastRunId = randomUUID();
     const started = `data: ${JSON.stringify({ event: 'workflow_started', workflow_run_id: lastRunId })}\r\n\r\n`;
     const finished = `data: ${JSON.stringify({ event: 'workflow_finished', workflow_run_id: lastRunId,
-      data: { workflow_id: mode === 'wrongRelease' ? randomUUID() : workflowId, status: 'succeeded', outputs: { article_json: JSON.stringify(lastOutput) } } })}\r\n\r\n`;
+      data: { workflow_id: mode === 'wrongRelease' ? randomUUID() : workflowId, status: 'succeeded', outputs: { article_json: JSON.stringify(lastOutput), editorial_report: report } } })}\r\n\r\n`;
     if (mode === 'brokenStream') return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(started)); },
       pull(controller) { controller.error(new TypeError('Synthetic disconnected stream')); } }), { headers: { 'content-type': 'text/event-stream' } });
     if (mode === 'blocked') { postStarted?.(); await new Promise<void>(resolve => { blocker.release = resolve; }); }
@@ -90,10 +93,10 @@ describe('article API, pinned Dify SSE provider and durable candidate persistenc
     return row;
   }
   beforeAll(async () => {
-    vi.stubEnv('TEST_DIFY_API_BASE_URL', 'https://dify.example.test/v1');
-    vi.stubEnv('TEST_DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID', workflowId);
-    vi.stubEnv('TEST_DIFY_ARTICLE_GENERATION_CONFIG_SHA256', descriptor.configDigest);
-    vi.stubEnv('TEST_DIFY_ARTICLE_GENERATION_API_KEY', 'synthetic-outline-key');
+    vi.stubEnv('DIFY_API_BASE_URL', 'https://dify.example.test/v1');
+    vi.stubEnv('DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID', workflowId);
+    vi.stubEnv('DIFY_ARTICLE_GENERATION_CONFIG_SHA256', descriptor.configDigest);
+    vi.stubEnv('DIFY_ARTICLE_GENERATION_API_KEY', 'synthetic-outline-key');
     expect((await health.check()).status).toBe('ready');
     app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
     app.useBodyParser('json', { limit: '1mb' }); await app.init(); await app.listen(0, '127.0.0.1');
@@ -184,6 +187,7 @@ describe('article API, pinned Dify SSE provider and durable candidate persistenc
   it('freezes only approved factual claims and included captured context, preserving source roles', async () => {
     mode = 'valid';
     const id = await start(factualProject, member), job = await health.prisma.job.findUniqueOrThrow({ where: { id } });
+    expect(job.deadlineAt.getTime() - job.createdAt.getTime()).toBe(3_600_000);
     const manifest = job.inputManifest as unknown as ArticleInputManifest;
     expect(manifest).toMatchObject({ contentMode: 'FACTUAL', basisRevisionId: expect.any(String), basisHash: expect.any(String), contextSnapshotIds: [notesSnapshot] });
     const materialRow = await health.prisma.material.findFirstOrThrow({ where: { currentSnapshotId: notesSnapshot, projectId: factualProject } });
@@ -238,6 +242,18 @@ describe('article API, pinned Dify SSE provider and durable candidate persistenc
       expect(await health.prisma.job.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'FAILED', errorCategory: 'INVALID_CONTRACT' });
       expect(await health.prisma.articleVersion.count({ where: { projectId: factualProject } })).toBe(count);
       expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: id } })).toMatchObject({ status: 'FAILED' });
+    }
+  });
+  it('persists no candidate when a successful Dify run needs editorial intervention', async () => {
+    const count = await health.prisma.articleVersion.count({ where: { projectId: creativeProject } });
+    for (const value of ['needs_human', 'insufficient_evidence'] as const) {
+      mode = value;
+      const id = await start(creativeProject);
+      await worker.process({ jobId: id, ordinal: 1 });
+      expect(await health.prisma.job.findUniqueOrThrow({ where: { id } }))
+        .toMatchObject({ status: 'FAILED', errorCategory: 'PROVIDER_FAILED', providerOutcome: 'KNOWN_FAILED' });
+      expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: id } })).toMatchObject({ status: 'FAILED' });
+      expect(await health.prisma.articleVersion.count({ where: { projectId: creativeProject } })).toBe(count);
     }
   });
   it('resumes a captured SSE run without a second provider submission', async () => {

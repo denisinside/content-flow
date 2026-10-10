@@ -6,7 +6,7 @@ import { canonicalManifestHash } from '../jobs/job-service.js';
 import { PrivateAssetStore } from '../storage/private-asset-store.js';
 import { EXTERNAL_PROCESSING_NOTICE } from '../external-processing-notice.js';
 import { validateDigitalDocument, ImportValidationError } from './document-validation.js';
-import { ImportProviders, ImportProviderError, DOCLING_OPTIONS, FIRECRAWL_OPTIONS, IMPORT_CONTRACT } from './providers.js';
+import { ImportProviders, ImportProviderError, DOCLING_OPTIONS, FIRECRAWL_OPTIONS, IMPORT_CONTRACT, isOfficialFirecrawlCloud } from './providers.js';
 import { importedFragments, normalizeImportedText } from './source-text.js';
 
 const manifestSchema = z.object({ materialId: z.uuid(), expectedRevision: z.number().int().positive(), expectedSnapshotId: z.uuid().nullable().optional(),
@@ -58,11 +58,15 @@ export function createImportJobHandlers(dependencies: { prisma: PrismaClient; as
       try {
         const manifest = manifestSchema.parse(job.inputManifest), result = resultSchema.parse(raw);
         const metadata = result.metadata;
+        const invalidWebImport = operation === 'WEB_IMPORT' && (metadata['requestedUrl'] !== manifest.sourceUrl
+          || (isOfficialFirecrawlCloud(manifest.settings.firecrawlEndpoint)
+            ? metadata['egressMode'] !== 'firecrawl-cloud'
+            : metadata['policyDigest'] !== manifest.settings.remotePolicyDigest));
         if (manifest.noticeVersion !== EXTERNAL_PROCESSING_NOTICE.version || metadata['schemaVersion'] !== IMPORT_CONTRACT
           || !z.iso.datetime().safeParse(metadata['retrievedAt']).success || Buffer.byteLength(JSON.stringify(metadata)) > 200_000
           || metadata['provider'] !== (operation === 'WEB_IMPORT' ? 'firecrawl' : 'docling')
           || metadata['version'] !== (operation === 'WEB_IMPORT' ? manifest.settings.firecrawlVersion : manifest.settings.doclingVersion)
-          || operation === 'WEB_IMPORT' && (metadata['requestedUrl'] !== manifest.sourceUrl || metadata['policyDigest'] !== manifest.settings.remotePolicyDigest)
+          || invalidWebImport
           || operation === 'DOCUMENT_IMPORT' && metadata['originalSha256'] !== manifest.originalSha256) {
           throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
         }

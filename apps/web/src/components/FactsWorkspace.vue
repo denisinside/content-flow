@@ -155,7 +155,7 @@ async function load() {
     materials.value = result[3].materials.filter(material => material.included && material.purpose === 'FACTUAL_SOURCE' && material.currentSnapshotId)
     selectedBasis.value = selectedBasis.value.filter(id => result[2].eligibleClaims.some(claim => claim.currentRevisionId === id))
     if (!editing.value && !resolving.value && (!displayed.value || displayed.value.id === selected.value?.currentRevisionId)) {
-      const updated = claims.value.find(claim => claim.id === selected.value?.id) ?? claims.value[0] ?? null
+      const updated = claims.value.find(claim => claim.id === selected.value?.id) ?? null
       selected.value = updated; displayed.value = updated?.currentRevision ?? null
     }
   } catch (cause) { if (!disposed && version === epoch && !(cause instanceof DOMException && cause.name === 'AbortError')) error.value = cause instanceof Error ? cause.message : 'Не вдалося завантажити твердження.' }
@@ -165,8 +165,20 @@ async function load() {
 async function openClaim(claim: Claim, force = false) {
   if ((busy.value && !force) || editing.value) return
   selected.value = claim; displayed.value = claim.currentRevision; history.value = []; action.value = null
+  if (!force) {
+    await nextTick()
+    document.getElementById('facts-reader-title')?.focus()
+  }
   try { const result = await request<{ claim: Claim; revisions: Revision[] }>(`/claims/${encodeURIComponent(claim.id)}`); if (!disposed && selected.value?.id === claim.id && !editing.value) { const currentWasDisplayed = displayed.value?.id === claim.currentRevisionId; selected.value = result.claim; if (currentWasDisplayed) displayed.value = result.claim.currentRevision; history.value = result.revisions } }
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'Історія недоступна.' }
+}
+
+async function closeClaim() {
+  if (busy.value || editing.value) return
+  const claimId = selected.value?.id
+  selected.value = null; displayed.value = null; action.value = null
+  await nextTick()
+  if (claimId) document.getElementById(`claim-${claimId}`)?.focus()
 }
 
 async function loadHistory() {
@@ -331,12 +343,15 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
 </script>
 
 <template>
-  <div class="facts-workspace">
+  <div
+    class="facts-workspace author-desk-task"
+    :data-workspace-leave-risk="editing || busy || !!action || manualConflict || !!resolving || !!reopening"
+  >
     <header class="facts-heading">
-      <p class="eyebrow">
-        {{ projectTopic }}
-      </p><h2>Фактична основа</h2><p class="facts-lead">
-        Перевірте твердження за точними уривками джерел і збережіть схвалені версії для подальшої роботи.
+      <h1 id="facts-title">
+        Фактична основа
+      </h1><p class="facts-lead">
+        Перевірте твердження перед використанням у тексті.
       </p>
     </header>
     <Alert
@@ -482,6 +497,7 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
     <div
       v-else
       class="facts-columns"
+      :class="{ 'with-reader': selected || editing }"
     >
       <section
         class="facts-list"
@@ -506,23 +522,56 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
             :class="{ 'claim-selected': selected?.id === claim.id }"
           >
             <button
+              :id="`claim-${claim.id}`"
               type="button"
               class="claim-open"
               :disabled="busy || editing"
               :aria-current="selected?.id === claim.id ? 'true' : undefined"
               @click="openClaim(claim)"
             >
-              <span class="claim-wording">{{ claim.currentRevision.wording }}</span><span
+              <span
                 class="claim-status"
                 :class="{ 'claim-approved': claim.currentRevision.status === 'APPROVED' && !claim.currentRevision.withdrawnAt }"
               >{{ status(claim.currentRevision) }}</span>
+              <span class="claim-wording">{{ claim.currentRevision.wording }}</span>
             </button>
+            <div class="claim-inline-evidence">
+              <div
+                v-for="item in claim.currentRevision.evidence"
+                :key="item.id || `${item.snapshotId}-${item.fragmentId}-${item.startOffset}-${item.relation}`"
+                class="claim-inline-excerpt"
+              >
+                <p class="evidence-attribution">
+                  {{ item.materialLabel || 'Фактичне джерело' }}<template v-if="item.snapshotSequence">
+                    · Версія {{ item.snapshotSequence }}
+                  </template>
+                  · {{ item.relation === 'SUPPORTS' ? 'Підтверджує' : 'Суперечить' }}
+                </p>
+                <blockquote>{{ item.quote }}</blockquote>
+                <p
+                  v-if="item.invalidatedAt"
+                  class="facts-warning"
+                >
+                  Доказ визнано непридатним: {{ item.invalidationReason }}
+                </p>
+              </div>
+              <Button
+                class="facts-button"
+                variant="ghost"
+                :disabled="busy || editing"
+                @click="openClaim(claim)"
+              >
+                {{ claim.currentRevision.status === 'PROPOSED' ? 'Переглянути й схвалити' : 'Історія та дії' }}
+              </Button>
+            </div>
           </li>
         </ul>
       </section>
       <section
+        v-if="selected || editing"
         class="facts-reader"
         aria-labelledby="facts-reader-title"
+        @keydown.esc.stop="closeClaim"
       >
         <form
           v-if="editing"
@@ -741,9 +790,21 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
         </form>
         <template v-else-if="selected && displayed">
           <div class="facts-section-heading">
-            <h3 id="facts-reader-title">
+            <h3
+              id="facts-reader-title"
+              tabindex="-1"
+            >
               Перегляд твердження
-            </h3><span class="claim-status">{{ status(displayed) }}</span>
+            </h3><div class="facts-actions">
+              <span class="claim-status">{{ status(displayed) }}</span><Button
+                class="facts-button"
+                variant="ghost"
+                :disabled="busy"
+                @click="closeClaim"
+              >
+                До тверджень
+              </Button>
+            </div>
           </div><p class="claim-document">
             {{ displayed.wording }}
           </p><p
@@ -886,13 +947,7 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
               </li>
             </ul>
           </details>
-        </template><div v-else>
-          <h3 id="facts-reader-title">
-            Перевірка доказів
-          </h3><p class="facts-muted">
-            Оберіть твердження. Його точний уривок і збережена версія джерела з’являться тут.
-          </p>
-        </div>
+        </template>
       </section>
     </div>
     <section
@@ -902,9 +957,7 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
     >
       <div class="facts-section-heading">
         <div>
-          <p class="eyebrow">
-            Перевірка розбіжностей
-          </p><h3 id="facts-conflicts-title">
+          <h3 id="facts-conflicts-title">
             Суперечності
           </h3>
         </div><Button
@@ -1142,9 +1195,7 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
     >
       <div class="facts-section-heading">
         <div>
-          <p class="eyebrow">
-            Для подальшої роботи
-          </p><h3 id="facts-basis-title">
+          <h3 id="facts-basis-title">
             Схвалена основа
           </h3>
         </div><Field class="facts-mode">
@@ -1168,7 +1219,7 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
         v-if="mode === 'CREATIVE' && basisResult.unverified"
         class="facts-warning"
       >
-        Творчий / авторський режим · Без перевіреної фактичної основи. Це не підтверджує факти; подальший контент потребуватиме людського схвалення.
+        Творчий / авторський режим · Без перевіреної фактичної основи.
       </p><p
         v-else-if="basisResult.missingBasis"
         class="facts-warning"
@@ -1222,13 +1273,12 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
 <style scoped>
 .facts-workspace { color: var(--ink); }
 .facts-heading { margin-bottom: 26px; }
-.facts-heading .eyebrow { margin-bottom: 8px; }
-.facts-heading h2 { margin: 0; font-family: var(--serif); font-size: 31px; line-height: 1.2; font-weight: 500; }
-.facts-lead { margin: 10px 0 0; max-width: 650px; font-size: 14px; line-height: 1.65; color: var(--muted); }
+.facts-heading h1 { margin: 0; font-family: var(--serif); font-size: 39px; line-height: 1.2; font-weight: 550; letter-spacing: -.025em; }
+.facts-lead { margin: 10px 0 0; max-width: 650px; font-size: 15px; line-height: 1.65; color: var(--muted); }
 .facts-toolbar, .facts-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .facts-toolbar { padding-bottom: 22px; border-bottom: 1px solid var(--rule); }
-.facts-button { min-height: 38px; border-radius: 2px; font-size: 12px; }
-.facts-primary { background: var(--copper); color: var(--copper-foreground, var(--document)); }
+.facts-button { min-height: 40px; border-radius: 3px; font-size: 13px; }
+.facts-primary { background: var(--copper); color: var(--copper-foreground, #fff); }
 .facts-muted { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 10px 0; }
 .facts-message, .facts-warning { font-size: 13px; line-height: 1.6; margin: 12px 0; }
 .facts-warning { color: var(--review, var(--copper)); }
@@ -1238,36 +1288,39 @@ onBeforeUnmount(() => { disposed = true; epoch += 1; evidenceEpoch += 1; jobEpoc
 .facts-job > p, .conflict-list p { font-size: 13px; line-height: 1.6; margin: 10px 0; }
 .facts-section-heading { display: flex; gap: 18px; align-items: baseline; justify-content: space-between; margin-bottom: 16px; }
 .facts-section-heading h3, .facts-reader h3 { margin: 0; font-family: var(--serif); font-weight: 500; font-size: 23px; line-height: 1.3; }
-.facts-section-heading .eyebrow { margin-bottom: 5px; }
-.facts-columns { display: grid; grid-template-columns: minmax(250px, .9fr) minmax(0, 1.4fr); gap: 32px; padding: 28px 0; border-bottom: 1px solid var(--rule); }
+.facts-columns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 32px; padding: 28px 0; border-bottom: 1px solid var(--rule); }
+.facts-columns.with-reader { grid-template-columns: minmax(0, 1fr); }
 .facts-list, .facts-reader { min-width: 0; }
-.facts-reader { border-left: 1px solid var(--rule); padding-left: 28px; }
+.facts-reader { max-width: 78ch; border-top: 1px solid var(--rule); padding-top: 28px; scroll-margin-top: 24px; }
 .claim-list, .evidence-list, .claim-history, .conflict-list { margin: 0; padding: 0; list-style: none; }
-.claim-list > li { border-top: 1px solid var(--rule); padding: 15px 0; }
-.claim-selected { border-left: 2px solid var(--copper); padding-left: 12px !important; }
+.claim-list > li { border-top: 1px solid var(--rule); padding: 28px 0; }
+.claim-selected .claim-inline-evidence { max-width: 74ch; padding: 18px 0 0 28px; }
+.claim-inline-excerpt { margin-bottom: 18px; }
+.claim-inline-excerpt blockquote { margin: 8px 0; font-family: var(--serif); font-size: 20px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.claim-status { text-decoration: underline; text-underline-offset: 4px; }
 .claim-open { display: grid; gap: 8px; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; color: var(--ink); cursor: pointer; }
-.claim-wording { font-family: var(--serif); font-size: 17px; line-height: 1.45; overflow-wrap: anywhere; }
-.claim-status { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.claim-wording { font-family: var(--serif); font-size: 28px; line-height: 1.4; max-width: 72ch; overflow-wrap: anywhere; }
+.claim-status { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .claim-approved { color: var(--approval, var(--evidence, var(--copper))); }
 .claim-document { margin: 16px 0 22px; font-family: var(--serif); font-size: 22px; line-height: 1.55; overflow-wrap: anywhere; }
 .claim-evidence { margin-top: 25px; }
 .claim-evidence h4, .evidence-editor h4, .resolution-form h4 { margin: 0 0 13px; font-size: 13px; font-weight: 600; }
 .evidence-list > li { border-top: 1px solid var(--rule); padding: 14px 0; }
-.evidence-attribution { margin: 0 0 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.evidence-list blockquote, .evidence-preview { margin: 0 0 12px; padding: 13px 16px; border-left: 2px solid var(--evidence, var(--copper)); background: var(--document); font-family: var(--serif); font-size: 15px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow-y: auto; }
+.evidence-attribution { margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.evidence-list blockquote, .evidence-preview { margin: 0 0 12px; padding: 0 0 0 18px; border-left: 1px solid var(--rule); font-family: var(--serif); font-size: 19px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow-y: auto; }
 .facts-details { border-top: 1px solid var(--rule); margin-top: 15px; font-size: 12px; }
 .facts-details > summary { padding: 11px 0; cursor: pointer; font-weight: 600; }
-.facts-details dl { display: grid; grid-template-columns: 115px minmax(0, 1fr); gap: 8px 12px; margin: 0 0 13px; font-size: 11px; }
+.facts-details dl { display: grid; grid-template-columns: 115px minmax(0, 1fr); gap: 8px 12px; margin: 0 0 13px; font-size: 12px; }
 .facts-details dt { color: var(--muted); }
 .facts-details dd { margin: 0; overflow-wrap: anywhere; }
-.claim-history button { width: 100%; padding: 10px 0; border: 0; border-top: 1px solid var(--rule); background: transparent; color: var(--ink); text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
+.claim-history button { width: 100%; padding: 10px 0; border: 0; border-top: 1px solid var(--rule); background: transparent; color: var(--ink); text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
 .claim-history button[aria-current="true"] { color: var(--copper); font-weight: 600; }
 .claim-editor, .conflict-form, .resolution-form, .review-action { display: grid; gap: 18px; }
 .claim-editor h3 { margin-bottom: 4px; }
 .facts-field { display: grid; gap: 7px; }
 .facts-field :deep([data-slot="field-label"]), .facts-mode :deep([data-slot="field-label"]) { color: var(--ink); font-size: 12px; font-weight: 600; }
-.facts-field :deep([data-slot="field-description"]) { color: var(--muted); font-size: 11px; line-height: 1.5; }
-.facts-input { width: 100%; min-height: 40px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 2px; background: var(--document); color: var(--ink); font: inherit; font-size: 13px; line-height: 1.6; }
+.facts-field :deep([data-slot="field-description"]) { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.facts-input { width: 100%; min-height: 40px; padding: 10px 12px; border: 1px solid var(--field-rule, var(--rule)); border-radius: 3px; background: var(--document); color: var(--ink); font: inherit; font-size: 13px; line-height: 1.6; }
 textarea.facts-input { resize: vertical; }
 .evidence-picker, .conflict-form fieldset, .resolution-form fieldset, .basis-selection fieldset { display: grid; gap: 14px; border: 0; padding: 15px 0 0; margin: 0; border-top: 1px solid var(--rule); min-width: 0; }
 legend { padding: 0 0 10px; font-size: 12px; font-weight: 600; }
@@ -1280,6 +1333,6 @@ legend { padding: 0 0 10px; font-size: 12px; font-weight: 600; }
 .basis-selection { display: grid; gap: 18px; margin-top: 20px; }
 .basis-selection .facts-button { justify-self: start; }
 .facts-input:focus-visible, .claim-open:focus-visible, .claim-history button:focus-visible, .facts-check input:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
-@media (max-width: 900px) { .facts-columns { grid-template-columns: minmax(0, 1fr); gap: 25px; } .facts-reader { padding: 25px 0 0; border-left: 0; border-top: 1px solid var(--rule); } }
-@media (max-width: 520px) { .facts-heading h2 { font-size: 28px; } .facts-section-heading { flex-wrap: wrap; align-items: flex-start; } .facts-mode { width: 100%; } .claim-document { font-size: 21px; } }
+@media (max-width: 900px) { .facts-columns, .facts-columns.with-reader { grid-template-columns: minmax(0, 1fr); gap: 25px; } .facts-reader { padding: 25px 0 0; border-left: 0; border-top: 1px solid var(--rule); } }
+@media (max-width: 760px) { .facts-heading h1 { font-size: 32px; } .facts-section-heading { flex-wrap: wrap; align-items: flex-start; } .facts-mode { width: 100%; } .claim-document { font-size: 21px; } .claim-wording { font-size: 24px; } .claim-inline-evidence { padding-left: 16px; } .claim-inline-excerpt blockquote { font-size: 18px; } .facts-button, .claim-open, .claim-history button, .facts-details > summary { min-height: 44px; } .facts-input { min-height: 44px; font-size: 16px; } .facts-check { min-height: 44px; } }
 </style>

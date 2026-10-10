@@ -15,10 +15,13 @@ if (release.operation !== 'ARTICLE_GENERATION' || release.contractVersion !== 'a
   || release.inputVariable !== 'editorial_json' || release.outputVariable !== 'article_json'
   || sha(await readFile(new URL('prompt.md', directory))) !== release.promptSha256
   || sha(await readFile(new URL(release.workflowDslFile, directory))) !== release.workflowDslSha256
+  || release.runtimeFile !== 'scripts/dify/article_generation_runtime.py'
+  || sha(await readFile(new URL(release.runtimeFile, root))) !== release.runtimeSha256
+  || release.reportSchemaVersion !== 'article-editorial-report-v1' || release.reportVariable !== 'editorial_report'
   || sha(canonical(unsigned)) !== configDigest) throw new Error('Article release integrity check failed');
 const provider = await readFile(new URL('packages/backend/src/editorial/article-provider.ts', root), 'utf8');
-for (const [key, value] of Object.entries({ releaseId: release.releaseId, configDigest,
+for (const [key, value] of Object.entries({ releaseId: release.releaseId, configDigest, promptTemplateVersion: release.promptTemplateVersion,
   workflowDslSha256: release.workflowDslSha256 })) {
   if (!provider.includes(`${key}: '${value}'`)) throw new Error(`Article provider pin mismatch: ${key}`);
 }
-console.log('Article prompt, DSL, release digest and runtime pins verified.');
+console.log('Article role prompts, runtime source, DSL, report contract, release digest and runtime pins verified.');

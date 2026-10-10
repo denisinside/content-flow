@@ -3,9 +3,16 @@ import { z } from 'zod';
 import { claimsOutputSchema, type ClaimsOutput, type ClaimWorkflowRelease } from './contracts.js';
 
 export const CLAIMS_CONTRACT = 'claims-v1';
-const MAX_RESPONSE_BYTES = 512 * 1024;
-const MAX_SSE_EVENT_BYTES = 128 * 1024;
-const MAX_INPUT_BYTES = 1024 * 1024;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// Native Loop events include repeated state and accumulated child metadata.
+// Bound transport metadata separately from the final candidate payload.
+const MAX_SSE_BYTES = 128 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024;
+const MAX_INPUT_BYTES = 350000;
+const MAX_CLAIMS_BYTES = 500000;
+const MAX_REPORT_BYTES = 256 * 1024;
+const extractionReportSchema = z.object({ schemaVersion: z.literal('claims-extraction-report-v1'),
+  status: z.enum(['ready', 'needs_human']) }).passthrough();
 
 type ReleaseArtifact = {
   schemaVersion: 'contextflow-dify-release-v1';
@@ -31,23 +38,19 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'CLAIM_EXTRACTION', releaseId: 'claim-extraction-2026-10-05.1',
-  configDigest: '4cab7b15c51c6c79ecaa8976aaaa5b7a589ca9c7cea6de58e7cc2066b366d034', publishedWorkflowIdEnv: 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'CLAIM_EXTRACTION', releaseId: 'claim-extraction-2026-10-09.2',
+  configDigest: 'a34514efc6cd79d5dda73f210afc8ddaa413119a971bf092980773ea566036bf', publishedWorkflowIdEnv: 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_CLAIM_EXTRACTION_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_CLAIM_EXTRACTION_API_KEY', contractVersion: CLAIMS_CONTRACT,
-  promptTemplateVersion: 'claims-extraction-prompt-v1', promptTemplateFile: 'prompt.md', inputVariable: 'sources_json',
+  promptTemplateVersion: 'claims-extraction-review-prompt-v2', promptTemplateFile: 'prompt.md', inputVariable: 'sources_json',
   outputVariable: 'claims_json', responseMode: 'streaming', provider: 'dify',
   model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
     max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'claim-extraction-v1.yml',
-  workflowDslSha256: '4d67045fa6c9c048f9068a685580e287b23f06f0f66652011294b881d1270ba3',
+  workflowDslSha256: '29da9294feceb81d645a77f87ceee6b4870dea1ba511e20a6af3246d5904248f',
 };
 
-function testEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
-  if (env['NODE_ENV'] !== 'test') return env;
-  return Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith('TEST_')).map(([name, value]) => [name.slice(5), value]));
-}
 export type ClaimWorkflowSettings = ClaimWorkflowRelease & { apiKey: string };
 export class ClaimProviderError extends Error {
   constructor(readonly code: 'CONFIG' | 'AUTH' | 'INVALID_INPUT' | 'INCOMPATIBLE_CONTRACT' | 'QUOTA' | 'RATE_LIMIT' | 'TRANSIENT_TRANSPORT'
@@ -66,7 +69,7 @@ function safeEndpoint(value: string | undefined, allowLocal: boolean): string | 
   } catch { return; }
 }
 function configuredRelease(env: Record<string, string | undefined>): ClaimWorkflowRelease {
-  const effective = testEnvironment(env);
+  const effective = env;
   const endpoint = safeEndpoint(effective[release.apiBaseEnv], effective['NODE_ENV'] !== 'production');
   const workflowId = effective[release.publishedWorkflowIdEnv];
   if (!endpoint || !uuid(workflowId) || effective[release.configDigestEnv] !== release.configDigest) {
@@ -81,7 +84,7 @@ export function claimWorkflowRelease(env: Record<string, string | undefined> = p
     configDigest: config.configDigest, contractVersion: config.contractVersion, promptTemplateVersion: config.promptTemplateVersion };
 }
 export function claimWorkflowSettings(env: Record<string, string | undefined> = process.env): ClaimWorkflowSettings {
-  const apiKey = testEnvironment(env)[release.apiKeyEnv];
+  const apiKey = env[release.apiKeyEnv];
   if (!apiKey || apiKey.length > 500) throw new ClaimProviderError('CONFIG', 'The claim workflow API key is missing', 'NOT_SUBMITTED');
   return { ...configuredRelease(env), apiKey };
 }
@@ -169,7 +172,7 @@ async function streamRun(response: Response, settings: ClaimWorkflowSettings, si
       if (signal.aborted) throw new ClaimProviderError('TIMEOUT', 'Claim workflow exceeded its execution deadline', 'UNKNOWN');
       const next = await reader.read(); if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new ClaimProviderError('INCOMPATIBLE_CONTRACT', 'Claim workflow stream exceeded its size limit'); }
+      if (bytes > MAX_SSE_BYTES) { await reader.cancel(); throw new ClaimProviderError('INCOMPATIBLE_CONTRACT', 'Claim workflow stream exceeded its size limit'); }
       buffer += decoder.decode(next.value, { stream: true });
       let boundary: RegExpExecArray | null;
       while ((boundary = /\r?\n\r?\n/u.exec(buffer)) !== null) {
@@ -191,7 +194,16 @@ async function streamRun(response: Response, settings: ClaimWorkflowSettings, si
 
 function extractionFromRun(run: DifyRun): ClaimsOutput {
   if (run.data.status !== 'succeeded') throw new ClaimProviderError('PROVIDER_FAILED', 'Claim workflow did not succeed', 'KNOWN_FAILED');
+  const rawReport = run.data.outputs?.['extraction_report'];
+  if (typeof rawReport !== 'string' || Buffer.byteLength(rawReport) > MAX_REPORT_BYTES)
+    throw new ClaimProviderError('INCOMPATIBLE_CONTRACT', 'Claim workflow extraction report is missing or exceeds its limit');
+  const report = extractionReportSchema.safeParse(safeJson(rawReport));
+  if (!report.success) throw new ClaimProviderError('INCOMPATIBLE_CONTRACT', 'Claim workflow extraction report did not match its contract');
+  if (report.data.status !== 'ready')
+    throw new ClaimProviderError('PROVIDER_FAILED', 'Claim workflow requires human review before accepting candidates', 'KNOWN_FAILED');
   const raw = run.data.outputs?.[release.outputVariable];
+  if (raw === undefined || Buffer.byteLength(typeof raw === 'string' ? raw : JSON.stringify(raw)) > MAX_CLAIMS_BYTES)
+    throw new ClaimProviderError('INCOMPATIBLE_CONTRACT', 'Claim workflow candidate output is missing or exceeds its limit');
   const output = typeof raw === 'string' ? safeJson(raw) : raw;
   const parsed = claimsOutputSchema.safeParse(output);
   if (!parsed.success) throw new ClaimProviderError('INCOMPATIBLE_CONTRACT', 'Claim workflow output did not match claims-v1');

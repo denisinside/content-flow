@@ -1,15 +1,37 @@
 {
   "schemaVersion": "contextflow-dify-release-v1",
   "operation": "CLAIM_EXTRACTION",
-  "releaseId": "claim-extraction-2026-10-05.1",
-  "publishedWorkflowIdEnv": "DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID",
-  "configDigestEnv": "DIFY_CLAIM_EXTRACTION_CONFIG_SHA256",
+  "releaseId": "claim-extraction-2026-10-09.2",
+  "contractVersion": "claims-v1",
+  "promptTemplateVersion": "claims-extraction-review-prompt-v2",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "801f0c80bfa8730210d6dc4ffc186c8914587b0b410475ba855842efb0ffd5ee",
+  "workflowDslFile": "claim-extraction-v1.yml",
+  "workflowDslSha256": "29da9294feceb81d645a77f87ceee6b4870dea1ba511e20a6af3246d5904248f",
+  "runtimeFile": "scripts/dify/claim_extraction_runtime.py",
+  "runtimeSha256": "887081a541085fc878e27700355bf7032c0649f722415078c77b9c11d18c8f5e",
+  "target": {
+    "difyVersion": "1.17.1",
+    "graphonVersion": "0.7.0",
+    "dslVersion": "0.7.0"
+  },
+  "extractionLimits": {
+    "maxBatches": 30,
+    "batchFragments": 8,
+    "batchBytes": 40000,
+    "batchRepairs": 2,
+    "globalRepairs": 2,
+    "maxClaims": 100,
+    "maxModelCalls": 200,
+    "maxStateBytes": 350000,
+    "deadlineMs": 3600000
+  },
+  "reportVariable": "extraction_report",
+  "reportSchemaVersion": "claims-extraction-report-v1",
   "apiBaseEnv": "DIFY_API_BASE_URL",
   "apiKeyEnv": "DIFY_CLAIM_EXTRACTION_API_KEY",
-  "contractVersion": "claims-v1",
-  "promptTemplateVersion": "claims-extraction-prompt-v1",
-  "promptTemplateFile": "prompt.md",
-  "promptSha256": "668c4d0ba69480f85d194d23700bc0c0b92fb5d4c963a4af7fbf336f4989b5bc",
+  "publishedWorkflowIdEnv": "DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_CLAIM_EXTRACTION_CONFIG_SHA256",
   "inputVariable": "sources_json",
   "outputVariable": "claims_json",
   "responseMode": "streaming",
@@ -29,7 +51,5 @@
       "service_tier": "standard"
     }
   },
-  "workflowDslFile": "claim-extraction-v1.yml",
-  "workflowDslSha256": "4d67045fa6c9c048f9068a685580e287b23f06f0f66652011294b881d1270ba3",
-  "configDigest": "4cab7b15c51c6c79ecaa8976aaaa5b7a589ca9c7cea6de58e7cc2066b366d034"
+  "configDigest": "a34514efc6cd79d5dda73f210afc8ddaa413119a971bf092980773ea566036bf"
 }

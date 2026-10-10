@@ -16,7 +16,8 @@ type Identity = { id: string; cookie: string };
 type Reply<T> = { response: Response; body: T };
 type Extracted = { job: { id: string; status: string; errorCategory: string | null } };
 const workflowId = 'b21081a2-114a-4ce9-91d8-21241a03b70c';
-const configDigest = '4cab7b15c51c6c79ecaa8976aaaa5b7a589ca9c7cea6de58e7cc2066b366d034';
+const configDigest = 'a34514efc6cd79d5dda73f210afc8ddaa413119a971bf092980773ea566036bf';
+const readyReport = JSON.stringify({ schemaVersion: 'claims-extraction-report-v1', status: 'ready' });
 const sourceText = 'Київ має населення 3 мільйони осіб.';
 const hash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -37,7 +38,7 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
   let projectId = '';
   let worker: DurableJobWorker;
   let sentSources: unknown[] = [];
-  let outputMode: 'valid' | 'forged' | 'foreign' | 'malformed' | 'blocked' | 'breakAfterId' = 'valid';
+  let outputMode: 'valid' | 'forged' | 'foreign' | 'malformed' | 'blocked' | 'breakAfterId' | 'reviewBlocked' = 'valid';
   let lastRunId = '';
   let lastWorkflowOutput: unknown;
   let postStarted: (() => void) | undefined;
@@ -48,7 +49,7 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
   const transport = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
     const url = _input instanceof Request ? _input.url : String(_input);
     if (url.includes('/workflows/run/')) return new Response(JSON.stringify({ id: lastRunId, workflow_id: workflowId, status: 'succeeded',
-      outputs: { claims_json: JSON.stringify(lastWorkflowOutput) }, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
+      outputs: { claims_json: JSON.stringify(lastWorkflowOutput), extraction_report: readyReport }, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
     const body = JSON.parse(String(init?.body)) as { inputs: { sources_json: string } };
     sentSources = JSON.parse(body.inputs.sources_json) as unknown[];
     const source = sentSources[0] as { snapshotId: string; fragments: Array<{ id: string; startOffset: number; endOffset: number; text: string }> };
@@ -64,7 +65,8 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     const providerRunId = lastRunId;
     const started = `data: ${JSON.stringify({ event: 'workflow_started', workflow_run_id: providerRunId })}\r\n\r\n`;
     const finished = `data: ${JSON.stringify({ event: 'workflow_finished', workflow_run_id: providerRunId,
-      data: { workflow_id: workflowId, status: 'succeeded', outputs: { claims_json: JSON.stringify(output) } } })}\r\n\r\n`;
+      data: { workflow_id: workflowId, status: 'succeeded', outputs: { claims_json: JSON.stringify(output),
+        extraction_report: outputMode === 'reviewBlocked' ? JSON.stringify({ schemaVersion: 'claims-extraction-report-v1', status: 'needs_human' }) : readyReport } } })}\r\n\r\n`;
     if (outputMode === 'breakAfterId') return new Response(new ReadableStream<Uint8Array>({ start(controller) {
       controller.enqueue(new TextEncoder().encode(started));
     }, pull(controller) {
@@ -122,10 +124,10 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
   async function run(jobId: string): Promise<void> { await worker.process({ jobId, ordinal: 1 }); }
 
   beforeAll(async () => {
-    vi.stubEnv('TEST_DIFY_API_BASE_URL', 'https://dify.example.test/v1');
-    vi.stubEnv('TEST_DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID', workflowId);
-    vi.stubEnv('TEST_DIFY_CLAIM_EXTRACTION_CONFIG_SHA256', configDigest);
-    vi.stubEnv('TEST_DIFY_CLAIM_EXTRACTION_API_KEY', 'synthetic-claim-key');
+    vi.stubEnv('DIFY_API_BASE_URL', 'https://dify.example.test/v1');
+    vi.stubEnv('DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID', workflowId);
+    vi.stubEnv('DIFY_CLAIM_EXTRACTION_CONFIG_SHA256', configDigest);
+    vi.stubEnv('DIFY_CLAIM_EXTRACTION_API_KEY', 'synthetic-claim-key');
     expect((await health.check()).status).toBe('ready');
     app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
     app.useBodyParser('json', { limit: '1mb' }); await app.init(); await app.listen(0, '127.0.0.1');
@@ -202,6 +204,7 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     expect((await request(foreign, 'GET', `/api/v1/projects/${projectId}/claims`)).response.status).toBe(404);
     const saved = await health.prisma.job.findUniqueOrThrow({ where: { id: job.job.id } });
     expect(saved.status).toBe('SUCCEEDED');
+    expect(saved.deadlineAt.getTime() - saved.createdAt.getTime()).toBe(3_600_000);
     const manifest = saved.inputManifest as { snapshots: Array<{ materialId: string; snapshotId: string; fragments: Array<{ id: string }> }> };
     expect(manifest.snapshots).toHaveLength(1);
     expect(sentSources).toHaveLength(1);
@@ -212,7 +215,7 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     expect(candidate.currentRevision?.evidence[0]).toMatchObject({ snapshotId: manifest.snapshots[0]?.snapshotId, relation: 'SUPPORTS', quote: sourceText });
     const execution = await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: job.job.id } });
     expect(execution).toMatchObject({ status: 'SUCCEEDED', provider: 'dify', providerRunId: expect.any(String), model: null,
-      releaseId: 'claim-extraction-2026-10-05.1', configDigest });
+      releaseId: 'claim-extraction-2026-10-09.2', configDigest });
     expect(JSON.stringify(execution.inputManifest)).not.toContain('synthetic-claim-key');
   });
 
@@ -240,6 +243,17 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     expect(await health.prisma.job.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'SUCCEEDED' });
     expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: job.job.id } })).toMatchObject({ status: 'SUCCEEDED', providerRunId: lastRunId });
     expect(await health.prisma.claim.count({ where: { projectId } })).toBe(2);
+  });
+
+  it('fails a nonready extraction report without storing otherwise valid candidates', async () => {
+    outputMode = 'reviewBlocked';
+    const before = await health.prisma.claim.count({ where: { projectId } });
+    const job = await startExtraction(); await run(job.job.id);
+    expect(await health.prisma.job.findUniqueOrThrow({ where: { id: job.job.id } }))
+      .toMatchObject({ status: 'FAILED', errorCategory: 'PROVIDER_FAILED', providerOutcome: 'KNOWN_FAILED' });
+    expect(await health.prisma.claim.count({ where: { projectId } })).toBe(before);
+    expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: job.job.id } }))
+      .toMatchObject({ status: 'FAILED', errorCategory: 'PROVIDER_FAILED', providerRunId: lastRunId });
   });
 
   it('fences cancellation after submission so late Dify output creates no canonical candidate', async () => {

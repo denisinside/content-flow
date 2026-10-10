@@ -1,13 +1,30 @@
 {
   "schemaVersion": "contextflow-dify-release-v1",
   "operation": "OUTLINE_GENERATION",
-  "releaseId": "outline-generation-2026-10-05.2",
+  "releaseId": "outline-generation-2026-10-09.2",
   "contractVersion": "outline-v1",
-  "promptTemplateVersion": "outline-generation-prompt-v1",
+  "promptTemplateVersion": "outline-generation-reviewed-prompt-v2",
   "promptTemplateFile": "prompt.md",
-  "promptSha256": "e2fbabb7dd5e55ab03978dac414749e8c4c643745ae1f2e6a04f56295b65af22",
+  "promptSha256": "56377389b223e8321f76cbe107280bbc423272b046789288b29898a1c381670f",
   "workflowDslFile": "outline-generation-v1.yml",
-  "workflowDslSha256": "7cf6eb314bf37a4bcebb193a46602a6b95c6f2f48b1fa1db7d2ab5b4549885eb",
+  "workflowDslSha256": "8ddc8c36b58fb7c91b9c992f18a4d317fa57ffe68bdbbbceccda8ffddece686d",
+  "runtimeFile": "scripts/dify/outline_generation_runtime.py",
+  "runtimeSha256": "ed5c10844a9b175e11de8981a10e484f43291c87a5e93ebd004cc842df2af89f",
+  "target": {
+    "difyVersion": "1.17.1",
+    "graphonVersion": "0.7.0",
+    "dslVersion": "0.7.0"
+  },
+  "outlineLimits": {
+    "strategyRepairs": 1,
+    "outlineRepairs": 2,
+    "maxSections": 30,
+    "maxModelCalls": 16,
+    "maxStateBytes": 350000,
+    "deadlineMs": 600000
+  },
+  "reportVariable": "outline_report",
+  "reportSchemaVersion": "outline-review-report-v1",
   "apiBaseEnv": "DIFY_API_BASE_URL",
   "apiKeyEnv": "DIFY_OUTLINE_GENERATION_API_KEY",
   "publishedWorkflowIdEnv": "DIFY_OUTLINE_GENERATION_PUBLISHED_WORKFLOW_ID",
@@ -21,7 +38,7 @@
     "name": "gemini-3.8-flash",
     "mode": "chat",
     "completionParams": {
-      "max_output_tokens": 4096,
+      "max_output_tokens": 8192,
       "thinking_level": "Low",
       "include_thoughts": false,
       "media_resolution": "Default",
@@ -31,5 +48,5 @@
       "service_tier": "standard"
     }
   },
-  "configDigest": "6145cb5d88ff0fc1dfc929505ca82fad5ae4889b3923b916a87b9dbebe8ea416"
+  "configDigest": "f48c183037eb471758659737ffe7fa80864fba7cf184d7af560fdef82b8c72cb"
 }

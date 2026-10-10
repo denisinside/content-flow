@@ -125,17 +125,32 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
 
 <template>
   <section
-    class="brief-workspace"
+    class="brief-workspace author-desk-task"
+    :data-workspace-leave-risk="!loading && (dirty || outlineDirty || busy)"
     aria-labelledby="brief-title"
   >
     <header class="brief-heading">
-      <p class="eyebrow">
-        {{ projectTopic }}
-      </p><h1 id="brief-title">
-        Бриф
-      </h1><p class="brief-lead">
-        Визначте, для кого пишемо і яку думку читач має запам’ятати.
-      </p>
+      <div>
+        <h1 id="brief-title">
+          Бриф
+        </h1><p class="brief-lead">
+          Задум, читач і межі матеріалу.
+        </p>
+      </div>
+      <div
+        v-if="state && !loading"
+        class="brief-heading-actions"
+      >
+        <span role="status">{{ dirty ? 'Є незбережені зміни' : saved || (state.brief ? 'Бриф збережено' : '') }}</span>
+        <Button
+          type="submit"
+          form="brief-form"
+          class="workspace-button workspace-button-primary"
+          :disabled="busy || archived || !valid || (!dirty && !styleChanged)"
+        >
+          {{ busy ? 'Зберігаємо…' : 'Зберегти бриф' }}
+        </Button>
+      </div>
     </header>
     <p
       v-if="loading"
@@ -179,168 +194,171 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
         role="status"
       >
         Стиль простору змінився. Збережіть нову версію брифу перед роботою зі структурою.
-      </p><form
-        class="brief-document"
-        @submit.prevent="saveBrief"
-      >
-        <fieldset
-          class="brief-modes"
-          :disabled="archived || busy"
+      </p>
+      <div class="brief-layout">
+        <form
+          id="brief-form"
+          class="brief-document"
+          @submit.prevent="saveBrief"
         >
-          <legend>Як працюємо з темою</legend><label><input
-            v-model="form.contentMode"
-            type="radio"
-            value="FACTUAL"
-          > На перевірених фактах</label><label><input
-            v-model="form.contentMode"
-            type="radio"
-            value="CREATIVE"
-          > Творчий матеріал</label>
-        </fieldset>
-        <p
-          v-if="form.contentMode === 'CREATIVE'"
-          class="brief-review"
-          role="status"
-        >
-          Без перевіреної фактологічної основи. Працюємо з темою та авторськими нотатками.
-        </p>
-        <p
-          v-else-if="state.prerequisites.missingBasis"
-          class="brief-review"
-          role="status"
-        >
-          Немає придатної затвердженої фактичної основи. Збережіть бриф, а перед генерацією перевірте факти.
-        </p>
-        <p
-          v-else
-          class="brief-evidence"
-        >
-          Затверджена фактична основа доступна.
-        </p>
-        <fieldset
-          class="brief-fields"
-          :disabled="busy || archived"
-        >
-          <legend class="sr-only">
-            Зміст брифу
-          </legend>
-          <label
-            class="brief-field brief-wide"
-            for="brief-topic"
-          >Тема<Textarea
-            id="brief-topic"
-            v-model="form.topic"
-            rows="2"
-            required
-            maxlength="500"
-            class="workspace-input"
-          /></label>
-          <label
-            class="brief-field"
-            for="brief-audience"
-          >Аудиторія<Textarea
-            id="brief-audience"
-            v-model="form.audience"
-            rows="2"
-            required
-            maxlength="2000"
-            class="workspace-input"
-          /></label>
-          <label
-            class="brief-field"
-            for="brief-message"
-          >Головне повідомлення<Textarea
-            id="brief-message"
-            v-model="form.centralMessage"
-            rows="2"
-            required
-            maxlength="4000"
-            class="workspace-input"
-          /></label>
-          <label
-            class="brief-field"
-            for="brief-category"
-          >Категорія<input
-            id="brief-category"
-            v-model="form.category"
-            maxlength="120"
-            class="workspace-input"
-          ></label>
-          <label
-            class="brief-field"
-            for="brief-tone"
-          >Тон<input
-            id="brief-tone"
-            v-model="form.tone"
-            maxlength="10000"
-            class="workspace-input"
-          ></label>
-          <label
-            class="brief-field"
-            for="brief-length"
-          >Бажаний обсяг, слів<input
-            id="brief-length"
-            v-model.number="form.targetLength"
-            type="number"
-            min="50"
-            max="20000"
-            step="1"
-            required
-            class="workspace-input"
-          ></label>
-          <label
-            class="brief-field"
-            for="brief-cta"
-          >Заклик до дії<input
-            id="brief-cta"
-            v-model="form.cta"
-            maxlength="2000"
-            class="workspace-input"
-          ></label>
-          <label
-            class="brief-field brief-wide"
-            for="brief-exclusions"
-          >Чого уникати<Textarea
-            id="brief-exclusions"
-            v-model="form.exclusions"
-            rows="2"
-            class="workspace-input"
-          /><span class="field-hint">Кожне виключення — з нового рядка.</span></label>
-          <label
-            class="brief-field brief-wide"
-            for="brief-notes"
-          >Авторські нотатки<Textarea
-            id="brief-notes"
-            v-model="form.notes"
-            rows="4"
-            maxlength="10000"
-            class="workspace-input"
-          /></label>
-        </fieldset>
-        <fieldset
-          v-if="form.contentMode === 'FACTUAL' && state.prerequisites.eligibleClaims.length"
-          class="brief-claims"
-          :disabled="busy || archived"
-        >
-          <legend>Обов’язкові факти</legend><label
-            v-for="claim in state.prerequisites.eligibleClaims"
-            :key="claim.currentRevisionId"
-          ><input
-            v-model="form.requiredClaimRevisionIds"
-            type="checkbox"
-            :value="claim.currentRevisionId"
-          ><span>{{ claim.currentRevision.wording }}</span></label>
-        </fieldset>
-        <div class="brief-actions">
-          <Button
-            type="submit"
-            class="workspace-button workspace-button-primary"
-            :disabled="busy || archived || !valid || (!dirty && !styleChanged)"
+          <fieldset
+            class="brief-fields"
+            :disabled="busy || archived"
           >
-            {{ busy ? 'Зберігаємо…' : 'Зберегти бриф' }}
-          </Button><span role="status">{{ dirty ? 'Є незбережені зміни' : saved || (state.brief ? 'Бриф збережено' : '') }}</span>
-        </div>
-      </form>
+            <legend class="sr-only">
+              Зміст брифу
+            </legend>
+            <label
+              class="brief-field brief-wide"
+              for="brief-topic"
+            >Тема<Textarea
+              id="brief-topic"
+              v-model="form.topic"
+              rows="2"
+              required
+              maxlength="500"
+              class="workspace-input"
+            /></label>
+            <label
+              class="brief-field brief-wide"
+              for="brief-audience"
+            >Аудиторія<Textarea
+              id="brief-audience"
+              v-model="form.audience"
+              rows="2"
+              required
+              maxlength="2000"
+              class="workspace-input"
+            /></label>
+            <label
+              class="brief-field brief-wide"
+              for="brief-message"
+            >Головне повідомлення<Textarea
+              id="brief-message"
+              v-model="form.centralMessage"
+              rows="2"
+              required
+              maxlength="4000"
+              class="workspace-input"
+            /></label>
+            <label
+              class="brief-field"
+              for="brief-category"
+            >Категорія<input
+              id="brief-category"
+              v-model="form.category"
+              maxlength="120"
+              class="workspace-input"
+            ></label>
+            <label
+              class="brief-field"
+              for="brief-tone"
+            >Тон<input
+              id="brief-tone"
+              v-model="form.tone"
+              maxlength="10000"
+              class="workspace-input"
+            ></label>
+            <label
+              class="brief-field"
+              for="brief-length"
+            >Бажаний обсяг, слів<input
+              id="brief-length"
+              v-model.number="form.targetLength"
+              type="number"
+              min="50"
+              max="20000"
+              step="1"
+              required
+              class="workspace-input"
+            ></label>
+            <label
+              class="brief-field"
+              for="brief-cta"
+            >Заклик до дії<input
+              id="brief-cta"
+              v-model="form.cta"
+              maxlength="2000"
+              class="workspace-input"
+            ></label>
+            <label
+              class="brief-field brief-wide"
+              for="brief-exclusions"
+            >Чого уникати<Textarea
+              id="brief-exclusions"
+              v-model="form.exclusions"
+              rows="2"
+              class="workspace-input"
+            /><span class="field-hint">Кожне виключення — з нового рядка.</span></label>
+            <label
+              class="brief-field brief-wide"
+              for="brief-notes"
+            >Авторські нотатки<Textarea
+              id="brief-notes"
+              v-model="form.notes"
+              rows="4"
+              maxlength="10000"
+              class="workspace-input"
+            /></label>
+          </fieldset>
+        </form>
+        <aside
+          class="brief-context"
+          aria-labelledby="brief-context-title"
+        >
+          <h2 id="brief-context-title">
+            Основа матеріалу
+          </h2>
+          <fieldset
+            class="brief-modes"
+            :disabled="archived || busy"
+          >
+            <legend>Як працюємо з темою</legend><label><input
+              v-model="form.contentMode"
+              type="radio"
+              value="FACTUAL"
+            > На перевірених фактах</label><label><input
+              v-model="form.contentMode"
+              type="radio"
+              value="CREATIVE"
+            > Творчий матеріал</label>
+          </fieldset>
+          <p
+            v-if="form.contentMode === 'CREATIVE'"
+            class="brief-review"
+            role="status"
+          >
+            Без перевіреної фактологічної основи. Працюємо з темою та авторськими нотатками.
+          </p>
+          <p
+            v-else-if="state.prerequisites.missingBasis"
+            class="brief-review"
+            role="status"
+          >
+            Немає придатної затвердженої фактичної основи. Збережіть бриф, а перед генерацією перевірте факти.
+          </p>
+          <p
+            v-else
+            class="brief-evidence"
+          >
+            Затверджена фактична основа доступна.
+          </p>
+          <fieldset
+            v-if="form.contentMode === 'FACTUAL' && state.prerequisites.eligibleClaims.length"
+            class="brief-claims"
+            :disabled="busy || archived"
+          >
+            <legend>Обов’язкові факти</legend><label
+              v-for="claim in state.prerequisites.eligibleClaims"
+              :key="claim.currentRevisionId"
+            ><input
+              v-model="form.requiredClaimRevisionIds"
+              type="checkbox"
+              :value="claim.currentRevisionId"
+            ><span>{{ claim.currentRevision.wording }}</span></label>
+          </fieldset>
+        </aside>
+      </div>
       <details
         v-if="state.brief"
         class="brief-details"
@@ -364,10 +382,8 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
       >
         <div class="brief-section-heading">
           <div>
-            <p class="eyebrow">
-              Стаття
-            </p><h2 id="outline-title">
-              Структура статті
+            <h2 id="outline-title">
+              План статті
             </h2>
           </div><Button
             class="workspace-button"
@@ -453,92 +469,117 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
             Спочатку збережіть ручні зміни структури.
           </p>
         </details>
-        <form
-          v-if="state.brief"
-          @submit.prevent="saveOutline"
+        <h3
+          v-if="currentOutline"
+          class="outline-reading-title"
         >
-          <fieldset
-            class="brief-fields"
-            :disabled="busy || archived"
+          {{ currentOutline.content.title }}
+        </h3>
+        <ol
+          v-if="currentOutline"
+          class="outline-reading"
+        >
+          <li
+            v-for="(section, index) in currentOutline.content.sections"
+            :key="index"
           >
-            <legend class="sr-only">
-              Редагування структури
-            </legend><label
-              class="brief-field brief-wide"
-              for="outline-heading"
-            >Заголовок статті<input
-              id="outline-heading"
-              v-model="outline.title"
-              required
-              maxlength="500"
-              class="workspace-input"
-              data-slot="input"
-            ></label><div
-              v-for="(section, index) in outline.sections"
-              :key="index"
-              class="outline-section brief-wide"
+            <h3>{{ section.title }}</h3>
+            <p>{{ section.purpose }}</p>
+          </li>
+        </ol>
+        <details
+          v-if="state.brief"
+          class="outline-edit"
+          :open="!currentOutline || outlineDirty"
+        >
+          <summary>{{ currentOutline ? 'Редагувати план' : 'Створити план вручну' }}</summary>
+          <form
+            v-if="state.brief"
+            @submit.prevent="saveOutline"
+          >
+            <fieldset
+              class="brief-fields"
+              :disabled="busy || archived"
             >
-              <div class="brief-section-heading">
-                <h3>Розділ {{ index + 1 }}</h3><Button
-                  type="button"
-                  variant="ghost"
-                  class="workspace-button"
-                  :aria-label="`Видалити розділ ${index + 1}`"
-                  @click="outline.sections.splice(index, 1)"
-                >
-                  Видалити
-                </Button>
-              </div><label
-                class="brief-field"
-                :for="`outline-title-${index}`"
-              >Назва розділу<input
-                :id="`outline-title-${index}`"
-                v-model="section.title"
+              <legend class="sr-only">
+                Редагування структури
+              </legend><label
+                class="brief-field brief-wide"
+                for="outline-heading"
+              >Заголовок статті<input
+                id="outline-heading"
+                v-model="outline.title"
                 required
-                maxlength="300"
+                maxlength="500"
                 class="workspace-input"
-              ></label><label
-                class="brief-field"
-                :for="`outline-purpose-${index}`"
-              >Про що цей розділ<Textarea
-                :id="`outline-purpose-${index}`"
-                v-model="section.purpose"
-                rows="2"
-                maxlength="2000"
-                required
-                class="workspace-input"
-              /></label><fieldset
-                v-if="form.contentMode === 'FACTUAL' && state.prerequisites.eligibleClaims.length"
-                class="brief-claims"
+                data-slot="input"
+              ></label><div
+                v-for="(section, index) in outline.sections"
+                :key="index"
+                class="outline-section brief-wide"
               >
-                <legend>Факти розділу</legend><label
-                  v-for="claim in state.prerequisites.eligibleClaims"
-                  :key="claim.currentRevisionId"
-                ><input
-                  v-model="section.claimRevisionIds"
-                  type="checkbox"
-                  :value="claim.currentRevisionId"
-                ><span>{{ claim.currentRevision.wording }}</span></label>
-              </fieldset>
+                <div class="brief-section-heading">
+                  <h3>Розділ {{ index + 1 }}</h3><Button
+                    type="button"
+                    variant="ghost"
+                    class="workspace-button"
+                    :aria-label="`Видалити розділ ${index + 1}`"
+                    @click="outline.sections.splice(index, 1)"
+                  >
+                    Видалити
+                  </Button>
+                </div><label
+                  class="brief-field"
+                  :for="`outline-title-${index}`"
+                >Назва розділу<input
+                  :id="`outline-title-${index}`"
+                  v-model="section.title"
+                  required
+                  maxlength="300"
+                  class="workspace-input"
+                ></label><label
+                  class="brief-field"
+                  :for="`outline-purpose-${index}`"
+                >Про що цей розділ<Textarea
+                  :id="`outline-purpose-${index}`"
+                  v-model="section.purpose"
+                  rows="2"
+                  maxlength="2000"
+                  required
+                  class="workspace-input"
+                /></label><fieldset
+                  v-if="form.contentMode === 'FACTUAL' && state.prerequisites.eligibleClaims.length"
+                  class="brief-claims"
+                >
+                  <legend>Факти розділу</legend><label
+                    v-for="claim in state.prerequisites.eligibleClaims"
+                    :key="claim.currentRevisionId"
+                  ><input
+                    v-model="section.claimRevisionIds"
+                    type="checkbox"
+                    :value="claim.currentRevisionId"
+                  ><span>{{ claim.currentRevision.wording }}</span></label>
+                </fieldset>
+              </div>
+            </fieldset><div class="brief-actions">
+              <Button
+                type="button"
+                variant="outline"
+                class="workspace-button"
+                :disabled="busy || archived || outline.sections.length >= 30"
+                @click="outline.sections.push({ title: '', purpose: '', claimRevisionIds: [] })"
+              >
+                Додати розділ
+              </Button><Button
+                type="submit"
+                class="workspace-button workspace-button-primary"
+                :disabled="busy || archived || dirty || (!outlineDirty && !outdatedOutline) || !outline.title.trim() || !outline.sections.length || outline.sections.some(section => !section.title.trim() || !section.purpose.trim())"
+              >
+                Зберегти структуру
+              </Button>
             </div>
-          </fieldset><div class="brief-actions">
-            <Button
-              type="button"
-              variant="outline"
-              class="workspace-button"
-              :disabled="busy || archived || outline.sections.length >= 30"
-              @click="outline.sections.push({ title: '', purpose: '', claimRevisionIds: [] })"
-            >
-              Додати розділ
-            </Button><Button
-              type="submit"
-              class="workspace-button workspace-button-primary"
-              :disabled="busy || archived || dirty || (!outlineDirty && !outdatedOutline) || !outline.title.trim() || !outline.sections.length || outline.sections.some(section => !section.title.trim() || !section.purpose.trim())"
-            >
-              Зберегти структуру
-            </Button>
-          </div>
-        </form>
+          </form>
+        </details>
         <p
           v-if="outdatedOutline"
           class="brief-review"
@@ -583,40 +624,53 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
 </template>
 
 <style scoped>
-.brief-workspace { max-width: 840px; margin: 24px auto 60px; color: var(--ink); }
-.brief-heading { margin-bottom: 32px; }
-.brief-heading h1 { font-family: 'Source Serif 4', Georgia, serif; font-size: clamp(36px, 4vw, 48px); line-height: 1.1; font-weight: 500; margin: 12px 0; }
-.brief-lead { font-family: 'Source Serif 4', Georgia, serif; font-size: 21px; line-height: 1.5; max-width: 650px; }
-.brief-document { background: var(--document, #fcfcf8); padding: 30px; border: 1px solid var(--rule, #d4d9d1); }
+.brief-workspace { margin-bottom: 40px; color: var(--ink); }
+.brief-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 64px; align-items: start; }
+.brief-context { min-width: 0; border-top: 1px solid var(--rule); padding-top: 18px; }
+.brief-context h2 { font-size: 23px; margin: 0 0 24px; }
+.brief-heading { display: flex; align-items: start; justify-content: space-between; gap: 24px; margin-bottom: 32px; }
+.brief-heading-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 12px; }
+.brief-heading-actions span { color: var(--muted); font-size: 12px; }
+.brief-heading h1 { font-family: var(--serif); font-size: 39px; line-height: 1.2; font-weight: 550; letter-spacing: -.025em; margin: 0; }
+.brief-lead { font-size: 15px; line-height: 1.65; color: var(--muted); max-width: 650px; margin: 10px 0 0; }
+.brief-document { min-width: 0; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.brief-modes { display: flex; flex-wrap: wrap; gap: 16px 28px; }
-legend { font-weight: 600; font-size: 14px; margin-bottom: 12px; }
+.brief-modes { display: grid; gap: 14px; }
+legend { font-weight: 500; font-size: 13px; margin-bottom: 12px; }
 .brief-modes label, .brief-claims label { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; }
 input[type='checkbox'], input[type='radio'] { margin-top: 4px; accent-color: var(--copper); flex: 0 0 auto; }
 .brief-review, .brief-evidence { line-height: 1.55; padding: 12px 0; font-size: 14px; }
 .brief-review { color: var(--review, #93602c); }
 .brief-evidence { color: var(--evidence, #2c6660); }
-.brief-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; margin-top: 18px; }
-.brief-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-weight: 500; font-size: 14px; }
+.brief-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px 24px; margin-top: 0; }
+.brief-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-weight: 400; font-size: 13px; }
 .brief-wide { grid-column: 1 / -1; }
-.brief-field input { min-height: 44px; width: 100%; padding: 10px 12px; border: 1px solid #c6ccc4; border-radius: 2px; background: #fff; color: var(--ink); font-family: var(--sans); font-size: 14px; font-weight: 400; }
-.brief-field input:hover { border-color: #98a198; }
-.brief-field textarea { font-family: 'Source Serif 4', Georgia, serif; font-size: 18px; line-height: 1.55; }
+.brief-field input, .brief-field textarea { min-height: 44px; width: 100%; padding: 10px 0; border: 0; border-bottom: 1px solid var(--field-rule, #bec1c4); border-radius: 0; background: var(--document); color: var(--ink); font-family: var(--serif); font-size: 20px; font-weight: 400; box-shadow: none; line-height: 1.55; }
+.brief-field input:hover { border-color: var(--ink); }
+.brief-field textarea { resize: vertical; }
 .brief-claims { margin-top: 24px; }
 .brief-claims label { margin: 12px 0; font-weight: 400; }
 .brief-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 24px; }
 .brief-actions span { font-size: 13px; color: var(--muted); }
-.brief-details { padding: 20px 0; border-bottom: 1px solid var(--rule, #d4d9d1); font-size: 14px; line-height: 1.6; }
-summary { cursor: pointer; font-weight: 500; padding: 6px 0; }
-.brief-history { padding: 12px 0; border-top: 1px solid var(--rule, #d4d9d1); }
+.brief-details { padding: 20px 0; border-bottom: 1px solid var(--rule); font-size: 14px; line-height: 1.6; }
+summary { cursor: pointer; font-weight: 500; padding: 12px 0; min-height: 44px; }
+.brief-history { padding: 12px 0; border-top: 1px solid var(--rule); }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-.brief-outline { margin-top: 40px; }
+.brief-outline { margin-top: 40px; border-top: 1px solid var(--rule); padding-top: 24px; }
+.outline-reading { max-width: 78ch; padding-left: 24px; margin: 24px 0; }
+.outline-reading-title { margin: 24px 0 0; font-size: 25px; font-weight: 550; }
+.outline-reading li { padding: 4px 0 18px 8px; }
+.outline-reading h3 { margin: 0 0 6px; font-size: 21px; }
+.outline-reading p { margin: 0; line-height: 1.6; color: var(--muted); }
+.outline-edit { border-top: 1px solid var(--rule); }
+.outline-edit > summary { margin-bottom: 12px; }
 .brief-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-h2 { font-family: 'Source Serif 4', Georgia, serif; font-size: 28px; font-weight: 600; margin: 8px 0; }
-h3 { font-family: 'Source Serif 4', Georgia, serif; font-size: 21px; font-weight: 600; }
-.outline-section { padding: 16px 0; border-top: 1px solid var(--rule, #d4d9d1); display: grid; gap: 16px; }
-.brief-candidate, .brief-job { margin: 20px 0; padding: 16px 0; border-top: 1px solid var(--rule, #d4d9d1); }
+h2 { font-family: var(--serif); font-size: 28px; font-weight: 600; margin: 8px 0; }
+h3 { font-family: var(--serif); font-size: 21px; font-weight: 600; }
+.outline-section { padding: 16px 0; border-top: 1px solid var(--rule); display: grid; gap: 16px; }
+.brief-candidate, .brief-job { margin: 20px 0; padding: 16px 0; border-top: 1px solid var(--rule); }
 .brief-candidate summary { color: var(--proposal, #725078); }
 :where(input, textarea, summary, button):focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
-@media (max-width: 600px) { .brief-document { padding: 20px 16px; } .brief-fields { grid-template-columns: minmax(0, 1fr); } .brief-section-heading { align-items: flex-start; flex-direction: column; } .brief-lead { font-size: 19px; } }
+@media (max-width: 900px) { .brief-layout { grid-template-columns: minmax(0, 1fr) 240px; gap: 32px; } }
+@media (max-width: 760px) { .brief-heading { flex-direction: column; } .brief-heading-actions { justify-content: flex-start; } .brief-layout { grid-template-columns: minmax(0, 1fr); gap: 32px; } .brief-field input, .brief-field textarea { font-size: 18px; } .brief-fields { grid-template-columns: minmax(0, 1fr); } .brief-section-heading { align-items: flex-start; flex-direction: column; } .brief-heading h1 { font-size: 32px; } }
 </style>

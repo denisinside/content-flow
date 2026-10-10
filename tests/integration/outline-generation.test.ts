@@ -19,6 +19,7 @@ type Generated = { job: { id: string } };
 const workflowId = '186937fe-674d-469e-a0d9-141c0ef3dc39';
 const descriptor = JSON.parse(readFileSync(new URL('../../packages/backend/src/editorial/workflows/outline-generation/release.json', import.meta.url), 'utf8')) as { configDigest: string; releaseId: string };
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+const readyReport = JSON.stringify({ schemaVersion: 'outline-review-report-v1', status: 'ready' });
 
 describe('outline API, pinned Dify SSE provider and durable candidate persistence', () => {
   const config = loadRuntimeConfig(), authConfig = loadAuthConfig(), health = new DependencyHealthService(config);
@@ -30,24 +31,27 @@ describe('outline API, pinned Dify SSE provider and durable candidate persistenc
   let app!: NestExpressApplication, worker!: DurableJobWorker, baseUrl = '', workspaceId = '', factualProject = '', creativeProject = '';
   let owner!: Identity, member!: Identity, outsider!: Identity, requiredClaim = '';
   let notesSnapshot = '', excludedSnapshot = '', suppliedSnapshot = '', extraFactSnapshot = '';
-  let mode: 'valid' | 'malformed' | 'foreign' | 'missingRequired' | 'wrongRelease' | 'brokenStream' | 'blocked' | 'invalidateBeforeSubmit' = 'valid';
-  let sent!: OutlineProviderInput, lastOutput: unknown, lastRunId = '';
+  let mode: 'valid' | 'malformed' | 'foreign' | 'missingRequired' | 'wrongRelease' | 'brokenStream' | 'blocked' | 'invalidateBeforeSubmit'
+    | 'reviewBlocked' | 'reviewBlockedAfterDisconnect' | 'missingReport' = 'valid';
+  let sent!: OutlineProviderInput, lastOutput: unknown, lastRunId = '', lastReport: string | undefined;
   let postStarted: (() => void) | undefined;
   const blocker = { release: () => {} };
   const transport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url.includes('/workflows/run/')) return new Response(JSON.stringify({ id: lastRunId, workflow_id: workflowId, status: 'succeeded',
-      outputs: { outline_json: JSON.stringify(lastOutput) }, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
+      outputs: { outline_json: JSON.stringify(lastOutput), outline_report: lastReport }, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
     const body = JSON.parse(String(init?.body)) as { inputs: { editorial_json: string }; response_mode: string };
     expect(body.response_mode).toBe('streaming'); sent = JSON.parse(body.inputs.editorial_json) as OutlineProviderInput;
     const ids = mode === 'foreign' ? [randomUUID()] : mode === 'missingRequired' ? [] : sent.claims.map(row => row.claimRevisionId);
     lastOutput = mode === 'malformed' ? { schemaVersion: 'outline-v1', content: { title: 'Broken', sections: [] } }
       : { schemaVersion: 'outline-v1', content: { title: 'Кандидат AI', sections: [{ title: 'Вступ', purpose: 'Пояснити тему', claimRevisionIds: ids }] } };
     lastRunId = randomUUID();
+    lastReport = mode === 'missingReport' ? undefined : ['reviewBlocked', 'reviewBlockedAfterDisconnect'].includes(mode)
+      ? JSON.stringify({ schemaVersion: 'outline-review-report-v1', status: 'needs_human', findings: ['private synthetic finding'] }) : readyReport;
     const started = `data: ${JSON.stringify({ event: 'workflow_started', workflow_run_id: lastRunId })}\r\n\r\n`;
     const finished = `data: ${JSON.stringify({ event: 'workflow_finished', workflow_run_id: lastRunId,
-      data: { workflow_id: mode === 'wrongRelease' ? randomUUID() : workflowId, status: 'succeeded', outputs: { outline_json: JSON.stringify(lastOutput) } } })}\r\n\r\n`;
-    if (mode === 'brokenStream') return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(started)); },
+      data: { workflow_id: mode === 'wrongRelease' ? randomUUID() : workflowId, status: 'succeeded', outputs: { outline_json: JSON.stringify(lastOutput), outline_report: lastReport } } })}\r\n\r\n`;
+    if (mode === 'brokenStream' || mode === 'reviewBlockedAfterDisconnect') return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(started)); },
       pull(controller) { controller.error(new TypeError('Synthetic disconnected stream')); } }), { headers: { 'content-type': 'text/event-stream' } });
     if (mode === 'blocked') { postStarted?.(); await new Promise<void>(resolve => { blocker.release = resolve; }); }
     return new Response(new ReadableStream<Uint8Array>({ start(controller) {
@@ -89,10 +93,10 @@ describe('outline API, pinned Dify SSE provider and durable candidate persistenc
     return row;
   }
   beforeAll(async () => {
-    vi.stubEnv('TEST_DIFY_API_BASE_URL', 'https://dify.example.test/v1');
-    vi.stubEnv('TEST_DIFY_OUTLINE_GENERATION_PUBLISHED_WORKFLOW_ID', workflowId);
-    vi.stubEnv('TEST_DIFY_OUTLINE_GENERATION_CONFIG_SHA256', descriptor.configDigest);
-    vi.stubEnv('TEST_DIFY_OUTLINE_GENERATION_API_KEY', 'synthetic-outline-key');
+    vi.stubEnv('DIFY_API_BASE_URL', 'https://dify.example.test/v1');
+    vi.stubEnv('DIFY_OUTLINE_GENERATION_PUBLISHED_WORKFLOW_ID', workflowId);
+    vi.stubEnv('DIFY_OUTLINE_GENERATION_CONFIG_SHA256', descriptor.configDigest);
+    vi.stubEnv('DIFY_OUTLINE_GENERATION_API_KEY', 'synthetic-outline-key');
     expect((await health.check()).status).toBe('ready');
     app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: false });
     app.useBodyParser('json', { limit: '1mb' }); await app.init(); await app.listen(0, '127.0.0.1');
@@ -192,11 +196,30 @@ describe('outline API, pinned Dify SSE provider and durable candidate persistenc
   });
   it('fails malformed outputs, foreign fact IDs, omitted mandatory facts and wrong workflow versions atomically', async () => {
     const count = await health.prisma.outlineRevision.count({ where: { projectId: factualProject } });
-    for (const value of ['malformed', 'foreign', 'missingRequired', 'wrongRelease'] as const) {
+    for (const value of ['malformed', 'foreign', 'missingRequired', 'wrongRelease', 'missingReport'] as const) {
       mode = value; const id = await start(factualProject); await worker.process({ jobId: id, ordinal: 1 });
       expect(await health.prisma.job.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'FAILED', errorCategory: 'INVALID_CONTRACT' });
       expect(await health.prisma.outlineRevision.count({ where: { projectId: factualProject } })).toBe(count);
       expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: id } })).toMatchObject({ status: 'FAILED' });
+    }
+  });
+  it('blocks otherwise valid candidates on unresolved review, including captured-run reconciliation', async () => {
+    const count = await health.prisma.outlineRevision.count({ where: { projectId: creativeProject } });
+    for (const value of ['reviewBlocked', 'reviewBlockedAfterDisconnect'] as const) {
+      mode = value;
+      const posts = transport.mock.calls.filter(([, init]) => init?.method === 'POST').length;
+      const id = await start(creativeProject); await worker.process({ jobId: id, ordinal: 1 });
+      expect(await health.prisma.job.findUniqueOrThrow({ where: { id } }))
+        .toMatchObject({ status: 'FAILED', errorCategory: 'PROVIDER_FAILED', providerOutcome: 'KNOWN_FAILED' });
+      expect(await health.prisma.outlineRevision.count({ where: { projectId: creativeProject } })).toBe(count);
+      expect(await health.prisma.outlineRevision.count({ where: { jobId: id } })).toBe(0);
+      expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: id } }))
+        .toMatchObject({ status: 'FAILED', errorCategory: 'PROVIDER_FAILED', providerRunId: lastRunId });
+      expect(transport.mock.calls.filter(([, init]) => init?.method === 'POST').length - posts).toBe(1);
+      if (value === 'reviewBlockedAfterDisconnect') expect(transport.mock.calls.some(([url]) => String(url).endsWith('/' + lastRunId))).toBe(true);
+      const visible = await request(owner, 'GET', path(creativeProject, 'jobs/' + id));
+      expect(visible.response.status).toBe(200);
+      expect(JSON.stringify(visible.body)).not.toContain('private synthetic finding');
     }
   });
   it('resumes a captured SSE run without a second provider submission', async () => {

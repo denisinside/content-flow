@@ -7,7 +7,7 @@ interface NoticeResponse {
   acceptedAt: string | null
 }
 
-const props = defineProps<{ csrfToken: string; userId: string }>()
+const props = defineProps<{ csrfToken: string; userId: string; expanded?: boolean }>()
 const emit = defineEmits<{ 'session-expired': [] }>()
 
 const state = ref<'loading' | 'ready' | 'error'>('loading')
@@ -95,17 +95,15 @@ onBeforeUnmount(() => {
     id="external-processing-notice"
     tabindex="-1"
     class="external-notice"
+    :class="{ 'external-notice-profile': expanded }"
     aria-label="Повідомлення про зовнішню обробку"
     aria-live="polite"
   >
     <div
-      v-if="!(state === 'ready' && accepted)"
+      v-if="expanded || !(state === 'ready' && accepted)"
       class="external-notice-heading"
     >
       <div>
-        <p class="eyebrow">
-          Приватність і дані
-        </p>
         <h2 id="external-notice-title">
           Зовнішня обробка матеріалів
         </h2>
@@ -135,6 +133,7 @@ onBeforeUnmount(() => {
     <details
       v-else-if="notice && accepted"
       class="external-notice-disclosure"
+      :open="expanded"
     >
       <summary>Зовнішня обробка · Згоду збережено</summary>
       <p class="external-notice-accepted">
@@ -170,7 +169,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.external-notice { margin: 0 0 28px; padding: 17px 19px; border: 1px solid var(--rule); border-left: 3px solid var(--copper); background: var(--document); }
+.external-notice { margin: 0 0 28px; padding: 17px 19px; border: 1px solid var(--rule); background: var(--document); }
 .external-notice-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .external-notice-heading .eyebrow { margin: 0 0 4px; }
 .external-notice-heading h2 { margin: 0; font-family: var(--serif); font-size: 20px; font-weight: 500; }
@@ -181,6 +180,12 @@ onBeforeUnmount(() => {
 .external-notice-accept { border-color: var(--copper); background: var(--copper); color: var(--copper-foreground, #fff); }
 .external-notice-error { color: var(--error); }
 .external-notice-error p { margin: 0 0 8px; }
+.external-notice-profile { margin: 0; padding: 28px 0; border: 0; border-top: 1px solid var(--rule); }
+.external-notice-profile .external-notice-heading h2 { font-family: var(--sans); font-size: 18px; font-weight: 550; }
+.external-notice-profile .external-notice-copy { font-size: 14px; line-height: 1.7; max-width: 70ch; }
+.external-notice-profile .external-notice-disclosure { margin-top: 16px; }
+.external-notice-profile .external-notice-disclosure summary { min-height: 44px; display: flex; align-items: center; font-size: 13px; color: var(--muted); }
+.external-notice-profile .external-notice-button { min-height: 44px; font-size: 14px; }
 .external-notice-button:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
 @media (max-width: 520px) {
   .external-notice { padding: 15px; }

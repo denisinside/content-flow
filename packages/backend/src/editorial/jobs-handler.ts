@@ -62,7 +62,7 @@ async function frozenContext(tx: Prisma.TransactionClient, projectId: string, ma
       tone: brief.tone, targetLength: brief.targetLength, cta: brief.cta, exclusions: brief.exclusions, notes: brief.notes,
       requiredClaimRevisionIds: brief.requiredClaims.map(row => row.claimRevisionId).sort() },
     style: { brandbook: brief.style.brandbook, tone: brief.style.tone, settings: brief.style.settings }, claims, context };
-  if (Buffer.byteLength(JSON.stringify(input)) > 1024 * 1024) throw new JobFailure('INVALID_INPUT', 'NOT_SUBMITTED');
+  if (Buffer.byteLength(JSON.stringify(input)) > 350000) throw new JobFailure('INVALID_INPUT', 'NOT_SUBMITTED');
   return input;
 }
 

@@ -1,19 +1,37 @@
 {
   "schemaVersion": "contextflow-dify-release-v1",
   "operation": "ARTICLE_GENERATION",
-  "releaseId": "article-generation-2026-10-06.1",
+  "releaseId": "article-generation-2026-10-09.2",
   "contractVersion": "article-v1",
-  "promptTemplateVersion": "article-generation-prompt-v1",
+  "promptTemplateVersion": "article-generation-editorial-prompt-v2",
   "promptTemplateFile": "prompt.md",
-  "promptSha256": "0a4620fb5b76148a5399d88883878e3d6d4e045a9b5ce5cf7d4461c25d928e18",
+  "promptSha256": "0b1d256d4a9342d560018f56248e1c994ae23913a608c513a541799daeb50f5a",
   "workflowDslFile": "article-generation-v1.yml",
-  "workflowDslSha256": "c6be669fa4b126ed5d1d3f3be1d8224fd7a59f37cdbf4fa7dde6f0ec288895a2",
+  "workflowDslSha256": "0a13519dc7128378f35f85b369df343dea363a39107fe6b0883df903ee3088b0",
+  "runtimeFile": "scripts/dify/article_generation_runtime.py",
+  "runtimeSha256": "339a214da861906229e7d0459c1fdba88df8bfa24ee86c07765e234d3b609b19",
+  "target": {
+    "difyVersion": "1.17.1",
+    "graphonVersion": "0.7.0",
+    "dslVersion": "0.7.0"
+  },
+  "editorialLimits": {
+    "planRepairs": 1,
+    "sectionRepairs": 2,
+    "globalRepairs": 2,
+    "maxSections": 30,
+    "maxModelCalls": 200,
+    "maxStateBytes": 350000,
+    "deadlineMs": 3600000
+  },
+  "reportSchemaVersion": "article-editorial-report-v1",
   "apiBaseEnv": "DIFY_API_BASE_URL",
   "apiKeyEnv": "DIFY_ARTICLE_GENERATION_API_KEY",
   "publishedWorkflowIdEnv": "DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID",
   "configDigestEnv": "DIFY_ARTICLE_GENERATION_CONFIG_SHA256",
   "inputVariable": "editorial_json",
   "outputVariable": "article_json",
+  "reportVariable": "editorial_report",
   "responseMode": "streaming",
   "provider": "dify",
   "model": {
@@ -31,5 +49,5 @@
       "service_tier": "standard"
     }
   },
-  "configDigest": "e7c7006b74b3215fddead8e9d3a4eb0272056b6c1b558e02a5fbc47c253cae35"
+  "configDigest": "48bd09585984f739683d3066395c379f1d0651a4b051799f794baa4ea2a3a11b"
 }

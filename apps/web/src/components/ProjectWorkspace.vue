@@ -119,6 +119,7 @@ function routeTo(path: string, push = true) {
 }
 
 function onPopState() {
+  if (window.location.pathname === '/settings' || window.location.pathname === pathname.value) return
   requestController?.abort()
   requestVersion += 1
   saving.value = false
@@ -322,6 +323,11 @@ onMounted(() => {
   window.addEventListener('popstate', onPopState)
   if (isDetail.value) void loadProject(page.value as string)
   else {
+    if (pathname.value === '/settings') {
+      pathname.value = '/projects'
+      void loadProjects()
+      return
+    }
     if (pathname.value !== '/projects' && pathname.value !== '/projects/') {
       window.history.replaceState({}, '', '/projects')
       pathname.value = '/projects'
@@ -338,17 +344,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="workspace-main">
+  <div
+    class="workspace-main"
+    :data-workspace-leave-risk="formOpen || saving"
+  >
     <section
       v-if="!isDetail"
+      id="workspace-task"
       aria-labelledby="projects-title"
+      tabindex="-1"
       class="workspace-content"
     >
       <div class="workspace-heading">
         <div>
-          <p class="eyebrow">
-            Проєкти простору
-          </p>
           <h1 id="projects-title">
             Ваші проєкти
           </h1>
@@ -545,18 +553,65 @@ onBeforeUnmount(() => {
 
     <section
       v-else
-      aria-labelledby="project-detail-title"
+      id="workspace-task"
+      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : 'project-detail-title') : undefined"
       class="workspace-content project-detail"
+      tabindex="-1"
     >
-      <Button
-        class="workspace-button workspace-back"
-        variant="ghost"
-        :disabled="saving"
-        @click="routeTo('/projects')"
+      <aside
+        class="project-navigation"
+        aria-label="Навігація проєкту"
       >
-        <span aria-hidden="true">←</span>
-        Усі проєкти
-      </Button>
+        <Button
+          class="workspace-button workspace-back"
+          variant="ghost"
+          :disabled="saving"
+          @click="routeTo('/projects')"
+        >
+          <span aria-hidden="true">←</span>
+          Усі проєкти
+        </Button>
+
+        <a
+          v-if="currentProject && (isSources || isFacts || isBrief || isArticle)"
+          class="project-navigation-title"
+          :href="`/projects/${currentProject.id}`"
+          @click.prevent="routeTo(`/projects/${currentProject.id}`)"
+        >{{ currentProject.topic }}</a>
+
+        <nav
+          v-if="currentProject && !detailLoading && !detailError"
+          class="editorial-navigation"
+          aria-label="Робота над проєктом"
+        >
+          <a
+            :href="`/projects/${currentProject.id}`"
+            :aria-current="!isSources && !isFacts && !isBrief && !isArticle ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}`)"
+          >Огляд</a>
+          <a
+            :href="`/projects/${currentProject.id}/sources`"
+            :aria-current="isSources ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/sources`)"
+          >Джерела</a>
+          <a
+            :href="`/projects/${currentProject.id}/facts`"
+            :aria-current="isFacts ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/facts`)"
+          >Факти</a>
+          <a
+            :href="`/projects/${currentProject.id}/brief`"
+            :aria-current="isBrief ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/brief`)"
+          >Бриф</a>
+          <a
+            v-if="currentProject.formats.includes('ARTICLE') || historicalArticle || isArticle"
+            :href="`/projects/${currentProject.id}/article`"
+            :aria-current="isArticle ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/article`)"
+          >Стаття</a>
+        </nav>
+      </aside>
 
       <div
         v-if="detailLoading"
@@ -590,29 +645,7 @@ onBeforeUnmount(() => {
       </Alert>
 
       <template v-else-if="currentProject">
-        <nav
-          class="editorial-navigation"
-          aria-label="Робота над проєктом"
-        >
-          <a
-            :href="`/projects/${currentProject.id}/sources`"
-            :aria-current="isSources ? 'page' : undefined"
-            @click.prevent="routeTo(`/projects/${currentProject.id}/sources`)"
-          >Джерела</a><a
-            :href="`/projects/${currentProject.id}/facts`"
-            :aria-current="isFacts ? 'page' : undefined"
-            @click.prevent="routeTo(`/projects/${currentProject.id}/facts`)"
-          >Факти</a><a
-            :href="`/projects/${currentProject.id}/brief`"
-            :aria-current="isBrief ? 'page' : undefined"
-            @click.prevent="routeTo(`/projects/${currentProject.id}/brief`)"
-          >Бриф</a><a
-            v-if="currentProject.formats.includes('ARTICLE') || historicalArticle || isArticle"
-            :href="`/projects/${currentProject.id}/article`"
-            :aria-current="isArticle ? 'page' : undefined"
-            @click.prevent="routeTo(`/projects/${currentProject.id}/article`)"
-          >Стаття</a>
-        </nav><template v-if="isArticle">
+        <template v-if="isArticle">
           <ArticleWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
@@ -656,7 +689,7 @@ onBeforeUnmount(() => {
         <template v-else>
           <div class="workspace-heading project-title-row">
             <div>
-              <p class="eyebrow">
+              <p class="editorial-project-context">
                 {{ currentProject.archivedAt ? 'Архівований проєкт' : 'Проєкт' }}
               </p>
               <h1 id="project-detail-title">
@@ -774,9 +807,6 @@ onBeforeUnmount(() => {
             class="project-detail-body"
             aria-labelledby="formats-title"
           >
-            <p class="project-detail-copy">
-              Матеріали цього проєкту стосуються теми вище.
-            </p>
             <div class="project-sources-entry">
               <div>
                 <p class="eyebrow">
@@ -813,6 +843,39 @@ onBeforeUnmount(() => {
                 Відкрити факти
               </Button>
             </div>
+            <div class="project-sources-entry">
+              <div>
+                <h2>Бриф</h2>
+                <p class="project-detail-copy">
+                  Визначайте аудиторію, головне повідомлення та тон матеріалів.
+                </p>
+              </div>
+              <Button
+                class="workspace-button workspace-button-secondary"
+                variant="outline"
+                @click="routeTo(`/projects/${currentProject.id}/brief`)"
+              >
+                Відкрити бриф
+              </Button>
+            </div>
+            <div
+              v-if="currentProject.formats.includes('ARTICLE') || historicalArticle"
+              class="project-sources-entry"
+            >
+              <div>
+                <h2>Стаття</h2>
+                <p class="project-detail-copy">
+                  Пишіть, переглядайте докази та зберігайте версії статті.
+                </p>
+              </div>
+              <Button
+                class="workspace-button workspace-button-secondary"
+                variant="outline"
+                @click="routeTo(`/projects/${currentProject.id}/article`)"
+              >
+                Відкрити статтю
+              </Button>
+            </div>
             <div
               class="detail-rule"
               aria-hidden="true"
@@ -843,8 +906,25 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.editorial-navigation { display: flex; flex-wrap: wrap; gap: 24px; border-bottom: 1px solid var(--rule, #d4d9d1); padding: 12px 0; margin: 8px 0 28px; }
-.editorial-navigation a { color: inherit; padding: 8px 0; text-decoration: none; font-size: 14px; }
-.editorial-navigation a[aria-current] { color: var(--accent, #9b482f); font-weight: 600; border-bottom: 2px solid currentColor; }
-.editorial-navigation a:focus-visible { outline: 2px solid var(--accent, #9b482f); outline-offset: 4px; }
+.project-detail { width: 100%; display: block; }
+.project-detail > * { min-width: 0; }
+.project-navigation { display: flex; align-items: center; gap: 28px; min-height: 58px; margin: 0 0 36px; border-bottom: 1px solid var(--rule); }
+.project-navigation > .workspace-back { padding-inline: 0; justify-content: flex-start; margin: 0; flex-shrink: 0; font-size: 13px; }
+.project-navigation-title { color: var(--muted); font-size: 13px; text-decoration: none; overflow-wrap: anywhere; max-width: 46ch; }
+.project-navigation-title:hover { color: var(--ink); text-decoration: underline; }
+.editorial-navigation { display: flex; align-self: stretch; flex-direction: row; gap: 28px; padding: 0; margin: 0 0 0 auto; }
+.editorial-navigation a { display: inline-flex; align-items: center; min-height: 44px; color: var(--muted); padding: 14px 0; text-decoration: none; font-size: 13px; border-bottom: 1px solid transparent; }
+.editorial-navigation a:hover { color: var(--ink); }
+.editorial-navigation a[aria-current] { color: var(--ink); border-bottom-color: var(--ink); }
+.editorial-navigation a:focus-visible { outline: 2px solid var(--copper); outline-offset: 4px; }
+@media (max-width: 1150px) {
+  .project-navigation { flex-wrap: wrap; gap: 0 24px; padding-top: 8px; }
+  .editorial-navigation { width: 100%; margin: 0; gap: 26px; }
+}
+@media (max-width: 760px) {
+  .project-navigation { margin-bottom: 28px; }
+  .project-navigation-title { flex: 1; font-size: 12px; }
+  .editorial-navigation { overflow-x: auto; scrollbar-width: thin; gap: 24px; }
+  .editorial-navigation a { flex-shrink: 0; }
+}
 </style>

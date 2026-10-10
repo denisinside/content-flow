@@ -44,6 +44,16 @@ async function main() {
     process.stderr.write('ERROR: this verifier expects promptTemplateFile to be exactly "prompt.md".\n');
     return 1;
   }
+  if (release.promptTemplateVersion !== 'claims-extraction-review-prompt-v2'
+      || release.runtimeFile !== 'scripts/dify/claim_extraction_runtime.py'
+      || typeof release.runtimeSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(release.runtimeSha256)
+      || release.operation !== 'CLAIM_EXTRACTION' || release.contractVersion !== 'claims-v1'
+      || release.inputVariable !== 'sources_json' || release.outputVariable !== 'claims_json'
+      || release.target?.difyVersion !== '1.17.1' || release.target?.graphonVersion !== '0.7.0'
+      || release.reportVariable !== 'extraction_report' || release.reportSchemaVersion !== 'claims-extraction-report-v1') {
+    process.stderr.write('ERROR: release.json has an incompatible prompt/runtime/report contract.\n');
+    return 1;
+  }
   if (typeof release.promptSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(release.promptSha256)) {
     process.stderr.write('ERROR: release.json has no valid lowercase SHA-256 promptSha256.\n');
     return 1;
@@ -80,6 +90,7 @@ async function main() {
     return 1;
   }
   const actualWorkflowDsl = sha256(workflowDslBytes);
+  const actualRuntime = sha256(await readFile(resolve(repoRoot, release.runtimeFile)));
   const { configDigest, ...unsigned } = release;
   const actualConfig = sha256(Buffer.from(canonical(unsigned), 'utf8'));
   const failures = [];
@@ -89,11 +100,20 @@ async function main() {
   if (actualWorkflowDsl !== release.workflowDslSha256) {
     failures.push(`workflowDslSha256 mismatch (declared ${release.workflowDslSha256}, actual ${actualWorkflowDsl})`);
   }
+  if (actualRuntime !== release.runtimeSha256) {
+    failures.push(`runtimeSha256 mismatch (declared ${release.runtimeSha256}, actual ${actualRuntime})`);
+  }
   if (actualConfig !== configDigest) {
     failures.push(`configDigest mismatch (declared ${configDigest}, actual ${actualConfig})`);
   }
 
   const pins = [
+    {
+      label: 'provider.ts promptTemplateVersion',
+      path: 'packages/backend/src/claims/provider.ts',
+      pattern: /promptTemplateVersion:\s*['"]([^'"]+)['"]/g,
+      expected: release.promptTemplateVersion,
+    },
     {
       label: 'provider.ts releaseId',
       path: 'packages/backend/src/claims/provider.ts',
@@ -115,7 +135,7 @@ async function main() {
     {
       label: 'provider.spec.ts test config digest',
       path: 'packages/backend/src/claims/provider.spec.ts',
-      pattern: /TEST_DIFY_CLAIM_EXTRACTION_CONFIG_SHA256:\s*['"]([a-f0-9]{64})['"]/g,
+      pattern: /DIFY_CLAIM_EXTRACTION_CONFIG_SHA256:\s*['"]([a-f0-9]{64})['"]/g,
       expected: configDigest,
     },
     {
@@ -153,6 +173,7 @@ async function main() {
   process.stdout.write(`PASS: ${releasePath}\n`);
   process.stdout.write(`  promptSha256 ${actualPrompt}\n`);
   process.stdout.write(`  workflowDslSha256 ${actualWorkflowDsl}\n`);
+  process.stdout.write(`  runtimeSha256 ${actualRuntime}\n`);
   process.stdout.write(`  configDigest ${actualConfig}\n`);
   process.stdout.write('  runtime release and test pins match\n');
   process.stdout.write('Read-only verification only; this does not verify a published or live Dify workflow.\n');

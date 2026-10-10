@@ -15,6 +15,17 @@ export function canonicalManifestHash(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('hex');
 }
 
+export function jobDeadlineMs(input: Pick<CreateJobInput, 'operation' | 'deadlineMs'>): number {
+  const deadlineMs = input.deadlineMs ?? (input.operation === 'WEB_IMPORT' ? 60_000 : 600_000);
+  // Article generation and evidence extraction run bounded revision loops. Other
+  // operations retain their existing ten-minute maximum.
+  const maximum = input.operation === 'ARTICLE_GENERATION' || input.operation === 'CLAIM_EXTRACTION' ? 3_600_000 : 600_000;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > maximum) {
+    throw new BadRequestException('Invalid job deadline');
+  }
+  return deadlineMs;
+}
+
 export class DurableJobService {
   constructor(readonly prisma: PrismaClient, private readonly options: { noticeVersion: string; leaseMs?: number; retryBaseMs?: number }) {}
   get leaseMs(): number { return this.options.leaseMs ?? 30_000; }
@@ -35,8 +46,7 @@ export class DurableJobService {
     if (!/^[\w-]{1,128}$/u.test(input.commandKey) || !input.contractVersion || input.contractVersion.length > 64) {
       throw new BadRequestException('Invalid job command key or contract');
     }
-    const deadlineMs = input.deadlineMs ?? (input.operation === 'WEB_IMPORT' ? 60_000 : 600_000);
-    if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 600_000) throw new BadRequestException('Invalid job deadline');
+    const deadlineMs = jobDeadlineMs(input);
     await this.assertEffects(tx, input.projectId, input.userId);
     const hash = canonicalManifestHash({ contractVersion: input.contractVersion, inputManifest: input.inputManifest });
     // A transaction advisory lock serializes replay before insert, avoiding an aborted transaction on unique conflict.

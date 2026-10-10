@@ -32,6 +32,12 @@ GRAPHON_VERSION_ALLOWLIST = {"0.7.0"}
 EDITOR_PROFILES = {"admin-panel-reference": "0.7.0"}
 POOLS = {"env", "sys", "conversation"}
 VARIABLE_REF_RE = re.compile(r"\{\{#([^#{}\s]+)#\}\}")
+# Version-matched to graphon.variables.template_resolution in Graphon 0.7.0.
+# Node IDs containing hyphens are legal selectors, but basic prompt templates
+# leave their native placeholder syntax literal instead of resolving it.
+GRAPHON_070_NATIVE_REF_RE = re.compile(
+    r"\{\{#([a-zA-Z0-9_]{1,50}(?:\.[a-zA-Z_][a-zA-Z0-9_]{0,29}){1,10})#\}\}"
+)
 
 
 class InputError(Exception):
@@ -142,6 +148,82 @@ def _node_type(node: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _llm_prompts(data: dict[str, Any]) -> list[Any]:
+    prompts = data.get("prompt_template")
+    return [prompts] if isinstance(prompts, dict) else _as_list(prompts)
+
+
+def _validate_llm_prompts(node: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
+    data = node["data"]
+    prompts = _llm_prompts(data)
+    if not prompts:
+        errors.append(f"[{_title(node)}] LLM needs a non-empty prompt_template.")
+        return
+    config = data.get("prompt_config")
+    if config is not None and not isinstance(config, dict):
+        errors.append(f"[{_title(node)}] LLM prompt_config must be an object.")
+        config = {}
+    bindings = (config or {}).get("jinja2_variables", [])
+    if bindings is None:
+        bindings = []  # Graphon 0.7.0 normalizes null to an empty binding list.
+    if not isinstance(bindings, list):
+        errors.append(f"[{_title(node)}] LLM jinja2_variables must be an array.")
+        bindings = []
+    names: set[str] = set()
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            errors.append(f"[{_title(node)}] LLM Jinja binding must be an object.")
+            continue
+        name = binding.get("variable")
+        if not isinstance(name, str) or not name.isidentifier():
+            errors.append(f"[{_title(node)}] LLM Jinja binding has an invalid variable name {name!r}.")
+        elif name in names:
+            errors.append(f"[{_title(node)}] Duplicate LLM Jinja binding {name!r}.")
+        else:
+            names.add(name)
+        if not isinstance(binding.get("value_selector"), list) or not binding["value_selector"]:
+            errors.append(f"[{_title(node)}] LLM Jinja binding {name!r} needs a non-empty value_selector.")
+        # Non-empty selectors use the shared shape, source and ancestry checks.
+    for index, prompt in enumerate(prompts):
+        if not isinstance(prompt, dict):
+            errors.append(f"[{_title(node)}] LLM prompt at index {index} must be an object.")
+            continue
+        edition = prompt.get("edition_type")
+        if edition not in (None, "basic", "jinja2"):
+            errors.append(f"[{_title(node)}] Unsupported LLM prompt edition_type {edition!r}.")
+            continue
+        if edition == "jinja2":
+            source = prompt.get("jinja2_text")
+            if not isinstance(source, str) or not source.strip():
+                errors.append(f"[{_title(node)}] LLM Jinja prompt needs non-empty jinja2_text; Graphon does not render text as a fallback.")
+                continue
+            try:
+                from jinja2 import Environment, meta  # type: ignore[import-not-found]
+            except ImportError:
+                warnings.append("Jinja2 is not installed; LLM Jinja syntax and bindings were not checked. No package was installed.")
+            else:
+                try:
+                    parsed = Environment().parse(source)
+                    missing = meta.find_undeclared_variables(parsed) - names
+                    if missing:
+                        errors.append(f"[{_title(node)}] LLM prompt uses undeclared Jinja variables: {sorted(missing)!r}.")
+                except Exception as exc:
+                    errors.append(f"[{_title(node)}] LLM Jinja syntax error: {exc}.")
+            continue
+        source = prompt.get("text", "")
+        if not isinstance(source, str):
+            errors.append(f"[{_title(node)}] Basic LLM prompt text must be a string.")
+            continue
+        for start in re.finditer(r"\{\{#", source):
+            end = source.find("}}", start.end())
+            token = source[start.start():end + 2] if end >= 0 else source[start.start():]
+            if token != "{{#context#}}" and not GRAPHON_070_NATIVE_REF_RE.fullmatch(token):
+                errors.append(
+                    f"[{_title(node)}] Basic LLM placeholder {token[:160]!r} is not resolvable by Graphon 0.7.0; "
+                    "use alphanumeric/underscore node IDs or an explicit Jinja binding."
+                )
+
+
 def _collect_selectors(nodes: list[dict[str, Any]]) -> list[tuple[dict[str, Any], list[Any]]]:
     found: list[tuple[dict[str, Any], list[Any]]] = []
 
@@ -153,6 +235,18 @@ def _collect_selectors(nodes: list[dict[str, Any]]) -> list[tuple[dict[str, Any]
         data = node.get("data")
         if not isinstance(data, dict):
             continue
+        if data.get("type") == "llm":
+            config = data.get("prompt_config")
+            if isinstance(config, dict):
+                for binding in _as_list(config.get("jinja2_variables")):
+                    if isinstance(binding, dict):
+                        add(node, binding.get("value_selector"))
+            for prompt in _llm_prompts(data):
+                if isinstance(prompt, dict) and prompt.get("edition_type") != "jinja2":
+                    source = prompt.get("text")
+                    if isinstance(source, str):
+                        for token in GRAPHON_070_NATIVE_REF_RE.findall(source):
+                            add(node, token.split("."))
         for item in _as_list(data.get("variables")):
             if isinstance(item, dict):
                 add(node, item.get("value_selector"))
@@ -168,6 +262,20 @@ def _collect_selectors(nodes: list[dict[str, Any]]) -> list[tuple[dict[str, Any]
             for condition in _as_list(case.get("conditions")):
                 if isinstance(condition, dict):
                     add(node, condition.get("variable_selector"))
+        if data.get("type") == "loop":
+            for item in _as_list(data.get("loop_variables")):
+                if isinstance(item, dict) and item.get("value_type") == "variable":
+                    add(node, item.get("value"))
+            for condition in _as_list(data.get("break_conditions")):
+                if isinstance(condition, dict):
+                    add(node, condition.get("variable_selector"))
+        if data.get("type") == "assigner":
+            for item in _as_list(data.get("items")):
+                if not isinstance(item, dict):
+                    continue
+                add(node, item.get("variable_selector"))
+                if item.get("input_type") == "variable":
+                    add(node, item.get("value"))
         for key in ("iterator_selector", "output_selector"):
             add(node, data.get(key))
         if data.get("type") == "list-operator":
@@ -454,7 +562,14 @@ def validate_document(
         data = node.get("data")
         if not isinstance(data, dict):
             continue
-        for value in _strings(data):
+        if data.get("type") == "llm":
+            _validate_llm_prompts(node, errors, warnings)
+            # Jinja prompts do not interpret basic/native placeholders. Basic
+            # prompt selectors were collected above using the actual regex.
+            reference_data = {key: value for key, value in data.items() if key != "prompt_template"}
+        else:
+            reference_data = data
+        for value in _strings(reference_data):
             for token in set(VARIABLE_REF_RE.findall(value)):
                 parts = token.split(".")
                 if len(parts) < 2:
@@ -724,13 +839,167 @@ def run_self_test() -> int:
         print("SELF-TEST FAILED: non-ancestor selector was not caught")
         return 1
 
+    native_loop = copy.deepcopy(base)
+    native_loop["workflow"]["graph"] = {
+        "nodes": [
+            {"id": "start", "type": "custom", "data": {"type": "start"}},
+            {"id": "loop", "type": "custom", "data": {
+                "type": "loop", "start_node_id": "loop-start", "loop_count": 2,
+                "logical_operator": "and",
+                "loop_variables": [
+                    {"label": "state", "var_type": "string", "value_type": "variable", "value": ["start", "input"]},
+                    {"label": "done", "var_type": "number", "value_type": "constant", "value": 0},
+                    # Constant arrays are values, not node selectors.
+                    {"label": "literal", "var_type": "array[string]", "value_type": "constant", "value": ["missing", "literal"]},
+                ],
+                "break_conditions": [{"variable_selector": ["loop", "done"], "comparison_operator": "=", "value": "1"}],
+            }},
+            {"id": "loop-start", "type": "custom-loop-start", "parentId": "loop", "data": {"type": "loop-start", "loop_id": "loop"}},
+            {"id": "body", "type": "custom", "parentId": "loop", "data": {
+                "type": "template-transform", "loop_id": "loop",
+                "variables": [{"variable": "state", "value_selector": ["loop", "state"]}], "template": "{{ state }}",
+            }},
+            {"id": "assign", "type": "custom", "parentId": "loop", "data": {
+                "type": "assigner", "version": "2", "loop_id": "loop", "items": [
+                    {"variable_selector": ["loop", "state"], "input_type": "variable", "operation": "over-write", "value": ["body", "output"]},
+                    {"variable_selector": ["loop", "done"], "input_type": "constant", "operation": "set", "value": 1},
+                ],
+            }},
+            {"id": "end", "type": "custom", "data": {"type": "end", "outputs": [{"variable": "answer", "value_selector": ["loop", "state"]}]}},
+            {"id": "orphan", "type": "custom", "data": {"type": "answer"}},
+            {"id": "other-loop", "type": "custom", "data": {"type": "loop", "loop_variables": [], "break_conditions": []}},
+        ],
+        "edges": [
+            {"id": "outer-in", "source": "start", "target": "loop"},
+            {"id": "outer-out", "source": "loop", "target": "end"},
+            {"id": "body-in", "source": "loop-start", "target": "body"},
+            {"id": "body-out", "source": "body", "target": "assign"},
+        ],
+    }
+    native_errors, _ = validate_document(native_loop)
+    if native_errors:
+        print(f"SELF-TEST FAILED: native loop selectors were rejected: {native_errors}")
+        return 1
+
+    native_selector_cases = [
+        ("loop initializer missing source", "loop", ("loop_variables", 0, "value"), ["missing", "input"], "selects missing node"),
+        ("loop initializer non-ancestor source", "loop", ("loop_variables", 0, "value"), ["orphan", "input"], "not an upstream ancestor"),
+        ("loop break missing source", "loop", ("break_conditions", 0, "variable_selector"), ["missing", "done"], "selects missing node"),
+        ("loop break non-ancestor source", "loop", ("break_conditions", 0, "variable_selector"), ["orphan", "done"], "not an upstream ancestor"),
+        ("assigner missing target", "assign", ("items", 0, "variable_selector"), ["missing", "state"], "selects missing node"),
+        ("assigner wrong loop target", "assign", ("items", 0, "variable_selector"), ["other-loop", "state"], "not an upstream ancestor"),
+        ("assigner malformed target", "assign", ("items", 0, "variable_selector"), ["loop"], "malformed selector"),
+        ("assigner missing source", "assign", ("items", 0, "value"), ["missing", "output"], "selects missing node"),
+        ("assigner non-ancestor source", "assign", ("items", 0, "value"), ["orphan", "output"], "not an upstream ancestor"),
+        ("assigner malformed source", "assign", ("items", 0, "value"), ["body", ""], "malformed selector"),
+    ]
+    for name, node_id, path, replacement, expected in native_selector_cases:
+        invalid_native = copy.deepcopy(native_loop)
+        data = next(node["data"] for node in invalid_native["workflow"]["graph"]["nodes"] if node["id"] == node_id)
+        target = data
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        native_errors, _ = validate_document(invalid_native)
+        if len(native_errors) != 1 or expected not in native_errors[0]:
+            print(f"SELF-TEST FAILED: {name} expected one {expected!r} diagnostic, got {native_errors}")
+            return 1
+
+    def prompt_fixture(jinja: bool) -> dict[str, Any]:
+        source_id = "request-source" if jinja else "request_source"
+        data: dict[str, Any] = {
+            "type": "llm", "title": "Prompt",
+            "model": {"provider": "synthetic", "name": "synthetic", "mode": "chat", "completion_params": {}},
+            "context": {"enabled": False, "variable_selector": []},
+            "prompt_template": [{"role": "user", "edition_type": "jinja2" if jinja else "basic",
+                                 "text": "{{ request_json }}" if jinja else "{{#request_source.request_json#}}"}],
+        }
+        if jinja:
+            data["prompt_template"][0]["jinja2_text"] = "{{ request_json }}"
+            data["prompt_config"] = {"jinja2_variables": [
+                {"variable": "request_json", "value_selector": [source_id, "request_json"]}
+            ]}
+        document = copy.deepcopy(base)
+        document["workflow"]["graph"] = {
+            "nodes": [
+                {"id": source_id, "type": "custom", "data": {"type": "start"}},
+                {"id": "llm", "type": "custom", "data": data},
+                {"id": "end", "type": "custom", "data": {"type": "end", "outputs": [
+                    {"variable": "answer", "value_selector": ["llm", "text"]}
+                ]}},
+                {"id": "orphan", "type": "custom", "data": {"type": "answer"}},
+            ],
+            "edges": [{"id": "prompt-in", "source": source_id, "target": "llm"},
+                      {"id": "prompt-out", "source": "llm", "target": "end"}],
+        }
+        return document
+
+    basic_prompt = prompt_fixture(False)
+    jinja_prompt = prompt_fixture(True)
+    for name, document in (("underscore basic prompt", basic_prompt), ("hyphen Jinja selector", jinja_prompt)):
+        prompt_errors, _ = validate_document(document)
+        if prompt_errors:
+            print(f"SELF-TEST FAILED: {name} was rejected: {prompt_errors}")
+            return 1
+
+    prompt_cases = [
+        ("hyphen basic placeholder", basic_prompt, ("prompt_template", 0, "text"), "{{#request-source.request_json#}}", "not resolvable by Graphon 0.7.0"),
+        ("invalid basic field name", basic_prompt, ("prompt_template", 0, "text"), "{{#request_source.1field#}}", "not resolvable by Graphon 0.7.0"),
+        ("unterminated basic placeholder", basic_prompt, ("prompt_template", 0, "text"), "{{#request_source.request_json#}", "not resolvable by Graphon 0.7.0"),
+        ("basic missing source", basic_prompt, ("prompt_template", 0, "text"), "{{#missing.request_json#}}", "selects missing node"),
+        ("basic non-ancestor source", basic_prompt, ("prompt_template", 0, "text"), "{{#orphan.request_json#}}", "not an upstream ancestor"),
+        ("Jinja missing source", jinja_prompt, ("prompt_config", "jinja2_variables", 0, "value_selector"), ["missing", "request_json"], "selects missing node"),
+        ("Jinja non-ancestor source", jinja_prompt, ("prompt_config", "jinja2_variables", 0, "value_selector"), ["orphan", "request_json"], "not an upstream ancestor"),
+        ("Jinja malformed selector", jinja_prompt, ("prompt_config", "jinja2_variables", 0, "value_selector"), ["request-source"], "malformed selector"),
+        ("Jinja empty selector", jinja_prompt, ("prompt_config", "jinja2_variables", 0, "value_selector"), [], "non-empty value_selector"),
+        ("Jinja missing rendered text", jinja_prompt, ("prompt_template", 0, "jinja2_text"), None, "non-empty jinja2_text"),
+        ("Jinja duplicate binding", jinja_prompt, ("prompt_config", "jinja2_variables"), [
+            {"variable": "request_json", "value_selector": ["request-source", "request_json"]},
+            {"variable": "request_json", "value_selector": ["request-source", "request_json"]},
+        ], "Duplicate LLM Jinja binding"),
+    ]
+    if jinja_check == "passed":
+        prompt_cases += [
+            ("Jinja invalid syntax", jinja_prompt, ("prompt_template", 0, "jinja2_text"), "{% if %}", "LLM Jinja syntax error"),
+            ("Jinja undeclared variable", jinja_prompt, ("prompt_template", 0, "jinja2_text"), "{{ missing }}", "undeclared Jinja variables"),
+        ]
+        nearby_jinja = copy.deepcopy(jinja_prompt)
+        nearby_jinja["workflow"]["graph"]["nodes"][1]["data"]["prompt_template"][0]["jinja2_text"] = (
+            '{% set local = request_json %}{{ local }} {{ "{{#literal-source.request_json#}}" }}'
+        )
+        if validate_document(nearby_jinja)[0]:
+            print("SELF-TEST FAILED: valid local Jinja variable or literal basic placeholder was rejected")
+            return 1
+        unicode_jinja = copy.deepcopy(jinja_prompt)
+        unicode_data = unicode_jinja["workflow"]["graph"]["nodes"][1]["data"]
+        unicode_data["prompt_config"]["jinja2_variables"][0]["variable"] = "запит"
+        unicode_data["prompt_template"][0]["jinja2_text"] = "{{ запит }}"
+        if validate_document(unicode_jinja)[0]:
+            print("SELF-TEST FAILED: valid Unicode Jinja binding was rejected")
+            return 1
+    nearby_basic = copy.deepcopy(basic_prompt)
+    nearby_basic["workflow"]["graph"]["nodes"][1]["data"]["prompt_template"][0]["text"] += " {{#context#}}"
+    if validate_document(nearby_basic)[0]:
+        print("SELF-TEST FAILED: Graphon's special basic context placeholder was rejected")
+        return 1
+    for name, document, path, replacement, expected in prompt_cases:
+        invalid_prompt = copy.deepcopy(document)
+        target = invalid_prompt["workflow"]["graph"]["nodes"][1]["data"]
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        prompt_errors, _ = validate_document(invalid_prompt)
+        if len(prompt_errors) != 1 or expected not in prompt_errors[0]:
+            print(f"SELF-TEST FAILED: {name} expected one {expected!r} diagnostic, got {prompt_errors}")
+            return 1
+
     release = {"schemaVersion": "contextflow-dify-release-v1"}
     release_errors, _ = validate_document(release)
     if not release_errors or "not a Dify workflow DSL" not in release_errors[0]:
         print("SELF-TEST FAILED: ContentFlow API release descriptor was not rejected")
         return 1
 
-    print("SELF-TEST PASS: valid fixture, duplicate JSON/YAML keys, duplicate IDs, dangling edges, Python/Jinja syntax, selector ancestry, release metadata detection")
+    print("SELF-TEST PASS: valid fixture, duplicate JSON/YAML keys, duplicate IDs, dangling edges, Python/Jinja syntax, selector ancestry, native loop/assigner selectors, basic LLM placeholders, explicit Jinja prompt bindings, release metadata detection")
     print(f"  YAML duplicate-key check: {yaml_duplicate_check}")
     print(f"  Jinja syntax check: {jinja_check}")
     return 0

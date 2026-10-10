@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import WorkspaceHub from './components/WorkspaceHub.vue'
-import ExternalProcessingNotice from './components/ExternalProcessingNotice.vue'
+import ProfileSettings from './components/ProfileSettings.vue'
+import SiteFooter from './components/SiteFooter.vue'
 
 interface User {
   id: string
@@ -22,6 +23,50 @@ type ViewState = 'loading' | 'signed-out' | 'signed-in' | 'unavailable'
 type AuthMode = 'login' | 'register'
 
 const state = ref<ViewState>('loading')
+const profileOpen = ref(window.location.pathname === '/settings')
+const accountMenu = ref<HTMLDetailsElement | null>(null)
+let profileReturnPath = '/projects'
+let profileReturnScroll = 0
+
+function openProfile(hash = '') {
+  if (!profileOpen.value) {
+    profileReturnPath = window.location.pathname + window.location.search + window.location.hash
+    profileReturnScroll = window.scrollY
+  }
+  accountMenu.value?.removeAttribute('open')
+  window.history.pushState({}, '', `/settings${hash}`)
+  profileOpen.value = true
+  void nextTick(() => document.getElementById(hash.slice(1) || 'profile-heading')?.focus())
+}
+
+function returnToWork() {
+  window.history.pushState({}, '', profileReturnPath)
+  window.dispatchEvent(new PopStateEvent('popstate'))
+  void nextTick(() => window.scrollTo({ top: profileReturnScroll, behavior: 'instant' }))
+}
+
+function handleProfileLink(event: MouseEvent) {
+  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null
+  if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  const url = new URL(link.href)
+  if (url.origin === window.location.origin && url.pathname === '/settings') {
+    event.preventDefault()
+    openProfile(url.hash)
+  }
+}
+
+function syncProfileRoute() {
+  profileOpen.value = window.location.pathname === '/settings'
+  accountMenu.value?.removeAttribute('open')
+}
+
+function closeAccountOutside(event: PointerEvent) {
+  if (event.target instanceof Node && !accountMenu.value?.contains(event.target)) accountMenu.value?.removeAttribute('open')
+}
+
+watch([state, profileOpen], ([view, opened]) => {
+  if (view === 'signed-in' && opened) void nextTick(() => document.getElementById(window.location.hash.slice(1) || 'profile-heading')?.focus())
+})
 const mode = ref<AuthMode>('login')
 const user = ref<User | null>(null)
 const csrfToken = ref('')
@@ -367,6 +412,8 @@ function onVisibilityChange() {
 }
 
 onMounted(() => {
+  window.addEventListener('popstate', syncProfileRoute)
+  document.addEventListener('pointerdown', closeAccountOutside)
   // Email confirmation uses provider PKCE. We sign in with the password afterward;
   // the one-time code is not exchanged or retained by this browser.
   const confirmationUrl = new URL(window.location.href)
@@ -382,6 +429,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('popstate', syncProfileRoute)
+  document.removeEventListener('pointerdown', closeAccountOutside)
   sessionCheckAbort?.abort()
   preferenceAbort?.abort()
   document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -390,346 +439,401 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="site-shell">
-    <header class="site-header">
-      <a
-        class="wordmark"
-        href="/"
-        aria-label="ContextFlow — на початок"
-      >
-        <span
-          class="wordmark-mark"
-          aria-hidden="true"
-        >C</span>
-        <span>ContextFlow</span>
-      </a>
-      <span class="header-note">Редакційний робочий простір</span>
-    </header>
-
-    <main
-      id="main-content"
-      class="auth-layout"
-      :class="{ 'signed-in-layout': state === 'signed-in' }"
+  <div
+    class="app-frame"
+    @click="handleProfileLink"
+  >
+    <div
+      class="site-shell"
+      :class="{ 'author-desk-app': state === 'signed-in' }"
     >
-      <section
-        v-if="state !== 'signed-in'"
-        class="intro"
-        aria-labelledby="welcome-title"
-      >
-        <p class="eyebrow">
-          Дослідження · Редактура · Публікація
-        </p>
-        <h1 id="welcome-title">
-          Від джерел — до змістовних матеріалів.
-        </h1>
-        <p class="intro-copy">
-          ContextFlow допомагає зібрати важливе з ваших джерел і перетворити його
-          на продумані матеріали для кожного каналу.
-        </p>
-        <div
-          class="intro-rule"
-          aria-hidden="true"
-        />
-        <p class="quiet-note">
-          Усе необхідне для уважної редакційної роботи — в одному просторі.
-        </p>
-      </section>
-
-      <section
-        v-if="state === 'loading'"
-        class="auth-panel status-panel"
-        aria-live="polite"
-      >
-        <p class="eyebrow">
-          Ваш простір
-        </p>
-        <h2>Перевіряємо сесію</h2>
-        <p class="panel-copy">
-          Це займе лише мить.
-        </p>
+      <header class="site-header">
+        <a
+          v-if="state === 'signed-in'"
+          class="skip-link"
+          href="#workspace-task"
+        >До робочої області</a>
+        <a
+          class="wordmark"
+          href="/"
+          aria-label="ContextFlow — на початок"
+        >
+          <span>ContextFlow</span>
+        </a>
         <span
-          class="loading-mark"
-          aria-hidden="true"
-        />
-      </section>
-
-      <section
-        v-else-if="state === 'unavailable'"
-        class="auth-panel"
-        aria-labelledby="unavailable-title"
-      >
-        <p class="eyebrow">
-          З’єднання
-        </p>
-        <h2 id="unavailable-title">
-          Сервіс тимчасово недоступний
-        </h2>
-        <p class="panel-copy">
-          Не вдалося перевірити вашу сесію. Спробуйте ще раз за мить.
-        </p>
-        <button
-          class="button button-primary"
-          type="button"
-          @click="checkSession"
-        >
-          Спробувати ще раз
-        </button>
-      </section>
-
-      <section
-        v-else-if="state === 'signed-out'"
-        class="auth-panel"
-        aria-labelledby="auth-title"
-      >
-        <p class="eyebrow">
-          Ваш простір
-        </p>
+          v-if="state !== 'signed-in'"
+          class="header-note"
+        >Редакційний робочий простір</span>
         <div
-          class="auth-heading-row"
-          :class="{ 'register-heading': isRegistering }"
+          v-if="state === 'signed-in'"
+          id="workspace-header-controls"
+        />
+        <details
+          v-if="state === 'signed-in'"
+          ref="accountMenu"
+          class="account-details workspace-utilities"
+          @keydown.esc="($event.currentTarget as HTMLDetailsElement).open = false; ($event.currentTarget as HTMLDetailsElement).querySelector('summary')?.focus()"
         >
-          <h2 id="auth-title">
-            {{ isRegistering ? 'Створіть обліковий запис' : 'Раді вас бачити' }}
-          </h2>
-          <div
-            class="mode-switch"
-            role="group"
-            aria-label="Дія з обліковим записом"
+          <summary
+            id="account-title"
+            class="account-name"
           >
-            <button
-              type="button"
-              :aria-pressed="mode === 'login'"
-              @click="selectMode('login')"
-            >
-              Вхід
-            </button>
-            <button
-              type="button"
-              :aria-pressed="mode === 'register'"
-              @click="selectMode('register')"
-            >
-              Реєстрація
-            </button>
-          </div>
-        </div>
-        <p class="panel-copy">
-          {{ isRegistering ? 'Почніть з особистого робочого простору.' : 'Увійдіть, щоб продовжити редакційну роботу.' }}
-        </p>
-
-        <form
-          class="auth-form"
-          @submit.prevent="submitAuth"
-        >
-          <label
-            v-if="isRegistering"
-            class="field"
-          >
-            <span>Ваше ім’я <span class="optional">необов’язково</span></span>
-            <input
-              v-model="displayName"
-              autocomplete="name"
-              name="displayName"
-              type="text"
-              maxlength="80"
-              :disabled="busy"
-            >
-          </label>
-          <label class="field">
-            <span>Електронна пошта</span>
-            <input
-              v-model="email"
-              autocomplete="email"
-              name="email"
-              type="email"
-              required
-              maxlength="254"
-              :disabled="busy"
-            >
-          </label>
-          <label class="field">
-            <span>Пароль</span>
-            <input
-              v-model="password"
-              :autocomplete="isRegistering ? 'new-password' : 'current-password'"
-              name="password"
-              type="password"
-              required
-              :minlength="isRegistering ? 8 : 1"
-              maxlength="128"
-              :disabled="busy"
-            >
-          </label>
-          <p
-            v-if="message"
-            class="form-message"
-            :class="`message-${messageKind}`"
-            role="status"
-            aria-live="polite"
-          >
-            {{ message }}
-          </p>
-          <button
-            class="button button-primary submit-button"
-            type="submit"
-            :disabled="busy || !csrfToken"
-          >
-            <span
-              v-if="busy"
-              class="button-spinner"
-              aria-hidden="true"
-            />
-            {{ busy ? 'Зачекайте…' : isRegistering ? 'Створити обліковий запис' : 'Увійти' }}
-          </button>
-        </form>
-        <p class="privacy-note">
-          За замовчуванням сесія завершується після 24 годин бездіяльності. Особистий ліміт можна змінити після входу.
-        </p>
-      </section>
-
-      <section
-        v-else
-        class="signed-in-workspace"
-        aria-labelledby="account-title"
-      >
-        <div class="signed-in-account">
-          <div>
-            <p class="eyebrow">
-              Ваш обліковий запис
-            </p>
-            <p
-              id="account-title"
-              class="account-name"
-            >
-              {{ user?.displayName ? `Вітаємо, ${user.displayName}` : 'Ви увійшли' }}
-            </p>
+            {{ user?.displayName || 'Обліковий запис' }}
+          </summary>
+          <div class="workspace-utilities-menu">
             <p class="account-email">
               {{ user?.email }}
             </p>
-          </div>
-          <button
-            class="button button-secondary logout-button"
-            type="button"
-            :disabled="busy"
-            @click="logout"
-          >
-            {{ busy ? 'Завершуємо…' : 'Вийти' }}
-          </button>
-        </div>
-        <ExternalProcessingNotice
-          :key="user?.id ?? ''"
-          :csrf-token="csrfToken"
-          :user-id="user?.id ?? ''"
-          @session-expired="handleProjectSessionExpired"
-        />
-        <details class="session-settings">
-          <summary>
-            <span>Налаштування сесії</span>
-            <span class="session-settings-current">
-              {{ preferenceState === 'ready' ? `Бездіяльність: ${formattedIdleTime}` : preferenceState === 'loading' ? 'Завантаження…' : 'Не вдалося завантажити' }}
-            </span>
-          </summary>
-          <div class="session-settings-body">
-            <p class="session-settings-explanation">
-              Сесія завершується після обраного часу бездіяльності. Після входу вона в будь-якому разі діє не довше 7 діб.
-            </p>
-            <p
-              v-if="preferenceState === 'loading'"
-              class="session-settings-status"
-              role="status"
+            <a
+              class="account-icon-action"
+              href="/settings"
+              aria-label="Налаштування профілю"
+              title="Налаштування профілю"
             >
-              Завантажуємо ваші налаштування…
-            </p>
-            <div v-else-if="preferenceState === 'error'">
-              <p
-                class="session-settings-error"
-                role="alert"
-              >
-                {{ preferenceMessage }}
-              </p>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              ><path d="m9.4 3-.6 2.4-2 .9-2.1-.7-2.1 3.6 1.6 1.7-.2 2.2-1.7 1.6 2.1 3.6 2.3-.5 1.8 1.3.5 2.9h4.2l.6-2.4 2-.9 2.1.7 2.1-3.6-1.6-1.7.2-2.2 1.7-1.6-2.1-3.6-2.3.5-1.8-1.3-.5-2.9Z" /><circle
+                cx="12"
+                cy="12"
+                r="3"
+              /></svg>
+            </a>
+            <button
+              class="account-icon-action"
+              type="button"
+              :disabled="busy"
+              :aria-label="busy ? 'Завершуємо сесію' : 'Вийти'"
+              title="Вийти"
+              @click="logout"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              ><path d="M10 4H4v16h6M10 12h11m-4-4 4 4-4 4" /></svg>
+            </button>
+          </div>
+        </details>
+      </header>
+
+      <main
+        id="main-content"
+        class="auth-layout"
+        :class="{ 'signed-in-layout': state === 'signed-in' }"
+      >
+        <section
+          v-if="state !== 'signed-in'"
+          class="intro"
+          aria-labelledby="welcome-title"
+        >
+          <p class="eyebrow">
+            Дослідження · Редактура · Публікація
+          </p>
+          <h1 id="welcome-title">
+            Від джерел — до змістовних матеріалів.
+          </h1>
+          <p class="intro-copy">
+            ContextFlow допомагає зібрати важливе з ваших джерел і перетворити його
+            на продумані матеріали для кожного каналу.
+          </p>
+          <div
+            class="intro-rule"
+            aria-hidden="true"
+          />
+          <p class="quiet-note">
+            Усе необхідне для уважної редакційної роботи — в одному просторі.
+          </p>
+        </section>
+
+        <section
+          v-if="state === 'loading'"
+          class="auth-panel status-panel"
+          aria-live="polite"
+        >
+          <p class="eyebrow">
+            Ваш простір
+          </p>
+          <h2>Перевіряємо сесію</h2>
+          <p class="panel-copy">
+            Це займе лише мить.
+          </p>
+          <span
+            class="loading-mark"
+            aria-hidden="true"
+          />
+        </section>
+
+        <section
+          v-else-if="state === 'unavailable'"
+          class="auth-panel"
+          aria-labelledby="unavailable-title"
+        >
+          <p class="eyebrow">
+            З’єднання
+          </p>
+          <h2 id="unavailable-title">
+            Сервіс тимчасово недоступний
+          </h2>
+          <p class="panel-copy">
+            Не вдалося перевірити вашу сесію. Спробуйте ще раз за мить.
+          </p>
+          <button
+            class="button button-primary"
+            type="button"
+            @click="checkSession"
+          >
+            Спробувати ще раз
+          </button>
+        </section>
+
+        <section
+          v-else-if="state === 'signed-out'"
+          class="auth-panel"
+          aria-labelledby="auth-title"
+        >
+          <p class="eyebrow">
+            Ваш простір
+          </p>
+          <div
+            class="auth-heading-row"
+            :class="{ 'register-heading': isRegistering }"
+          >
+            <h2 id="auth-title">
+              {{ isRegistering ? 'Створіть обліковий запис' : 'Раді вас бачити' }}
+            </h2>
+            <div
+              class="mode-switch"
+              role="group"
+              aria-label="Дія з обліковим записом"
+            >
               <button
-                class="button button-secondary session-settings-action"
                 type="button"
-                @click="loadPreferences()"
+                :aria-pressed="mode === 'login'"
+                @click="selectMode('login')"
               >
-                Спробувати ще раз
+                Вхід
+              </button>
+              <button
+                type="button"
+                :aria-pressed="mode === 'register'"
+                @click="selectMode('register')"
+              >
+                Реєстрація
               </button>
             </div>
-            <form
-              v-else-if="preferenceEditing"
-              class="session-settings-form"
-              @submit.prevent="savePreferences"
+          </div>
+          <p class="panel-copy">
+            {{ isRegistering ? 'Почніть з особистого робочого простору.' : 'Увійдіть, щоб продовжити редакційну роботу.' }}
+          </p>
+
+          <form
+            class="auth-form"
+            @submit.prevent="submitAuth"
+          >
+            <label
+              v-if="isRegistering"
+              class="field"
             >
-              <label
-                class="field"
-                for="idle-timeout-minutes"
+              <span>Ваше ім’я <span class="optional">необов’язково</span></span>
+              <input
+                v-model="displayName"
+                autocomplete="name"
+                name="displayName"
+                type="text"
+                maxlength="80"
+                :disabled="busy"
               >
-                <span>Завершувати після бездіяльності, хвилин</span>
-                <input
-                  id="idle-timeout-minutes"
-                  v-model.number="draftIdleMinutes"
-                  type="number"
-                  inputmode="numeric"
-                  min="1"
-                  max="10080"
-                  step="1"
-                  required
-                  :disabled="preferenceSaving"
-                  aria-describedby="idle-timeout-help"
-                >
-              </label>
-              <p
-                id="idle-timeout-help"
-                class="session-settings-hint"
+            </label>
+            <label class="field">
+              <span>Електронна пошта</span>
+              <input
+                v-model="email"
+                autocomplete="email"
+                name="email"
+                type="email"
+                required
+                maxlength="254"
+                :disabled="busy"
               >
-                Від 1 хвилини до 7 діб. 24 години — 1440 хвилин.
-              </p>
-              <div class="session-settings-actions">
-                <button
-                  class="button button-primary"
-                  type="submit"
-                  :disabled="preferenceSaving"
-                >
-                  {{ preferenceSaving ? 'Зберігаємо…' : 'Зберегти' }}
-                </button>
-                <button
-                  class="button button-secondary"
-                  type="button"
-                  :disabled="preferenceSaving"
-                  @click="cancelPreferenceEdit"
-                >
-                  Скасувати
-                </button>
-              </div>
-            </form>
-            <button
-              v-else
-              class="button button-secondary session-settings-action"
-              type="button"
-              @click="preferenceEditing = true; preferenceMessage = ''"
-            >
-              Змінити ліміт
-            </button>
+            </label>
+            <label class="field">
+              <span>Пароль</span>
+              <input
+                v-model="password"
+                :autocomplete="isRegistering ? 'new-password' : 'current-password'"
+                name="password"
+                type="password"
+                required
+                :minlength="isRegistering ? 8 : 1"
+                maxlength="128"
+                :disabled="busy"
+              >
+            </label>
             <p
-              v-if="preferenceState === 'ready' && preferenceMessage"
-              class="session-settings-status"
-              :class="{ 'session-settings-error': preferenceEditing }"
+              v-if="message"
+              class="form-message"
+              :class="`message-${messageKind}`"
               role="status"
               aria-live="polite"
             >
-              {{ preferenceMessage }}
+              {{ message }}
             </p>
-          </div>
-        </details>
-        <WorkspaceHub
-          :key="user?.id ?? ''"
-          :csrf-token="csrfToken"
-          :user-id="user?.id ?? ''"
-          @session-expired="handleProjectSessionExpired"
-        />
-      </section>
-    </main>
-    <footer class="site-footer">
-      <span>Контент починається з довіри до джерел.</span>
-    </footer>
+            <button
+              class="button button-primary submit-button"
+              type="submit"
+              :disabled="busy || !csrfToken"
+            >
+              <span
+                v-if="busy"
+                class="button-spinner"
+                aria-hidden="true"
+              />
+              {{ busy ? 'Зачекайте…' : isRegistering ? 'Створити обліковий запис' : 'Увійти' }}
+            </button>
+          </form>
+          <p class="privacy-note">
+            За замовчуванням сесія завершується після 24 годин бездіяльності. Особистий ліміт можна змінити після входу.
+          </p>
+        </section>
+
+        <section
+          v-else
+          class="signed-in-workspace"
+          aria-labelledby="account-title"
+        >
+          <ProfileSettings
+            v-show="profileOpen"
+            :email="user?.email ?? ''"
+            :display-name="user?.displayName ?? null"
+            :csrf-token="csrfToken"
+            :user-id="user?.id ?? ''"
+            @back="returnToWork"
+            @session-expired="handleProjectSessionExpired"
+          >
+            <template #session>
+              <p class="profile-current-limit">
+                {{ preferenceState === 'ready' ? `Після бездіяльності: ${formattedIdleTime}` : preferenceState === 'loading' ? 'Завантаження…' : 'Не вдалося завантажити' }}
+              </p>
+              <div class="session-settings-body">
+                <p class="session-settings-explanation">
+                  Сесія завершується після обраного часу бездіяльності. Після входу вона в будь-якому разі діє не довше 7 діб.
+                </p>
+                <p
+                  v-if="preferenceState === 'loading'"
+                  class="session-settings-status"
+                  role="status"
+                >
+                  Завантажуємо ваші налаштування…
+                </p>
+                <div v-else-if="preferenceState === 'error'">
+                  <p
+                    class="session-settings-error"
+                    role="alert"
+                  >
+                    {{ preferenceMessage }}
+                  </p>
+                  <button
+                    class="button button-secondary session-settings-action"
+                    type="button"
+                    @click="loadPreferences()"
+                  >
+                    Спробувати ще раз
+                  </button>
+                </div>
+                <form
+                  v-else-if="preferenceEditing"
+                  class="session-settings-form"
+                  @submit.prevent="savePreferences"
+                >
+                  <label
+                    class="field"
+                    for="idle-timeout-minutes"
+                  >
+                    <span>Завершувати після бездіяльності, хвилин</span>
+                    <input
+                      id="idle-timeout-minutes"
+                      v-model.number="draftIdleMinutes"
+                      type="number"
+                      inputmode="numeric"
+                      min="1"
+                      max="10080"
+                      step="1"
+                      required
+                      :disabled="preferenceSaving"
+                      aria-describedby="idle-timeout-help"
+                    >
+                  </label>
+                  <p
+                    id="idle-timeout-help"
+                    class="session-settings-hint"
+                  >
+                    Від 1 хвилини до 7 діб. 24 години — 1440 хвилин.
+                  </p>
+                  <div class="session-settings-actions">
+                    <button
+                      class="button button-primary"
+                      type="submit"
+                      :disabled="preferenceSaving"
+                    >
+                      {{ preferenceSaving ? 'Зберігаємо…' : 'Зберегти' }}
+                    </button>
+                    <button
+                      class="button button-secondary"
+                      type="button"
+                      :disabled="preferenceSaving"
+                      @click="cancelPreferenceEdit"
+                    >
+                      Скасувати
+                    </button>
+                  </div>
+                </form>
+                <button
+                  v-else
+                  class="button button-secondary session-settings-action"
+                  type="button"
+                  @click="preferenceEditing = true; preferenceMessage = ''"
+                >
+                  Змінити ліміт
+                </button>
+                <p
+                  v-if="preferenceState === 'ready' && preferenceMessage"
+                  class="session-settings-status"
+                  :class="{ 'session-settings-error': preferenceEditing }"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {{ preferenceMessage }}
+                </p>
+              </div>
+            </template>
+          </ProfileSettings>
+          <WorkspaceHub
+            v-show="!profileOpen"
+            :key="user?.id ?? ''"
+            :csrf-token="csrfToken"
+            :user-id="user?.id ?? ''"
+            @session-expired="handleProjectSessionExpired"
+            @workspace-changed="profileReturnPath = '/projects'; profileReturnScroll = 0"
+          />
+        </section>
+      </main>
+      <footer
+        v-if="state !== 'signed-in'"
+        class="site-footer"
+      >
+        <span>Контент починається з довіри до джерел.</span>
+      </footer>
+    </div>
+    <SiteFooter v-if="state === 'signed-in'" />
   </div>
 </template>

@@ -14,6 +14,8 @@ function json<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 type Inputs = Pick<ArticleDraft, 'briefRevisionId' | 'basisRevisionId' | 'outlineRevisionId' | 'workspaceId' | 'workspaceStyleRevision' | 'sourceSnapshotId' | 'contentMode' | 'origin'>;
 function inputData(value: Inputs): Inputs { return { briefRevisionId: value.briefRevisionId, basisRevisionId: value.basisRevisionId, outlineRevisionId: value.outlineRevisionId, workspaceId: value.workspaceId, workspaceStyleRevision: value.workspaceStyleRevision, sourceSnapshotId: value.sourceSnapshotId, contentMode: value.contentMode, origin: value.origin }; }
 const briefInclude = { requiredClaims: true, contextSnapshots: true, style: true } as const;
+// Up to 30 sections with bounded author/reviewer passes run in the worker.
+export const ARTICLE_GENERATION_DEADLINE_MS = 3_600_000;
 export class ArticleService {
   constructor(readonly prisma: PrismaClient, private readonly jobs: DurableJobService, private readonly facts: FactualBasisService) {}
   private async lock(tx: Prisma.TransactionClient, user: string, project: string, write = true) {
@@ -201,7 +203,7 @@ export class ArticleService {
       const manifest = articleInputManifestSchema.parse({ schemaVersion: 'article-input-v1', articleRevision: expectedRevision, briefRevisionId: b.id, briefHash: b.sha256, outlineRevisionId: o.id, outlineHash: o.sha256,
         workspaceId: b.workspaceId, workspaceStyleRevision: b.workspaceStyleRevision, contentMode: b.contentMode, basisRevisionId: b.contentMode === 'FACTUAL' ? basis.basis!.id : null, basisHash: b.contentMode === 'FACTUAL' ? basis.basis!.sha256 : null,
         contextSnapshotIds: b.contextSnapshots.map(row => row.snapshotId).sort(), release, noticeVersion: EXTERNAL_PROCESSING_NOTICE.version, acceptedAt: profile.externalProcessingAcceptedAt?.toISOString() });
-      return this.jobs.create(tx, { projectId: project, userId: user, operation: 'ARTICLE_GENERATION', contractVersion: 'article-v1', commandKey, inputManifest: manifest, deadlineMs: 600000 });
+      return this.jobs.create(tx, { projectId: project, userId: user, operation: 'ARTICLE_GENERATION', contractVersion: 'article-v1', commandKey, inputManifest: manifest, deadlineMs: ARTICLE_GENERATION_DEADLINE_MS });
     });
   }
   async commitGenerated(tx: Prisma.TransactionClient, job: Job, raw: unknown, executionId: string) {

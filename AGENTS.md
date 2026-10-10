@@ -6,7 +6,7 @@ ContextFlow turns user sources into reviewed articles, channel content and visua
 
 - Resume: docs/STATUS.md and relevant milestone in docs/PLAN.md.
 - Feature: relevant docs/SPEC.md and docs/TRACEABILITY.md IDs, then matching docs/modules/ file.
-- Frontend screens/components, visual polish, motion/responsiveness or visual QA: use .agents/skills/contextflow-frontend-design/SKILL.md and canonical docs/ui/DESIGN.md; tools/resource policy in docs/ui/TOOLING.md.
+- Frontend screens/components, visual polish, motion/responsiveness or visual QA: read PRODUCT.md, the root DESIGN.md entry point and canonical docs/ui/DESIGN.md; use .agents/skills/contextflow-frontend-design/SKILL.md with the installed Impeccable skill. Run Impeccable context once for the concrete surface, preserve approved Author desk (owner choice 2026-10-09) for refinement, and follow the relevant command reference. The root DESIGN.md points to the single canonical design; it is not a competing authority. Tools/resource policy is in docs/ui/TOOLING.md.
 - Schema/migration: docs/DATA_MODEL.md; lifecycle: docs/WORKFLOWS.md.
 - Boundary change: docs/ARCHITECTURE.md and relevant ADR/module.
 - Auth/storage/import security: docs/SECURITY.md.

@@ -33,7 +33,7 @@ const traceSchema = z.object({ policyDigest: z.string(), requests: z.array(z.obj
 const webSchema = z.object({ success: z.literal(true), data: z.object({ markdown: z.string().max(200_000),
   metadata: z.object({ statusCode: z.number().int().min(200).max(299), sourceURL: z.string().max(2048).optional(),
     url: z.string().max(2048).optional(), title: z.string().max(1000).optional(), language: z.string().max(100).optional(),
-    contentType: z.string().max(200).optional() }).passthrough(), remoteFetch: traceSchema }).passthrough() }).passthrough();
+    contentType: z.string().max(200).optional() }).passthrough(), remoteFetch: traceSchema.optional() }).passthrough() }).passthrough();
 const doclingSchema = z.object({ status: z.literal('success'), document: z.object({ md_content: z.string().max(200_000) }).passthrough(),
   processing_time: z.number().nonnegative().optional() }).passthrough();
 
@@ -44,6 +44,10 @@ function endpoint(value: string, allowLocal = false): string {
       || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error();
     return url.origin;
   } catch { throw new ImportProviderError('CONFIG', 'The import provider endpoint is not configured safely'); }
+}
+export function isOfficialFirecrawlCloud(value: string): boolean {
+  try { const url = new URL(value); return url.protocol === 'https:' && url.hostname === 'api.firecrawl.dev'; }
+  catch { return false; }
 }
 function normalizedText(value: string): string {
   const text = value.replace(/^\uFEFF/u, '').replace(/\r\n?/gu, '\n');
@@ -84,11 +88,34 @@ export class ImportProviders {
 
   async web(value: string, settings: ImportProviderSettings, signal: AbortSignal, beforeSubmit: () => Promise<void>): Promise<ImportedSource> {
     const origin = endpoint(settings.firecrawlEndpoint), key = this.env['FIRECRAWL_API_KEY'];
-    if (!key || settings.firecrawlVersion !== 'v2' || !/^[a-f0-9]{64}$/u.test(settings.remotePolicyDigest)) {
-      throw new ImportProviderError('CONFIG', 'A protected Firecrawl gateway and pinned egress policy are required for URL imports');
-    }
+    const cloud = isOfficialFirecrawlCloud(origin);
+    if (!key || settings.firecrawlVersion !== 'v2' || !cloud && !/^[a-f0-9]{64}$/u.test(settings.remotePolicyDigest))
+      throw new ImportProviderError('CONFIG', 'Firecrawl Cloud requires its API key; custom Firecrawl endpoints require the protected gateway policy');
     const checked = await validatePublicUrl(value, this.resolver);
     const headers = { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
+    if (cloud) {
+      // The app rejects obvious private/reserved input URLs before submission.
+      // Firecrawl Cloud performs the remote fetch, so its network controls are
+      // provider-managed and cannot be represented as our own pinned egress trace.
+      const again = await validatePublicUrl(checked.url, this.resolver);
+      if (again.addresses.join(',') !== checked.addresses.join(',')) throw new ImportProviderError('INVALID_URL', 'The URL DNS answers changed before submission');
+      await beforeSubmit();
+      let raw: unknown;
+      try { raw = await boundedJson(await this.transport(`${origin}/v2/scrape`, { method: 'POST', headers, redirect: 'error', signal,
+        body: JSON.stringify({ url: checked.url, ...FIRECRAWL_OPTIONS }) }), 2 * 1024 * 1024); }
+      catch (error) { if (error instanceof ImportProviderError) throw error; throw new ImportProviderError('UNKNOWN_OUTCOME', 'The provider outcome is unknown. Start an explicit new import.'); }
+      const parsed = webSchema.safeParse(raw);
+      if (!parsed.success) throw new ImportProviderError('CONTRACT', 'Firecrawl Cloud returned an incompatible scrape response');
+      const { data } = parsed.data;
+      const finalUrl = data.metadata.url ?? data.metadata.sourceURL ?? checked.url;
+      const final = await validatePublicUrl(finalUrl, this.resolver);
+      const text = normalizedText(data.markdown);
+      return { text, metadata: { schemaVersion: IMPORT_CONTRACT, provider: 'firecrawl', version: settings.firecrawlVersion,
+        requestedUrl: checked.url, finalUrl: final.url, retrievedAt: new Date().toISOString(), options: FIRECRAWL_OPTIONS,
+        egressMode: 'firecrawl-cloud',
+        ...(data.metadata.title ? { title: data.metadata.title } : {}), ...(data.metadata.language ? { language: data.metadata.language } : {}),
+        ...(data.metadata.contentType ? { contentType: data.metadata.contentType } : {}), statusCode: data.metadata.statusCode } };
+    }
     let policy: z.infer<typeof policySchema>;
     try {
       const response = await this.transport(`${origin}/contextflow/egress-policy`, { headers, redirect: 'error', signal });
@@ -107,8 +134,10 @@ export class ImportProviders {
       body: JSON.stringify({ url: checked.url, ...FIRECRAWL_OPTIONS, contextflowEgress: { policyDigest: policy.policyDigest, pinnedAddresses: checked.addresses } }) }), 2 * 1024 * 1024); }
     catch (error) { if (error instanceof ImportProviderError) throw error; throw new ImportProviderError('UNKNOWN_OUTCOME', 'The provider outcome is unknown. Start an explicit new import.'); }
     const parsed = webSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.data.remoteFetch.policyDigest !== policy.policyDigest) throw new ImportProviderError('CONTRACT', 'The provider did not return the required source and remote-fetch evidence');
-    const { data } = parsed.data, trace = data.remoteFetch.requests;
+    if (!parsed.success) throw new ImportProviderError('CONTRACT', 'The provider did not return the required source and remote-fetch evidence');
+    const { data } = parsed.data, remoteFetch = data.remoteFetch;
+    if (!remoteFetch || remoteFetch.policyDigest !== policy.policyDigest) throw new ImportProviderError('CONTRACT', 'The provider did not return the required source and remote-fetch evidence');
+    const trace = remoteFetch.requests;
     if (trace.length > policy.maxRequests || trace.filter(request => request.redirect).length > policy.maxRedirects
       || trace.reduce((total, request) => total + request.responseBytes, 0) > policy.maxResponseBytes
       || trace.some(request => request.addresses.some(address => !publicAddress(address)) || !request.addresses.includes(request.connectedAddress))) {
@@ -124,7 +153,7 @@ export class ImportProviders {
     const text = normalizedText(data.markdown);
     return { text, metadata: { schemaVersion: IMPORT_CONTRACT, provider: 'firecrawl', version: settings.firecrawlVersion,
       requestedUrl: checked.url, finalUrl, retrievedAt: new Date().toISOString(), options: FIRECRAWL_OPTIONS,
-      policyDigest: policy.policyDigest, remoteFetch: data.remoteFetch,
+      policyDigest: policy.policyDigest, remoteFetch,
       ...(data.metadata.title ? { title: data.metadata.title } : {}), ...(data.metadata.language ? { language: data.metadata.language } : {}),
       statusCode: data.metadata.statusCode, contentType: data.metadata.contentType ?? null } };
   }

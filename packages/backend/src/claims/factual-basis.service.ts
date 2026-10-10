@@ -293,7 +293,7 @@ export class FactualBasisService {
       const manifest = claimInputManifestSchema.parse({ schemaVersion: 'claim-input-v1', release,
         snapshots: snapshots.map(row => ({ snapshotId: row.id, materialId: row.materialId, sha256: row.sha256, fragments: row.fragments })),
         noticeVersion: EXTERNAL_PROCESSING_NOTICE.version, acceptedAt: profile.externalProcessingAcceptedAt?.toISOString() });
-      return this.jobs.create(tx, { projectId, userId, operation: 'CLAIM_EXTRACTION', contractVersion: 'claims-v1', commandKey, inputManifest: manifest, deadlineMs: 600_000 });
+      return this.jobs.create(tx, { projectId, userId, operation: 'CLAIM_EXTRACTION', contractVersion: 'claims-v1', commandKey, inputManifest: manifest, deadlineMs: 3_600_000 });
     });
   }
   async commitExtracted(tx: Prisma.TransactionClient, job: Job, raw: unknown): Promise<{ claimIds: string[]; conflictIds: string[] }> {

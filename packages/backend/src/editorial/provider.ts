@@ -3,9 +3,16 @@ import { z } from 'zod';
 import { outlineOutputSchema, type OutlineOutput, type OutlineWorkflowRelease } from './contracts.js';
 
 export const OUTLINE_CONTRACT = 'outline-v1';
-const MAX_RESPONSE_BYTES = 512 * 1024;
-const MAX_SSE_EVENT_BYTES = 128 * 1024;
-const MAX_INPUT_BYTES = 1024 * 1024;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// Native Loop events repeat state and accumulated child metadata; candidate
+// limits remain independent from these transport metadata bounds.
+const MAX_SSE_BYTES = 128 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024;
+const MAX_INPUT_BYTES = 350000;
+const MAX_OUTLINE_BYTES = 350000;
+const MAX_REPORT_BYTES = 256000;
+const outlineReportSchema = z.object({ schemaVersion: z.literal('outline-review-report-v1'),
+  status: z.enum(['ready', 'needs_human']) }).passthrough();
 
 type ReleaseArtifact = {
   schemaVersion: 'contextflow-dify-release-v1';
@@ -31,23 +38,19 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'OUTLINE_GENERATION', releaseId: 'outline-generation-2026-10-05.2',
-  configDigest: '6145cb5d88ff0fc1dfc929505ca82fad5ae4889b3923b916a87b9dbebe8ea416', publishedWorkflowIdEnv: 'DIFY_OUTLINE_GENERATION_PUBLISHED_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'OUTLINE_GENERATION', releaseId: 'outline-generation-2026-10-09.2',
+  configDigest: 'f48c183037eb471758659737ffe7fa80864fba7cf184d7af560fdef82b8c72cb', publishedWorkflowIdEnv: 'DIFY_OUTLINE_GENERATION_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_OUTLINE_GENERATION_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_OUTLINE_GENERATION_API_KEY', contractVersion: OUTLINE_CONTRACT,
-  promptTemplateVersion: 'outline-generation-prompt-v1', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
+  promptTemplateVersion: 'outline-generation-reviewed-prompt-v2', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
   outputVariable: 'outline_json', responseMode: 'streaming', provider: 'dify',
   model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
-    max_output_tokens: 4096, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
+    max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'outline-generation-v1.yml',
-  workflowDslSha256: '7cf6eb314bf37a4bcebb193a46602a6b95c6f2f48b1fa1db7d2ab5b4549885eb',
+  workflowDslSha256: '8ddc8c36b58fb7c91b9c992f18a4d317fa57ffe68bdbbbceccda8ffddece686d',
 };
 
-function testEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
-  if (env['NODE_ENV'] !== 'test') return env;
-  return Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith('TEST_')).map(([name, value]) => [name.slice(5), value]));
-}
 export type OutlineWorkflowSettings = OutlineWorkflowRelease & { apiKey: string };
 export class OutlineProviderError extends Error {
   constructor(readonly code: 'CONFIG' | 'AUTH' | 'INVALID_INPUT' | 'INCOMPATIBLE_CONTRACT' | 'QUOTA' | 'RATE_LIMIT' | 'TRANSIENT_TRANSPORT'
@@ -66,7 +69,7 @@ function safeEndpoint(value: string | undefined, allowLocal: boolean): string | 
   } catch { return; }
 }
 function configuredRelease(env: Record<string, string | undefined>): OutlineWorkflowRelease {
-  const effective = testEnvironment(env);
+  const effective = env;
   const endpoint = safeEndpoint(effective[release.apiBaseEnv], effective['NODE_ENV'] !== 'production');
   const workflowId = effective[release.publishedWorkflowIdEnv];
   if (!endpoint || !uuid(workflowId) || effective[release.configDigestEnv] !== release.configDigest) {
@@ -81,7 +84,7 @@ export function outlineWorkflowRelease(env: Record<string, string | undefined> =
     configDigest: config.configDigest, contractVersion: config.contractVersion, promptTemplateVersion: config.promptTemplateVersion };
 }
 export function outlineWorkflowSettings(env: Record<string, string | undefined> = process.env): OutlineWorkflowSettings {
-  const apiKey = testEnvironment(env)[release.apiKeyEnv];
+  const apiKey = env[release.apiKeyEnv];
   if (!apiKey || apiKey.length > 500) throw new OutlineProviderError('CONFIG', 'The outline workflow API key is missing', 'NOT_SUBMITTED');
   return { ...configuredRelease(env), apiKey };
 }
@@ -169,7 +172,7 @@ async function streamRun(response: Response, settings: OutlineWorkflowSettings, 
       if (signal.aborted) throw new OutlineProviderError('TIMEOUT', 'Outline workflow exceeded its execution deadline', 'UNKNOWN');
       const next = await reader.read(); if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new OutlineProviderError('INCOMPATIBLE_CONTRACT', 'Outline workflow stream exceeded its size limit'); }
+      if (bytes > MAX_SSE_BYTES) { await reader.cancel(); throw new OutlineProviderError('INCOMPATIBLE_CONTRACT', 'Outline workflow stream exceeded its size limit'); }
       buffer += decoder.decode(next.value, { stream: true });
       let boundary: RegExpExecArray | null;
       while ((boundary = /\r?\n\r?\n/u.exec(buffer)) !== null) {
@@ -191,7 +194,16 @@ async function streamRun(response: Response, settings: OutlineWorkflowSettings, 
 
 function extractionFromRun(run: DifyRun): OutlineOutput {
   if (run.data.status !== 'succeeded') throw new OutlineProviderError('PROVIDER_FAILED', 'Outline workflow did not succeed', 'KNOWN_FAILED');
+  const rawReport = run.data.outputs?.['outline_report'];
+  if (typeof rawReport !== 'string' || Buffer.byteLength(rawReport) > MAX_REPORT_BYTES)
+    throw new OutlineProviderError('INCOMPATIBLE_CONTRACT', 'Outline workflow review report is missing or exceeds its limit');
+  const report = outlineReportSchema.safeParse(safeJson(rawReport));
+  if (!report.success) throw new OutlineProviderError('INCOMPATIBLE_CONTRACT', 'Outline workflow review report did not match its contract');
+  if (report.data.status !== 'ready')
+    throw new OutlineProviderError('PROVIDER_FAILED', 'Outline workflow requires human review before accepting candidates', 'KNOWN_FAILED');
   const raw = run.data.outputs?.[release.outputVariable];
+  if (raw === undefined || Buffer.byteLength(typeof raw === 'string' ? raw : JSON.stringify(raw)) > MAX_OUTLINE_BYTES)
+    throw new OutlineProviderError('INCOMPATIBLE_CONTRACT', 'Outline workflow candidate output is missing or exceeds its limit');
   const output = typeof raw === 'string' ? safeJson(raw) : raw;
   const parsed = outlineOutputSchema.safeParse(output);
   if (!parsed.success) throw new OutlineProviderError('INCOMPATIBLE_CONTRACT', 'Outline workflow output did not match outline-v1');

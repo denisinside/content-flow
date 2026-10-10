@@ -212,6 +212,11 @@ async function loadMaterial(materialId: string, snapshotId?: string) {
       return
     }
     await loadSnapshot(selectedId, version, signal)
+    if (!stillCurrent(version)) return
+    await nextTick()
+    const reader = document.getElementById('source-reader-title')
+    reader?.focus({ preventScroll: true })
+    if (window.matchMedia('(max-width: 760px)').matches) reader?.scrollIntoView({ block: 'start', behavior: 'instant' })
   } catch (error) {
     if (!stillCurrent(version) || (error instanceof DOMException && error.name === 'AbortError')) return
     detailState.value = 'error'
@@ -352,6 +357,17 @@ async function toggleIncluded(material: Material) {
     includeBusyId.value = null
     busy.value = false
   }
+}
+
+async function closeReader() {
+  if (busy.value || editing.value || detailState.value === 'loading') return
+  const materialId = selectedMaterial.value?.id
+  selectedMaterial.value = null
+  selectedSnapshot.value = null
+  snapshots.value = []
+  comparisonOpen.value = false
+  await nextTick()
+  if (materialId) document.getElementById(`source-item-${materialId}`)?.focus()
 }
 
 function beginEdit() {
@@ -551,15 +567,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="sources-workspace">
+  <div
+    class="sources-workspace author-desk-task"
+    :data-workspace-leave-risk="busy || !!label.trim() || !!text.trim() || !!sourceUrl.trim() || editing"
+  >
     <div class="sources-heading">
       <div>
-        <p class="eyebrow">
-          {{ projectTitle }}
-        </p>
-        <h2>Джерела</h2>
+        <h1 id="sources-title">
+          Джерела
+        </h1>
         <p class="sources-lead">
-          Додавайте тексти, які допоможуть підготувати матеріали проєкту.
+          Матеріал, на який спирається текст.
         </p>
       </div>
     </div>
@@ -575,25 +593,23 @@ onBeforeUnmount(() => {
       <a
         v-if="externalNoticeRequired"
         class="source-notice-link"
-        href="#external-processing-notice"
+        href="/settings#external-processing-notice"
       >
         Переглянути повідомлення й надати потрібну згоду
       </a>
     </Alert>
 
-    <section
+    <details
       class="source-add"
+      :open="materials.length === 0"
       aria-labelledby="source-add-title"
     >
+      <summary>
+        <h3 id="source-add-title">
+          Додати джерело
+        </h3>
+      </summary>
       <div class="source-section-heading">
-        <div>
-          <p class="eyebrow">
-            Нове джерело
-          </p>
-          <h3 id="source-add-title">
-            Додати матеріал
-          </h3>
-        </div>
         <div
           class="source-mode"
           role="group"
@@ -741,14 +757,14 @@ onBeforeUnmount(() => {
           </Button>
         </div>
       </form>
-      <p
-        v-if="importMessage"
-        class="source-state"
-        role="status"
-      >
-        {{ importMessage }}
-      </p>
-    </section>
+    </details>
+    <p
+      v-if="importMessage"
+      class="source-state"
+      role="status"
+    >
+      {{ importMessage }}
+    </p>
 
     <ImportJobs
       :project-id="projectId"
@@ -764,24 +780,20 @@ onBeforeUnmount(() => {
       @restart="startNewImport"
     />
 
-    <div class="sources-columns">
+    <div
+      class="sources-columns"
+      :class="{ 'with-reader': selectedMaterial }"
+    >
       <section
         class="source-list"
         aria-labelledby="source-list-title"
       >
         <div class="source-section-heading">
           <div>
-            <p class="eyebrow">
-              У цьому проєкті
-            </p>
             <h3 id="source-list-title">
               Збережені джерела
             </h3>
           </div>
-          <span
-            v-if="listState === 'ready'"
-            class="source-count"
-          >{{ materials.length }}</span>
         </div>
         <p
           v-if="listState === 'loading'"
@@ -820,6 +832,7 @@ onBeforeUnmount(() => {
             :class="{ 'source-item-selected': selectedMaterial?.id === material.id }"
           >
             <button
+              :id="`source-item-${material.id}`"
               class="source-item-open"
               type="button"
               :disabled="busy || editing"
@@ -845,19 +858,33 @@ onBeforeUnmount(() => {
       </section>
 
       <section
+        v-if="selectedMaterial"
         class="source-reader"
         aria-labelledby="source-reader-title"
+        @keydown.esc.stop="closeReader"
       >
         <template v-if="selectedMaterial">
           <div class="source-reader-heading">
             <div class="source-reader-title-wrap">
-              <p class="eyebrow">
-                {{ purposeLabel(selectedMaterial.purpose) }}
-              </p>
-              <h3 id="source-reader-title">
+              <h3
+                id="source-reader-title"
+                tabindex="-1"
+              >
                 {{ selectedMaterial.label }}
               </h3>
+              <p class="source-item-meta">
+                {{ purposeLabel(selectedMaterial.purpose) }}
+              </p>
             </div>
+            <Button
+              v-if="!editing"
+              class="source-button"
+              variant="ghost"
+              :disabled="busy || detailState === 'loading'"
+              @click="closeReader"
+            >
+              До списку
+            </Button>
             <Button
               v-if="!editing && !archived && selectedSnapshot"
               class="source-button"
@@ -1112,18 +1139,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </template>
-        <div
-          v-else
-          class="source-reader-empty"
-        >
-          <p class="eyebrow">
-            Перегляд
-          </p>
-          <h3 id="source-reader-title">
-            Оберіть джерело
-          </h3>
-          <p>Збережений текст і його історія з’являться тут.</p>
-        </div>
       </section>
     </div>
   </div>
@@ -1132,92 +1147,99 @@ onBeforeUnmount(() => {
 <style scoped>
 .sources-workspace { color: var(--ink); }
 .sources-heading { margin-bottom: 30px; }
-.sources-heading h2 { margin: 0; font-family: var(--serif); font-size: 31px; font-weight: 500; line-height: 1.2; }
-.sources-lead { max-width: 640px; margin: 9px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
-.source-add { padding: 22px 0 25px; border-block: 1px solid var(--rule); }
-.source-add > .source-state { margin-top: 12px; }
+.sources-heading h1 { margin: 0; font-family: var(--serif); font-size: 39px; font-weight: 550; line-height: 1.2; letter-spacing: -.025em; }
+.sources-lead { max-width: 640px; margin: 9px 0 0; color: var(--muted); font-size: 15px; line-height: 1.6; }
+.source-add { padding: 0 0 24px; border-bottom: 1px solid var(--rule); }
+.source-add > summary { cursor: pointer; color: var(--copper-foreground, #fff); background: var(--copper); padding: 9px 14px; width: fit-content; min-height: 40px; border-radius: 3px; list-style-position: inside; }
+.source-add > summary h3 { display: inline; font-family: var(--sans); font-size: 13px; font-weight: 500; }
+.source-add[open] > summary { margin-bottom: 20px; }
+.source-add > summary:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
 .source-section-heading, .source-reader-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .source-section-heading { margin-bottom: 20px; }
-.source-section-heading h3, .source-reader-heading h3, .source-reader-empty h3 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 500; line-height: 1.28; overflow-wrap: anywhere; }
-.source-section-heading .eyebrow, .source-reader-heading .eyebrow, .source-reader-empty .eyebrow { margin: 0 0 5px; }
+.source-section-heading h3, .source-reader-heading h3 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 500; line-height: 1.28; overflow-wrap: anywhere; }
 .source-mode { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--rule); }
 .source-mode button { min-height: 34px; padding: 6px 10px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
-.source-mode button[aria-pressed="true"] { background: color-mix(in srgb, var(--document) 75%, var(--ink)); color: var(--ink); }
+.source-mode button[aria-pressed="true"] { background: var(--selected, #eff1f2); color: var(--ink); }
 .source-form { display: grid; gap: 18px; }
 .source-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .65fr); gap: 18px; }
 .source-field { display: grid; gap: 7px; }
 .source-field :deep([data-slot="field-label"]) { color: var(--ink); font-size: 13px; font-weight: 600; }
-.source-field :deep([data-slot="field-description"]) { color: var(--muted); font-size: 11px; line-height: 1.5; }
-.source-input { width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 2px; background: var(--document); color: var(--ink); font: inherit; font-size: 13px; }
+.source-field :deep([data-slot="field-description"]) { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.source-input { width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid var(--field-rule, var(--rule)); border-radius: 3px; background: var(--document); color: var(--ink); font: inherit; font-size: 13px; }
 .source-input:focus-visible, .source-file:focus-visible, .source-mode button:focus-visible, .source-item-open:focus-visible, .source-include:focus-visible, .source-history button:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
 .source-textarea { min-height: 155px; resize: vertical; line-height: 1.6; }
 .source-file { width: 100%; padding: 12px; border: 1px dashed var(--rule); background: var(--document); color: var(--ink); font: inherit; font-size: 12px; }
 .source-form-actions { display: flex; flex-wrap: wrap; gap: 9px; }
 .source-import-actions { align-items: center; margin: 0 0 14px; }
-.source-action-hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.source-action-hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .source-compare-trigger { margin-top: 10px; }
 .source-metadata a { color: var(--copper); text-underline-offset: 3px; }
-.source-button { min-height: 38px; border-radius: 2px; font-size: 12px; }
-.source-button-primary { background: var(--copper); color: var(--document); }
-.sources-columns { display: grid; grid-template-columns: minmax(250px, .75fr) minmax(0, 1.55fr); gap: 38px; padding-top: 28px; }
+.source-button { min-height: 40px; border-radius: 3px; font-size: 13px; }
+.source-button-primary { background: var(--copper); color: var(--copper-foreground, #fff); }
+.sources-columns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 38px; padding-top: 28px; }
 .source-list, .source-reader { min-width: 0; }
-.source-count { min-width: 28px; padding: 3px 8px; color: var(--muted); font-size: 12px; text-align: center; }
+.sources-columns.with-reader { grid-template-columns: 260px minmax(0, 1fr); }
 .source-items { margin: 0; padding: 0; list-style: none; }
-.source-items li { display: grid; gap: 7px; padding: 13px 0; border-top: 1px solid var(--rule); }
-.source-item-selected { border-left: 2px solid var(--copper); padding-left: 11px !important; }
+.source-items li { display: grid; gap: 7px; padding: 18px 14px; border-top: 1px solid var(--rule); transition: background 140ms; }
+.source-items li:hover { background: var(--row-hover, #fafafa); }
+.source-items li.source-item-selected { background: var(--source-selected, #efefec); }
 .source-item-open { display: grid; gap: 4px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.source-item-title { font-family: var(--serif); font-size: 17px; line-height: 1.3; overflow-wrap: anywhere; }
-.source-item-meta { color: var(--muted); font-size: 11px; }
-.source-include { justify-self: start; display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.source-item-title { font-family: var(--serif); font-size: 20px; line-height: 1.35; overflow-wrap: anywhere; }
+.source-item-meta { color: var(--muted); font-size: 12px; }
+.source-include { justify-self: start; display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
 .source-include[aria-pressed="true"] { color: var(--evidence, var(--copper)); }
-.source-reader { min-height: 300px; padding-left: 30px; border-left: 1px solid var(--rule); }
-.source-reader-heading { align-items: center; margin-bottom: 16px; }
-.source-reader-title-wrap { min-width: 0; }
+.source-reader { padding-left: 32px; border-left: 1px solid var(--rule); }
+.source-reader-heading { align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.source-reader-title-wrap { min-width: 0; flex: 1 1 100%; }
+.source-reader-title-wrap h3 { font-size: 30px; }
 .source-reader .source-state { margin-top: 15px; }
 .source-state { color: var(--muted); font-size: 13px; line-height: 1.6; }
-.source-reader-empty { padding: 8px 0; }
-.source-reader-empty p:last-child { color: var(--muted); font-size: 13px; line-height: 1.6; }
-.source-reading-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; color: var(--muted); font-size: 11px; }
+.source-reading-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; color: var(--muted); font-size: 12px; }
 .source-download { min-height: 32px; }
-.source-plain-text { max-height: 60vh; overflow: auto; margin: 0; padding: 18px; border: 1px solid var(--rule); background: var(--document); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--serif); font-size: 15px; line-height: 1.7; }
+.source-plain-text { margin: 28px 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--serif); font-size: 20px; line-height: 1.7; max-width: 72ch; }
 .source-history, .source-metadata { margin-top: 16px; border-top: 1px solid var(--rule); }
 .source-history summary, .source-metadata summary { padding: 11px 0; color: var(--ink); font-size: 12px; font-weight: 600; cursor: pointer; }
 .source-history summary span { color: var(--muted); font-weight: 400; }
 .source-history ol { margin: 0; padding: 0 0 8px; list-style: none; }
 .source-history li { border-top: 1px solid color-mix(in srgb, var(--rule), transparent 35%); }
-.source-history button { display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 9px 0; border: 0; background: transparent; color: var(--ink); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.source-history button { display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 9px 0; border: 0; background: transparent; color: var(--ink); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .source-history button[aria-current="true"] { color: var(--copper); font-weight: 600; }
 .source-history-date { color: var(--muted); }
-.source-metadata dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 14px; margin: 0; padding: 0 0 13px; font-size: 11px; }
+.source-metadata dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 14px; margin: 0; padding: 0 0 13px; font-size: 12px; }
 .source-metadata dt { color: var(--muted); }
 .source-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .source-fragments { padding: 0 0 12px; }
-.source-fragments > summary { padding: 9px 0; color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer; }
+.source-fragments > summary { padding: 9px 0; color: var(--ink); font-size: 12px; font-weight: 600; cursor: pointer; }
 .source-fragments ol { margin: 0; padding-left: 22px; }
 .source-fragments li { padding: 10px 0; border-top: 1px solid var(--rule); }
 .source-fragments li > p { margin: 0 0 5px; color: var(--ink); font-family: var(--serif); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-.source-fragments li > span { color: var(--muted); font-size: 10px; }
+.source-fragments li > span { color: var(--muted); font-size: 12px; }
 .source-fragment-locator { margin-top: 5px; }
-.source-fragment-locator > summary { color: var(--muted); font-size: 10px; cursor: pointer; }
-.source-fragment-locator dl { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 5px 9px; margin: 7px 0; font-size: 10px; }
+.source-fragment-locator > summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.source-fragment-locator dl { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 5px 9px; margin: 7px 0; font-size: 12px; }
 .source-fragment-locator dt { color: var(--muted); }
 .source-fragment-locator dd { margin: 0; overflow-wrap: anywhere; }
-.source-fragment-limit { margin: 0; color: var(--muted); font-size: 10px; }
+.source-fragment-limit { margin: 0; color: var(--muted); font-size: 12px; }
 .source-inline-error { color: var(--error); font-size: 12px; line-height: 1.5; }
 .source-alert { margin: 0 0 18px; }
 .source-notice-link { display: inline-block; margin-top: 10px; color: var(--copper); font-size: 12px; text-underline-offset: 3px; }
-@media (max-width: 900px) {
-  .sources-columns { grid-template-columns: minmax(0, 1fr); gap: 27px; }
+@media (max-width: 760px) {
+  .sources-columns, .sources-columns.with-reader { grid-template-columns: minmax(0, 1fr); gap: 27px; }
   .source-reader { min-height: unset; padding: 24px 0 0; border-top: 1px solid var(--rule); border-left: 0; }
 }
-@media (max-width: 520px) {
-  .sources-heading h2 { font-size: 28px; }
+@media (max-width: 760px) {
+  .sources-heading h1 { font-size: 32px; }
   .source-section-heading { align-items: flex-start; flex-direction: column; }
   .source-mode { width: 100%; }
   .source-mode button { flex: 1 1 40%; }
   .source-form-row { grid-template-columns: minmax(0, 1fr); }
   .source-reader-heading { align-items: flex-start; flex-direction: column; }
-  .source-reader-heading .source-button { width: 100%; }
+  .source-reader-heading .source-button { width: auto; }
+  .source-plain-text { font-size: 18px; }
   .source-metadata dl { grid-template-columns: 105px minmax(0, 1fr); }
+  .source-button, .source-mode button, .source-item-open, .source-include, .source-history button { min-height: 44px; }
+  .source-add > summary, .source-history summary, .source-metadata summary, .source-fragments > summary, .source-fragment-locator > summary { min-height: 44px; }
+  .source-input { min-height: 44px; font-size: 16px; }
 }
+@media (prefers-reduced-motion: reduce) { .source-items li { transition: none; } }
 </style>

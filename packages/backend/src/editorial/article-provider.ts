@@ -4,8 +4,12 @@ import { articleOutputSchema, type ArticleOutput, type ArticleWorkflowRelease } 
 
 export const ARTICLE_CONTRACT = 'article-v1';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_SSE_EVENT_BYTES = 1024 * 1024;
-const MAX_INPUT_BYTES = 1024 * 1024;
+// Loop events repeat bounded editorial state; 90 passes can include multiple
+// <=350 KiB state snapshots. These limits do not enlarge canonical article output.
+const MAX_SSE_RESPONSE_BYTES = 128 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024;
+const MAX_EDITORIAL_REPORT_BYTES = 256 * 1024;
+const MAX_INPUT_BYTES = 350000;
 
 type ReleaseArtifact = {
   schemaVersion: 'contextflow-dify-release-v1';
@@ -31,23 +35,19 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'ARTICLE_GENERATION', releaseId: 'article-generation-2026-10-06.1',
-  configDigest: 'e7c7006b74b3215fddead8e9d3a4eb0272056b6c1b558e02a5fbc47c253cae35', publishedWorkflowIdEnv: 'DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'ARTICLE_GENERATION', releaseId: 'article-generation-2026-10-09.2',
+  configDigest: '48bd09585984f739683d3066395c379f1d0651a4b051799f794baa4ea2a3a11b', publishedWorkflowIdEnv: 'DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_ARTICLE_GENERATION_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_ARTICLE_GENERATION_API_KEY', contractVersion: ARTICLE_CONTRACT,
-  promptTemplateVersion: 'article-generation-prompt-v1', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
+  promptTemplateVersion: 'article-generation-editorial-prompt-v2', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
   outputVariable: 'article_json', responseMode: 'streaming', provider: 'dify',
   model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
     max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'article-generation-v1.yml',
-  workflowDslSha256: 'c6be669fa4b126ed5d1d3f3be1d8224fd7a59f37cdbf4fa7dde6f0ec288895a2',
+  workflowDslSha256: '0a13519dc7128378f35f85b369df343dea363a39107fe6b0883df903ee3088b0',
 };
 
-function testEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
-  if (env['NODE_ENV'] !== 'test') return env;
-  return Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith('TEST_')).map(([name, value]) => [name.slice(5), value]));
-}
 export type ArticleWorkflowSettings = ArticleWorkflowRelease & { apiKey: string };
 export class ArticleProviderError extends Error {
   constructor(readonly code: 'CONFIG' | 'AUTH' | 'INVALID_INPUT' | 'INCOMPATIBLE_CONTRACT' | 'QUOTA' | 'RATE_LIMIT' | 'TRANSIENT_TRANSPORT'
@@ -66,7 +66,7 @@ function safeEndpoint(value: string | undefined, allowLocal: boolean): string | 
   } catch { return; }
 }
 function configuredRelease(env: Record<string, string | undefined>): ArticleWorkflowRelease {
-  const effective = testEnvironment(env);
+  const effective = env;
   const endpoint = safeEndpoint(effective[release.apiBaseEnv], effective['NODE_ENV'] !== 'production');
   const workflowId = effective[release.publishedWorkflowIdEnv];
   if (!endpoint || !uuid(workflowId) || effective[release.configDigestEnv] !== release.configDigest) {
@@ -81,7 +81,7 @@ export function articleWorkflowRelease(env: Record<string, string | undefined> =
     configDigest: config.configDigest, contractVersion: config.contractVersion, promptTemplateVersion: config.promptTemplateVersion };
 }
 export function articleWorkflowSettings(env: Record<string, string | undefined> = process.env): ArticleWorkflowSettings {
-  const apiKey = testEnvironment(env)[release.apiKeyEnv];
+  const apiKey = env[release.apiKeyEnv];
   if (!apiKey || apiKey.length > 500) throw new ArticleProviderError('CONFIG', 'The article workflow API key is missing', 'NOT_SUBMITTED');
   return { ...configuredRelease(env), apiKey };
 }
@@ -169,7 +169,7 @@ async function streamRun(response: Response, settings: ArticleWorkflowSettings, 
       if (signal.aborted) throw new ArticleProviderError('TIMEOUT', 'Article workflow exceeded its execution deadline', 'UNKNOWN');
       const next = await reader.read(); if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new ArticleProviderError('INCOMPATIBLE_CONTRACT', 'Article workflow stream exceeded its size limit'); }
+      if (bytes > MAX_SSE_RESPONSE_BYTES) { await reader.cancel(); throw new ArticleProviderError('INCOMPATIBLE_CONTRACT', 'Article workflow stream exceeded its size limit'); }
       buffer += decoder.decode(next.value, { stream: true });
       let boundary: RegExpExecArray | null;
       while ((boundary = /\r?\n\r?\n/u.exec(buffer)) !== null) {
@@ -189,8 +189,21 @@ async function streamRun(response: Response, settings: ArticleWorkflowSettings, 
   return run;
 }
 
+const editorialReportSchema = z.object({
+  schemaVersion: z.literal('article-editorial-report-v1'),
+  status: z.enum(['ready', 'needs_human', 'insufficient_evidence']),
+}).passthrough();
 function extractionFromRun(run: DifyRun): ArticleOutput {
   if (run.data.status !== 'succeeded') throw new ArticleProviderError('PROVIDER_FAILED', 'Article workflow did not succeed', 'KNOWN_FAILED');
+  const report = run.data.outputs?.['editorial_report'];
+  if (typeof report !== 'string' || Buffer.byteLength(report) > MAX_EDITORIAL_REPORT_BYTES) {
+    throw new ArticleProviderError('INCOMPATIBLE_CONTRACT', 'Article workflow editorial report did not match its contract');
+  }
+  const parsedReport = editorialReportSchema.safeParse(safeJson(report));
+  if (!parsedReport.success) throw new ArticleProviderError('INCOMPATIBLE_CONTRACT', 'Article workflow editorial report did not match its contract');
+  if (parsedReport.data.status !== 'ready') {
+    throw new ArticleProviderError('PROVIDER_FAILED', 'Article workflow requires editorial intervention before a candidate can be accepted', 'KNOWN_FAILED');
+  }
   const raw = run.data.outputs?.[release.outputVariable];
   const output = typeof raw === 'string' ? safeJson(raw) : raw;
   const parsed = articleOutputSchema.safeParse(output);

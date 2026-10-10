@@ -21,7 +21,7 @@ export { validateDigitalDocument, originalFilename, DOCUMENT_MAX_BYTES, ImportVa
 export type { DigitalDocument } from './imports/document-validation.js';
 export { normalizeImportUrl, validatePublicUrl, publicAddress, resolveAddresses } from './imports/url-validation.js';
 export type { ResolveAddresses } from './imports/url-validation.js';
-export { ImportProviders, ImportProviderError, IMPORT_CONTRACT, DOCLING_VERSION, FIRECRAWL_OPTIONS, DOCLING_OPTIONS, importProviderSettings, safeImportError } from './imports/providers.js';
+export { ImportProviders, ImportProviderError, IMPORT_CONTRACT, DOCLING_VERSION, FIRECRAWL_OPTIONS, DOCLING_OPTIONS, importProviderSettings, safeImportError, isOfficialFirecrawlCloud } from './imports/providers.js';
 export type { ImportProviderSettings, ImportedSource } from './imports/providers.js';
 export { normalizeImportedText, importedFragments } from './imports/source-text.js';
 export { PrivateAssetStore, privateStorageConfig, STORAGE_MAX_BYTES } from './storage/private-asset-store.js';

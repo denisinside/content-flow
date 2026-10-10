@@ -113,6 +113,32 @@ describe('URL local and remote trust boundaries', () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(policy))).mockResolvedValueOnce(new Response(JSON.stringify(remote)));
     await expect(new ImportProviders({ FIRECRAWL_API_KEY: 'synthetic' }, transport, publicDns).web('https://example.com', settings, new AbortController().signal, vi.fn())).rejects.toMatchObject({ code: 'CONTRACT' });
   });
+  it('uses the regular Firecrawl Cloud API without the custom gateway digest and records the provider-managed boundary', async () => {
+    const cloudSettings = importProviderSettings({ FIRECRAWL_ENDPOINT: 'https://api.firecrawl.dev', FIRECRAWL_VERSION: 'v2' });
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ success: true, data: {
+      markdown: '# Example Domain', metadata: { statusCode: 200, sourceURL: 'https://example.com/', title: 'Example Domain' },
+    } })));
+    const beforeSubmit = vi.fn().mockResolvedValue(undefined);
+    const result = await new ImportProviders({ FIRECRAWL_API_KEY: 'synthetic' }, transport, publicDns)
+      .web('https://example.com/', cloudSettings, new AbortController().signal, beforeSubmit);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0]?.[0]).toBe('https://api.firecrawl.dev/v2/scrape');
+    expect(JSON.parse(String(transport.mock.calls[0]?.[1]?.body))).toMatchObject({ url: 'https://example.com/' });
+    expect(String(transport.mock.calls[0]?.[1]?.body)).not.toContain('contextflowEgress');
+    expect(result).toMatchObject({ text: '# Example Domain', metadata: { provider: 'firecrawl', egressMode: 'firecrawl-cloud', finalUrl: 'https://example.com/' } });
+    expect(result.metadata['policyDigest']).toBeUndefined();
+    expect(beforeSubmit).toHaveBeenCalledTimes(1);
+  });
+  it('does not persist a Firecrawl Cloud result whose reported final URL is private', async () => {
+    const cloudSettings = importProviderSettings({ FIRECRAWL_ENDPOINT: 'https://api.firecrawl.dev', FIRECRAWL_VERSION: 'v2' });
+    const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ success: true, data: {
+      markdown: 'untrusted response', metadata: { statusCode: 200, url: 'http://127.0.0.1/internal' },
+    } })));
+    await expect(new ImportProviders({ FIRECRAWL_API_KEY: 'synthetic' }, transport, publicDns)
+      .web('https://example.com/', cloudSettings, new AbortController().signal, vi.fn()))
+      .rejects.toMatchObject({ code: 'INVALID_URL' });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it('saves exact source metadata from a single bounded request with no browser cookies or alternate provider', async () => {
     const remote = { success: true, data: { markdown: 'Український абзац.\r\n\r\n| А | Б |\n|---|---|\n| 1 | 2 |',
       metadata: { statusCode: 200, title: 'Synthetic fixture', url: 'https://example.com/' }, remoteFetch: { policyDigest, requests: [
