@@ -18,8 +18,8 @@ import build_claim_extraction_dsl as base
 ROOT = Path(__file__).resolve().parents[2]
 DIRECTORY = ROOT / 'packages/backend/src/editorial/workflows/article-generation'
 RUNTIME = ROOT / 'scripts/dify/article_generation_runtime.py'
-RELEASE_ID = 'article-generation-2026-10-09.2'
-PROMPT_VERSION = 'article-generation-editorial-prompt-v2'
+RELEASE_ID = 'article-generation-2026-10-10.1'
+PROMPT_VERSION = 'article-generation-editorial-prompt-v3'
 TARGET = {'difyVersion': '1.17.1', 'graphonVersion': '0.7.0', 'dslVersion': '0.7.0'}
 LIMITS = {'planRepairs': 1, 'sectionRepairs': 2, 'globalRepairs': 2,
           'maxSections': 30, 'maxModelCalls': 200, 'maxStateBytes': 350000,

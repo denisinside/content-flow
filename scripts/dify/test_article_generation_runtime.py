@@ -128,10 +128,11 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(s["order"], ["s" + str(i + 1) for i in range(len(roles))])
 
     def test_final_length_guard_rejects_false_model_pass_and_accepts_exact_boundaries(self):
-        for words, expected in ((64, "needs_human"), (65, "ready"), (135, "ready"), (136, "needs_human")):
+        for words, expected in ((79, "needs_human"), (80, "ready"), (120, "ready"), (121, "needs_human")):
             with self.subTest(words=words):
                 e, s = self.article(False)
                 s["sections"]["s1"][0]["spans"][0]["text"] = synthetic_prose(words=words)
+                s["globalRounds"] = 2
                 s = self.global_reviews(e, s)["state"]
                 final = self.invoke("finalize", e, s)
                 self.assertEqual(final["status"], expected)
@@ -140,6 +141,102 @@ class RuntimeTests(unittest.TestCase):
                     self.assertIsNone(final["article_json"])
                     self.assertEqual(final["editorial_report"]["reasons"], ["ARTICLE_LENGTH_OUT_OF_RANGE"])
                     self.assertIsNone(s["bestArticle"])
+
+    def test_fractional_length_boundaries_and_silent_reviewers_trigger_targeted_repair(self):
+        e, s = self.article(False, 2)
+        e["brief"]["targetLength"] = 201
+        s["sections"]["s1"][0]["spans"][0]["text"] = synthetic_prose(words=40)
+        s["sections"]["s2"][0]["spans"][0]["text"] = synthetic_prose(words=40)
+        # Re-prepare the changed immutable input through the normal fixture path.
+        e, s = self.ready_plan(e)
+        for _ in range(2):
+            s = self.draft(e, s, [block(rt.active_id(s), False, synthetic_prose(words=40))])
+            s = self.invoke("section_review", e, s, review(s, "section"))["state"]
+            s = self.invoke("advance", e, s)["state"]
+        decision = self.global_reviews(e, s)
+        self.assertEqual(rt.article_metrics(e, s)["minWords"], 161)
+        self.assertEqual(rt.article_metrics(e, s)["maxWords"], 241)
+        fractional = rt.article_metrics({"brief": {"targetLength": 101}}, {"sections": {}})
+        self.assertEqual((fractional["minWords"], fractional["maxWords"]), (81, 121))
+        self.assertEqual(decision["done"], 0)
+        self.assertEqual(len(decision["state"]["globalIssues"]), 2)
+        self.assertEqual(len(decision["request"]["allowedPatchTargets"]), 2)
+
+    def corrected_short_article(self, words=79):
+        e, s = self.article(False)
+        s = self.global_reviews(e, s, [issue(severity="minor")])["state"]
+        s = self.invoke("patch", e, s, {"versionHash": rt.version(s, "global"), "replacements": [
+            {"sectionId": "s1", "blockId": "s1-b1", "block": block(factual=False, value=synthetic_prose("Виправлено.", words=words))}]})["state"]
+        return e, s
+
+    def test_corrected_short_text_is_kept_after_length_repair_budget_without_rollback(self):
+        e, s = self.corrected_short_article()
+        first = self.global_reviews(e, s)
+        self.assertEqual(first["done"], 0)
+        s = self.invoke("patch", e, first["state"], {"versionHash": rt.version(first["state"], "global"), "replacements": [
+            {"sectionId": "s1", "blockId": "s1-b1", "block": block(factual=False, value=synthetic_prose("Виправлено ще раз.", words=78))}]})["state"]
+        s = self.global_reviews(e, s)["state"]
+        final = self.invoke("finalize", e, s)
+        self.assertEqual(final["status"], "ready")
+        self.assertEqual(final["editorial_report"]["metrics"]["wordCount"], 78)
+        self.assertFalse(final["editorial_report"]["restoredEarlierVersion"])
+        self.assertEqual(final["editorial_report"]["warnings"], ["ARTICLE_SHORTER_AFTER_EDIT"])
+        self.assertTrue(all(i["severity"] == "minor" for i in final["editorial_report"]["unresolvedIssues"]))
+        self.assertIn("Виправлено ще раз.", final["article_json"]["content"]["document"]["content"][1]["content"][0]["text"])
+
+    def test_failed_length_only_noop_keeps_already_reviewed_corrected_short_text(self):
+        e, s = self.corrected_short_article()
+        s = self.global_reviews(e, s)["state"]
+        result = self.invoke("patch", e, s, {"versionHash": rt.version(s, "global"), "replacements": [
+            {"sectionId": "s1", "blockId": "s1-b1", "block": s["sections"]["s1"][0]}]})
+        self.assertEqual(result["done"], 1)
+        final = self.invoke("finalize", e, result["state"])
+        self.assertEqual(final["status"], "ready")
+        self.assertEqual(final["editorial_report"]["metrics"]["wordCount"], 79)
+
+    def test_noop_with_remaining_editorial_issue_is_not_a_length_only_exception(self):
+        e, s = self.article(False)
+        s = self.global_reviews(e, s, [issue()])["state"]
+        s = self.invoke("patch", e, s, {"versionHash": rt.version(s, "global"), "replacements": [
+            {"sectionId": "s1", "blockId": "s1-b1", "block": block(factual=False, value=synthetic_prose("Виправлено.", words=79))}]})["state"]
+        s = self.global_reviews(e, s, [issue(quote="Виправлено", severity="minor")])["state"]
+        result = self.invoke("patch", e, s, {"versionHash": rt.version(s, "global"), "replacements": [
+            {"sectionId": "s1", "blockId": "s1-b1", "block": s["sections"]["s1"][0]}]})
+        final = self.invoke("finalize", e, result["state"])
+        self.assertEqual(final["status"], "needs_human")
+        self.assertEqual(final["editorial_report"]["reasons"], ["EDITOR_NO_PROGRESS"])
+        self.assertIsNone(final["article_json"])
+
+    def test_short_exception_does_not_waive_substantive_or_stale_reviews_or_overlength(self):
+        for mode in ("substantive", "stale", "overlength", "unchanged-issue"):
+            with self.subTest(mode=mode):
+                e, s = self.corrected_short_article(121 if mode == "overlength" else 79)
+                s["globalRounds"] = 2
+                issues = [issue(quote="Виправлено", severity="major" if mode == "substantive" else "minor")] if mode in ("substantive", "unchanged-issue") else []
+                if mode == "substantive":
+                    s["bestArticle"] = None
+                s = self.global_reviews(e, s, issues)["state"]
+                if mode == "stale":
+                    s["reviews"]["factual"]["versionHash"] = "old"
+                final = self.invoke("finalize", e, s)
+                self.assertEqual(final["status"], "needs_human")
+                self.assertIsNone(final["article_json"])
+
+    def test_patch_cannot_replace_only_section_body_with_heading(self):
+        for scope in ("section", "global"):
+            with self.subTest(scope=scope):
+                e, s = self.article(False) if scope == "global" else self.ready_plan(fixture(False))
+                if scope == "global":
+                    s = self.global_reviews(e, s, [issue(severity="minor")])["state"]
+                else:
+                    s = self.draft(e, s)
+                    s = self.invoke("section_review", e, s, review(s, "section", [issue()]))["state"]
+                value = block(factual=False, value="Короткий заголовок")
+                value.update(type="heading", level=3)
+                patch = {"versionHash": rt.version(s, scope), "replacements": [
+                    {"sectionId": "s1", "blockId": "s1-b1", "block": value}]}
+                with self.assertRaisesRegex(ValueError, "EMPTY_SECTION"):
+                    self.invoke("patch" if scope == "global" else "section_patch", e, s, patch)
 
     def test_plan_array_limits_remain_hard_guards_without_native_maxitems(self):
         e = fixture(False)

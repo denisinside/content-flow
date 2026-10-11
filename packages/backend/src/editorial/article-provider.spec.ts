@@ -19,6 +19,15 @@ const signal = () => new AbortController().signal;
 const sse = (...events: unknown[]) => new Response(events.map(value => `data: ${JSON.stringify(value)}\n\n`).join(''),
   { headers: { 'Content-Type': 'text/event-stream' } });
 describe('controlled article workflow boundary', () => {
+  it('accepts a ready reviewed short-after-edit candidate with an explicit length warning', async () => {
+    const runId = randomUUID(), settings = articleWorkflowSettings(env);
+    const report = JSON.stringify({ schemaVersion: 'article-editorial-report-v1', status: 'ready',
+      humanApprovalRequired: true, lengthPolicy: 'shorter_after_edit', warnings: ['ARTICLE_SHORTER_AFTER_EDIT'],
+      restoredEarlierVersion: false, metrics: { targetWords: 100, minWords: 80, maxWords: 120, wordCount: 79 } });
+    const provider = new DifyArticleProvider(async () => sse({ event: 'workflow_finished', workflow_run_id: runId,
+      data: { workflow_id: settings.workflowId, status: 'succeeded', outputs: { article_json: output, editorial_report: report } } }));
+    expect((await provider.execute(settings, randomUUID(), input, signal(), async () => {}, async () => {})).output).toEqual(output);
+  });
   it('uses one DIFY mapping in development, test and production', () => {
     for (const NODE_ENV of ['development', 'test', 'production']) {
       expect(articleWorkflowSettings({ ...env, NODE_ENV })).toMatchObject({

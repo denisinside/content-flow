@@ -1,15 +1,15 @@
 {
   "schemaVersion": "contextflow-dify-release-v1",
   "operation": "ARTICLE_GENERATION",
-  "releaseId": "article-generation-2026-10-09.2",
+  "releaseId": "article-generation-2026-10-10.1",
   "contractVersion": "article-v1",
-  "promptTemplateVersion": "article-generation-editorial-prompt-v2",
+  "promptTemplateVersion": "article-generation-editorial-prompt-v3",
   "promptTemplateFile": "prompt.md",
-  "promptSha256": "0b1d256d4a9342d560018f56248e1c994ae23913a608c513a541799daeb50f5a",
+  "promptSha256": "f24ae40c4f904c1517c3d72fa8da562a9812f8b8a9397237a5dfef4a35009a3b",
   "workflowDslFile": "article-generation-v1.yml",
-  "workflowDslSha256": "0a13519dc7128378f35f85b369df343dea363a39107fe6b0883df903ee3088b0",
+  "workflowDslSha256": "334350bc8cf36a9b56b2f641015bd2da35aa5bf94170e1d82a1672a23046b87a",
   "runtimeFile": "scripts/dify/article_generation_runtime.py",
-  "runtimeSha256": "339a214da861906229e7d0459c1fdba88df8bfa24ee86c07765e234d3b609b19",
+  "runtimeSha256": "bae0cecb48861b85703008b74e410dcbe715ea8ea6049b4542c654f7b3ae34c2",
   "target": {
     "difyVersion": "1.17.1",
     "graphonVersion": "0.7.0",
@@ -49,5 +49,5 @@
       "service_tier": "standard"
     }
   },
-  "configDigest": "48bd09585984f739683d3066395c379f1d0651a4b051799f794baa4ea2a3a11b"
+  "configDigest": "ffb4847aa44ed06600e209ce7cee171fafd965d062ebe3003ec4c74c7d2d36ab"
 }

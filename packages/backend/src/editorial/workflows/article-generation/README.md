@@ -1,6 +1,6 @@
 # Редакційний workflow статті
 
-Локальний release `article-generation-2026-10-09.2` замінює одноразову генерацію на планування, послідовне написання з рев’ю та перевірку цілого тексту. Артефакт містить **51 ноду і 3 окремі Loop**. Ціль сумісності — Dify **1.17.1**, Graphon **0.7.0**; імпорт, publish-check та живий модельний прогін у конкретному Dify workspace перевіряються окремо.
+Локальний release `article-generation-2026-10-10.1` замінює одноразову генерацію на планування, послідовне написання з рев’ю та перевірку цілого тексту. Артефакт містить **51 ноду і 3 окремі Loop**. Ціль сумісності — Dify **1.17.1**, Graphon **0.7.0**; імпорт, publish-check та живий модельний прогін у конкретному Dify workspace перевіряються окремо.
 
 Сумісність із Gemini: native `maxItems` замінено описом межі в модельних JSON-схемах. Code жорстко перевіряє всі межі, включно з 60 блоками розділу, 60 адресними замінами та 12 пунктами paragraphPlan/avoidRepeating. Усі чотири типи схем прийняті прямими Gemini API запитами 2026-10-09; повний Dify прогін потрібний після публікації.
 
@@ -54,7 +54,7 @@ flowchart TD
 - Зауваження: `id`, `severity`, `category`, `sectionId`, `blockId`, точна `quote`, `instruction`, `acceptance`. Цитата мусить існувати в поточному блоці. Зауваження до погодженого заголовка може стати блокером для людини.
 - Рев’ю і патч містять `versionHash`. Застарілі зауваження/патчі відхиляються. Патч змінює лише названі блоки та зберігає їхні IDs; після зміни старі глобальні рев’ю скидаються.
 - Суттєві локальні дефекти, які не знято після двох правок, переходять у `localBlockers`. Глобальні рев’ю мають перевірити їх і явно закрити; сам факт завершення Loop їх не прибирає.
-- Локально зберігається краща валідна перевірена версія. Якщо пізніша глобальна косметична правка погіршує текст, можна повернути раніше повністю перевірену версію без суттєвих дефектів. Звіт позначає `restoredEarlierVersion`.
+- Локально зберігається краща валідна перевірена версія. Повернення до неї можливе через суттєве змістове погіршення або локальні блокери, але не лише через кількість слів. Звіт позначає `restoredEarlierVersion`.
 - FACTUAL використовує лише передані погоджені claim revisions і їхні SUPPORTS evidence IDs. Нотатки та зразки стилю не є доказами. Правки не можуть втратити покриття вже використаних чи призначених фактів. Обов’язкові факти перевіряються перед фінальним виходом.
 - CREATIVE не має доказових позначок і не отримує статусу фактологічно перевіреного матеріалу.
 - Детермінований компілятор формує обмежений Tiptap JSON. Evidence quote дорівнює фактичному тексту позначеного span, зокрема після злиття суміжних однакових посилань.
@@ -128,8 +128,21 @@ Graph-тести запускають саме експортований YAML �
 
 ## Follow-up from real model execution (2026-10-09)
 
-Release 2026-10-09.2 fixes actual prompt interpolation through Jinja. Short valid plans with only introduction/conclusion roles generate the first section as body while preserving approved IDs, titles and purposes. The actual final body must contain 65–135% of brief.targetLength; otherwise the report is needs_human / ARTICLE_LENGTH_OUT_OF_RANGE and article_json is empty, even when every reviewer returns no findings. Metrics exclude inserted title/H2 and include generated section blocks. Only reviewed in-range versions qualify for rollback.
+Release 2026-10-09.2 fixes actual prompt interpolation through Jinja. Short valid plans with only introduction/conclusion roles generate the first section as body while preserving approved IDs, titles and purposes. The historical .2 release required65–135% of brief.targetLength; release2026-10-10.1 supersedes that policy below. Metrics exclude inserted title/H2 and include generated section blocks. Only reviewed in-range versions qualify for rollback.
 
 Unmapped nonempty whitespace connectors between factual spans are preserved; empty spans, control characters, whitespace-only evidence and wholly empty blocks remain invalid. Planner and reviewers now distinguish evidence insufficient for the target length from feasible writing, and check actual audience/vocabulary and final length. These guards cannot prove editorial quality; read actual text before human approval. See docs/LIVE_DIFY_CHECK_2026-10-09.md for remote failures and subsequent local real-model receipts.
 
-The editor receives an explicit allowedPatchTargets list; unflagged targets remain forbidden. An otherwise valid patch that changes no text ends needs_human / EDITOR_NO_PROGRESS with no candidate; it does not manufacture success or discard pending findings.
+The editor receives an explicit allowedPatchTargets list; unflagged targets remain forbidden. A patch that changes no text normally ends needs_human / EDITOR_NO_PROGRESS. The current release has one narrow length-only exception on an already improved, fully reviewed short version, described below.
+
+
+## Обсяг і збереження корисної редактури — 2026-10-10.1
+
+- Звичайний діапазон тіла статті та сумарного плану — **80–120%** brief.targetLength; minWords округлено вгору, maxWords вниз. Ціль200дає160–240, ціль101дає81–121.
+- Code сам додає точні зауваження category=length і по одному редагованому блоку в кожному розділі. Це запускає наявні максимум2глобальні правки навіть за порожнього модельного рев’ю. Кожна змінена версія повторно проходить усі3фінальні рев’ю.
+- Дефіцит слів сам по собі не повертає старий текст. Після ліміту правок коротший виправлений текст може стати readyіз warnings=[ARTICLE_SHORTER_AFTER_EDIT], lengthPolicy=shorter_after_edit та minorзауваженнями про обсяг. Це кандидат для людини, не погоджений текст.
+- Виняток потребує попередньої повністю перевіреної версії в діапазоні з редакторськими зауваженнями, реальної глобальної правки, іншого hashі меншої зваженої кількості non-lengthзауважень у поточних трьох рев’ю. Неусунені major/critical, локальні блокери, відсутні факти й неактуальні рев’ю блокують результат. Модельна оцінка покращення не є доказом якості.
+- Якщо наступна спроба виправити **тільки обсяг** нічого не змінила, можна завершити на вже перевіреному виправленому короткому тексті з тим самим попередженням. Інші no-opправки залишаються EDITOR_NO_PROGRESS.
+- Первинний короткий текст, просте редагування обсягу без усунення редакторських зауважень та текст понад120%не отримують винятку. Вони ремонтуються або завершуються needs_humanбез кандидата.
+- Редактор зберігає правки й розвиває лише дозволені блоки корисним матеріалом; не повертає канцеляризми та не вигадує наповнення. Секція після патча повинна зберегти хоча б один не-headingблок.
+
+Warningsі metricsповертаються у Dify editorial_report. Поточний backendперевіряє статус звіту й приймає readyкандидат, але звіт ще не зберігається/не показується в UI. Посилення перевірки непідтверджених домислів відкладено за рішенням користувача. Для цього релізу треба повторно опублікувати лише основний articleappі оновити його UUID/configDigest; claimsі outlineне змінювались, активна.envне перезаписана.

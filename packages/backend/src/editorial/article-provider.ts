@@ -35,17 +35,17 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'ARTICLE_GENERATION', releaseId: 'article-generation-2026-10-09.2',
-  configDigest: '48bd09585984f739683d3066395c379f1d0651a4b051799f794baa4ea2a3a11b', publishedWorkflowIdEnv: 'DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'ARTICLE_GENERATION', releaseId: 'article-generation-2026-10-10.1',
+  configDigest: 'ffb4847aa44ed06600e209ce7cee171fafd965d062ebe3003ec4c74c7d2d36ab', publishedWorkflowIdEnv: 'DIFY_ARTICLE_GENERATION_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_ARTICLE_GENERATION_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_ARTICLE_GENERATION_API_KEY', contractVersion: ARTICLE_CONTRACT,
-  promptTemplateVersion: 'article-generation-editorial-prompt-v2', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
+  promptTemplateVersion: 'article-generation-editorial-prompt-v3', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
   outputVariable: 'article_json', responseMode: 'streaming', provider: 'dify',
   model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
     max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'article-generation-v1.yml',
-  workflowDslSha256: '0a13519dc7128378f35f85b369df343dea363a39107fe6b0883df903ee3088b0',
+  workflowDslSha256: '334350bc8cf36a9b56b2f641015bd2da35aa5bf94170e1d82a1672a23046b87a',
 };
 
 export type ArticleWorkflowSettings = ArticleWorkflowRelease & { apiKey: string };

@@ -178,13 +178,60 @@ def article_metrics(e, s):
     target = e["brief"]["targetLength"]
     return {"wordCount": sum(len(re.findall(r"\S+", block_text(b)))
                               for rows in s["sections"].values() for b in rows),
-            "targetWords": target, "minWords": (65 * target + 99) // 100,
-            "maxWords": (135 * target) // 100}
+            "targetWords": target, "minWords": (80 * target + 99) // 100,
+            "maxWords": (120 * target) // 100}
 
 
 def article_length_valid(e, s):
     metrics = article_metrics(e, s)
     return metrics["minWords"] <= metrics["wordCount"] <= metrics["maxWords"]
+
+
+def editorial_issues(issues):
+    # A critical finding is never waived, even if labelled as length.
+    return [i for i in issues if i["category"] != "length" or i["severity"] == "critical"]
+
+
+def shorter_after_edit(e, s):
+    baseline = s.get("lengthEditBaseline")
+    return bool(baseline and s["globalRounds"] > 0 and
+                version(s, "global") != baseline["versionHash"] and
+                all(s["reviews"].get(scope, {}).get("versionHash") == version(s, "global") for scope in SCOPES) and
+                article_metrics(e, s)["wordCount"] < article_metrics(e, s)["minWords"] and
+                not significant(editorial_issues(s["globalIssues"])) and not s["localBlockers"] and
+                issue_score(editorial_issues(s["globalIssues"])) < baseline["issueScore"])
+
+
+def length_findings(e, s):
+    metrics = article_metrics(e, s)
+    if article_length_valid(e, s):
+        return []
+    # One real editable anchor per section; never force the whole shortage into
+    # an introduction. This bounded list is also the editor's patch allowlist.
+    findings = []
+    for row in s["plan"]["sections"]:
+        sid = row["sectionId"]
+        block = max((b for b in s["sections"][sid] if b["type"] != "heading"),
+                    key=lambda b: len(block_text(b)))
+        findings.append({"id": "controller-length-" + sid, "severity": "major", "category": "length",
+            "sectionId": sid, "blockId": block["id"], "quote": block_text(block)[:200],
+            "instruction": "Тіло статті має " + str(metrics["wordCount"]) + " слів; ціль " +
+                str(metrics["targetWords"]) + ", діапазон " + str(metrics["minWords"]) + "–" +
+                str(metrics["maxWords"]) + ". Скоригуйте обсяг у дозволених блоках, зберігши вже виправлений текст. " +
+                "Не повертайте усунуті дефекти, не вигадуйте факти і не додавайте порожнє наповнення.",
+            "acceptance": "Змістовний текст у межах 80–120% цілі зі збереженими фактами та редакторськими правками."})
+    return findings
+
+
+def finish_shorter_after_edit(e, s):
+    if not shorter_after_edit(e, s):
+        return False
+    for issue in s["globalIssues"]:
+        if issue["category"] == "length" and issue["severity"] != "critical":
+            issue["severity"] = "minor"
+    s["reviewedFinalHash"] = version(s, "global")
+    s["lengthException"] = True
+    return True
 
 
 def coverage(rows):
@@ -382,6 +429,8 @@ def apply_patch(raw, e, s, scope):
     if before - coverage(candidate):
         fail("PATCH_COVERAGE_REGRESSION")
     for sid, rows in candidate.items():
+        if not any(b["type"] != "heading" for b in rows):
+            fail("EMPTY_SECTION")
         if set(plan_section(s, sid)["claimRevisionIds"]) - coverage({sid: rows}):
             fail("PATCH_SECTION_REGRESSION")
     if digest(candidate) == digest(s["sections"]):
@@ -466,7 +515,7 @@ def dispatch(operation, p):
              "sections": {}, "sectionReview": None, "sectionRounds": 0, "bestSection": None,
              "localBlockers": [], "memory": [], "reviews": {}, "globalIssues": [], "globalRounds": 0,
              "closureVotes": {}, "history": [], "reviewedFinalHash": None, "bestArticle": None,
-             "restoredEarlierVersion": False}
+             "restoredEarlierVersion": False, "lengthEditBaseline": None, "lengthException": False}
         return emit(s, plan_request(e, s), editorial_json=dumps(e))
     s = obj(load(p.get("state_json", p.get("state"))), ("schemaVersion", "inputHash", "status", "calls"))
     size(s)
@@ -519,7 +568,7 @@ def dispatch(operation, p):
         if set(e["brief"]["requiredClaimRevisionIds"]) - assigned:
             fail("PLAN_REQUIRED_CLAIMS")
         total = sum(row["targetWords"] for row in sections)
-        if not e["brief"]["targetLength"] * .65 <= total <= e["brief"]["targetLength"] * 1.35:
+        if not (80 * e["brief"]["targetLength"] + 99) // 100 <= total <= (120 * e["brief"]["targetLength"]) // 100:
             fail("PLAN_LENGTH")
         if not any(row["role"] == "body" for row in sections):
             # Role is scheduling metadata rather than the approved structure.
@@ -642,6 +691,7 @@ def dispatch(operation, p):
                     v = copy.deepcopy(issue)
                     v["id"] = scope + "-r" + str(s["globalRounds"]) + "-" + digest(v["id"])[:24]
                     merged.append(v)
+        merged.extend(length_findings(e, s))
         s["globalIssues"] = merged
         closed = {v for values in s["closureVotes"].values() for v in values}
         s["localBlockers"] = [i for i in s["localBlockers"] if i["id"] not in closed]
@@ -657,7 +707,7 @@ def dispatch(operation, p):
         editable = [i for i in merged if i["blockId"] not in ("title", "heading")]
         done = not editable or s["globalRounds"] >= 2 or significant(immutable)
         if done:
-            if (significant(merged) or s["localBlockers"] or not article_length_valid(e, s)) and s["bestArticle"] is not None:
+            if (significant(editorial_issues(merged)) or s["localBlockers"]) and s["bestArticle"] is not None:
                 best = s["bestArticle"]
                 if article_length_valid(e, {"sections": best["sections"]}):
                     s["sections"] = copy.deepcopy(best["sections"])
@@ -666,19 +716,29 @@ def dispatch(operation, p):
                     s["localBlockers"] = []
                     s["restoredEarlierVersion"] = True
                     final_hash = best["versionHash"]
+            finish_shorter_after_edit(e, s)
             s["reviewedFinalHash"] = final_hash
             if significant(s["globalIssues"]) or s["localBlockers"]:
-                s["status"], s["reasons"] = "needs_human", ["UNRESOLVED_EDITORIAL_ISSUES"]
+                reason = "UNRESOLVED_EDITORIAL_ISSUES" if significant(editorial_issues(s["globalIssues"])) or s["localBlockers"] else "ARTICLE_LENGTH_OUT_OF_RANGE"
+                s["status"], s["reasons"] = "needs_human", [reason]
         return emit(s, article_request(e, s), done=done)
     if operation == "patch":
         if s["globalRounds"] >= 2:
             fail("GLOBAL_PATCH_LIMIT")
         if not call(s):
             return emit(s, done=True)
+        # Only a fully reviewed in-range pre-edit version with real editorial
+        # findings can justify retaining an improved short version later.
+        if article_length_valid(e, s) and editorial_issues(s["globalIssues"]):
+            s["lengthEditBaseline"] = {"versionHash": version(s, "global"),
+                "issueScore": issue_score(editorial_issues(s["globalIssues"]))}
         if not apply_patch(raw, e, s, "global"):
+            if not editorial_issues(s["globalIssues"]) and finish_shorter_after_edit(e, s):
+                return emit(s, done=True)
             s["status"], s["reasons"] = "needs_human", ["EDITOR_NO_PROGRESS"]
             return emit(s, done=True)
         s["globalRounds"] += 1
+        s["lengthException"] = False
         s["reviewedFinalHash"] = None
         return emit(s, article_request(e, s))
     if operation == "finalize":
@@ -693,7 +753,7 @@ def dispatch(operation, p):
                 s["status"], s["reasons"] = "needs_human", ["UNRESOLVED_EDITORIAL_ISSUES"]
             elif set(e["brief"]["requiredClaimRevisionIds"]) - coverage(s["sections"]):
                 s["status"], s["reasons"] = "needs_human", ["REQUIRED_CLAIMS_MISSING"]
-            elif not article_length_valid(e, s):
+            elif not article_length_valid(e, s) and not (s["lengthException"] and shorter_after_edit(e, s)):
                 s["status"], s["reasons"] = "needs_human", ["ARTICLE_LENGTH_OUT_OF_RANGE"]
             else:
                 article = compile_article(e, s)
@@ -705,6 +765,8 @@ def dispatch(operation, p):
                   "planRevisions": s["planRounds"],
                   "restoredEarlierVersion": s["restoredEarlierVersion"],
                   "metrics": article_metrics(e, s),
+                  "lengthPolicy": "shorter_after_edit" if s["lengthException"] else "standard_range",
+                  "warnings": ["ARTICLE_SHORTER_AFTER_EDIT"] if s["lengthException"] else [],
                   "sectionHistory": s["history"], "unresolvedIssues": s["localBlockers"] + s["globalIssues"],
                   "humanApprovalRequired": True, "semanticChecks": "model_review_not_proof"}
         if s["status"] != "ready" and s["planReview"] and significant(s["planReview"]["issues"]):

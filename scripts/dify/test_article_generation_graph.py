@@ -85,8 +85,8 @@ class Scenario:
             sid = request['section']['sectionId']
             self.section_order.append(sid)
             value = fixtures.block(sid, self.editorial['contentMode'] == 'FACTUAL')
-            if self.mode in ('under-length', 'over-length'):
-                value['spans'][0]['text'] = fixtures.synthetic_prose(words=64 if self.mode == 'under-length' else 136)
+            if self.mode in ('under-length', 'over-length', 'persistent-short'):
+                value['spans'][0]['text'] = fixtures.synthetic_prose(words=121 if self.mode == 'over-length' else 79)
             if self.editorial['contentMode'] == 'CREATIVE':
                 value['spans'][0].update(claimRevisionId='', evidenceId='')
             return {'sectionId': sid, 'blocks': [value]}
@@ -111,6 +111,11 @@ class Scenario:
                 current = copy.deepcopy(next(b for b in rows if b['id'] == key[1]))
                 if self.mode == 'no-progress':
                     pass
+                elif self.mode == 'corrected-short-noop' and count > 1:
+                    pass
+                elif self.mode in ('corrected-short', 'corrected-short-noop', 'persistent-short', 'corrected-overlong'):
+                    words = 121 + count if self.mode == 'corrected-overlong' else 80 - count
+                    current['spans'][0]['text'] = fixtures.synthetic_prose('Виправлено: результат залежить від умов.', words=words)
                 elif self.mode == 'worst-case':
                     text = current['spans'][0]['text']
                     current['spans'][0]['text'] = fixtures.synthetic_prose('Результат виправлено', suffix='2.' if text.endswith('1.') else '1.')
@@ -127,6 +132,8 @@ class Scenario:
         if node.id == 'global-reviewer':
             if self.mode in ('global-repair', 'no-progress') and count == 1:
                 issues = [fixtures.issue()]
+            if self.mode in ('corrected-short', 'corrected-short-noop', 'corrected-overlong') and count == 1:
+                issues = [fixtures.issue(severity='minor')]
             if self.mode == 'unresolved':
                 quote = request['sections']['s1'][0]['spans'][0]['text'][:10]
                 issues = [fixtures.issue(quote=quote, severity='critical')]
@@ -211,10 +218,31 @@ class GraphTests(unittest.TestCase):
         for mode in ('under-length', 'over-length'):
             output, errors = self.execute(Scenario(fixtures.fixture(False), mode))
             self.assertEqual(errors, [])
-            self.assertEqual(output['article_json'], '')
             report = json.loads(output['editorial_report'])
+            self.assertEqual(report['status'], 'ready')
+            self.assertEqual(report['globalRevisions'], 1)
+            self.assertEqual(report['metrics']['wordCount'], 100)
+
+    def test_corrected_short_text_survives_budget_or_length_only_noop(self):
+        for mode, words in [('corrected-short', 78), ('corrected-short-noop', 79)]:
+            output, errors = self.execute(Scenario(fixtures.fixture(False), mode))
+            self.assertEqual(errors, [], mode)
+            report = json.loads(output['editorial_report'])
+            self.assertEqual(report['status'], 'ready')
+            self.assertFalse(report['restoredEarlierVersion'])
+            self.assertEqual(report['metrics']['wordCount'], words)
+            self.assertEqual(report['warnings'], ['ARTICLE_SHORTER_AFTER_EDIT'])
+            self.assertIn('Виправлено', output['article_json'])
+
+    def test_initial_short_and_edited_overlong_stay_blocked(self):
+        for mode in ('persistent-short', 'corrected-overlong'):
+            output, errors = self.execute(Scenario(fixtures.fixture(False), mode))
+            self.assertEqual(errors, [], mode)
+            report = json.loads(output['editorial_report'])
+            self.assertEqual(output['article_json'], '')
             self.assertEqual(report['status'], 'needs_human')
             self.assertEqual(report['reasons'], ['ARTICLE_LENGTH_OUT_OF_RANGE'])
+            self.assertFalse(report['restoredEarlierVersion'])
 
     def test_plan_section_and_global_revision_branches(self):
         for mode, counter in [('plan-repair', 'planner'), ('local-repair', 'section-editor'), ('global-repair', 'global-editor')]:
