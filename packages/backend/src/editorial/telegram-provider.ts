@@ -35,8 +35,8 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'TELEGRAM_GENERATION', releaseId: 'telegram-generation-2026-10-10.1',
-  configDigest: '2f6029054537b1039aa047a3f635b0b635f68869c5ea5ba7f14a1c50560aa846', publishedWorkflowIdEnv: 'DIFY_TELEGRAM_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'TELEGRAM_GENERATION', releaseId: 'telegram-generation-2026-10-10.2',
+  configDigest: 'd3254a4306bae3707068f1159020eb37d9783679f13993d6793c2d03fdbcf8a7', publishedWorkflowIdEnv: 'DIFY_TELEGRAM_WORKFLOW_ID',
   configDigestEnv: 'DIFY_TELEGRAM_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_TELEGRAM_API_KEY', contractVersion: TELEGRAM_CONTRACT,
   promptTemplateVersion: 'telegram-generation-v1', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
@@ -45,7 +45,7 @@ const release: ReleaseArtifact = {
     max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'telegram-generation-v1.yml',
-  workflowDslSha256: '688fa420088740cc5dbc65a90f37ddb150bab817d65ab213ef4be236d1b97f79',
+  workflowDslSha256: 'b84a7bec0941e39e047f5242e296c0ec214ef964f800d16171e305c7083d38cd',
 };
 
 export type TelegramWorkflowSettings = TelegramWorkflowRelease & { apiKey: string };

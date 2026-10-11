@@ -2,6 +2,7 @@
 """Build the native Telegram candidate workflow for Dify 1.17.1 / Graphon 0.7.0."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -13,7 +14,7 @@ import build_claim_extraction_dsl as base
 ROOT = Path(__file__).resolve().parents[2]
 DIRECTORY = ROOT / "packages/backend/src/editorial/workflows/telegram-generation"
 RUNTIME = ROOT / "scripts/dify/telegram_generation_runtime.py"
-RELEASE_ID = "telegram-generation-2026-10-10.1"
+RELEASE_ID = "telegram-generation-2026-10-10.2"
 PROMPT_VERSION = "telegram-generation-v1"
 TARGET = {"difyVersion": "1.17.1", "graphonVersion": "0.7.0", "dslVersion": "0.7.0"}
 LIMITS = {"maxInputBytes": 350000, "maxTextUtf16": 4096, "maxParagraphs": 20,
@@ -70,6 +71,27 @@ def prompts() -> dict[str, str]:
     return result
 
 
+def embedded_runtime() -> str:
+    source = RUNTIME.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(RUNTIME))
+    guards = [statement for statement in tree.body
+              if isinstance(statement, ast.If)
+              and isinstance(statement.test, ast.Compare)
+              and isinstance(statement.test.left, ast.Name)
+              and statement.test.left.id == "__name__"
+              and len(statement.test.ops) == 1
+              and isinstance(statement.test.ops[0], ast.Eq)
+              and len(statement.test.comparators) == 1
+              and isinstance(statement.test.comparators[0], ast.Constant)
+              and statement.test.comparators[0].value == "__main__"]
+    if len(guards) != 1 or guards[0] is not tree.body[-1]:
+        raise ValueError("Telegram runtime must end with exactly one standalone CLI guard")
+    lines = source.splitlines(keepends=True)
+    guard = guards[0]
+    del lines[guard.lineno - 1:guard.end_lineno]
+    return "".join(lines)
+
+
 class Builder:
     def __init__(self):
         self.document = base.build_baseline_document()
@@ -80,7 +102,7 @@ class Builder:
         self.types: dict[str, str] = {}
         self.roles = prompts()
         self.schemas = schemas()
-        self.runtime = re.sub(r"^def main\(", "def runtime_main(", RUNTIME.read_text(encoding="utf-8"),
+        self.runtime = re.sub(r"^def main\(", "def runtime_main(", embedded_runtime(),
                               count=1, flags=re.MULTILINE)
 
     def node(self, ident: str, kind: str, data: dict, x: int, y: int,

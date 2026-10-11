@@ -1,9 +1,13 @@
 """Run the exported Telegram graph on Graphon 0.7.0 with synthetic model calls."""
+import contextlib
 import hashlib
+import io
 import json
 import logging
+import sys
 import time
 import unittest
+from unittest.mock import patch
 
 import jsonschema
 import yaml
@@ -30,8 +34,11 @@ from graphon.runtime.variable_pool import VariablePool
 
 class LocalExecutor:
     def execute(self, *, language, code, inputs):
-        namespace = {}
-        exec(compile(code, "<telegram-code-node>", "exec"), namespace)
+        # Dify's Python sandbox runs code with __name__ set to __main__. This
+        # catches source-file CLI blocks accidentally copied into each node.
+        namespace = {"__name__": "__main__"}
+        with patch.object(sys, "argv", ["sandbox"]):
+            exec(compile(code, "<telegram-code-node>", "exec"), namespace)
         return namespace["main"](**inputs)
 
     def is_execution_error(self, error):
@@ -120,6 +127,21 @@ class Factory:
 
 
 class TelegramGraphTests(unittest.TestCase):
+    def test_exported_code_nodes_are_safe_to_load_as_main_without_cli_arguments(self):
+        document = builder.build_document()
+        code_nodes = [node for node in document["workflow"]["graph"]["nodes"]
+                      if node["data"]["type"] == "code"]
+        self.assertTrue(code_nodes)
+        for node in code_nodes:
+            with self.subTest(node=node["id"]):
+                stdout = io.StringIO()
+                namespace = {"__name__": "__main__"}
+                with contextlib.redirect_stdout(stdout):
+                    with patch.object(sys, "argv", ["sandbox"]):
+                        exec(compile(node["data"]["code"], f"<{node['id']}-code-node>", "exec"), namespace)
+                self.assertTrue(callable(namespace.get("main")))
+                self.assertEqual(stdout.getvalue(), "")
+
     def execute(self, scenario):
         path = builder.DIRECTORY / "telegram-generation-v1.yml"
         document = yaml.safe_load(path.read_text(encoding="utf-8"))

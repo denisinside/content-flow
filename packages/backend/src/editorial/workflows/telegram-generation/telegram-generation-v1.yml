@@ -328,7 +328,7 @@ workflow:
       width: 260
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json):
@@ -811,9 +811,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -973,7 +970,7 @@ workflow:
       width: 360
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state, raw):
@@ -1456,9 +1453,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -1539,7 +1533,7 @@ workflow:
       width: 280
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state):
@@ -2022,9 +2016,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -2072,7 +2063,7 @@ workflow:
       width: 300
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state):
@@ -2555,9 +2546,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -2741,7 +2729,7 @@ workflow:
       width: 360
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state, raw):
@@ -3224,9 +3212,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -3308,7 +3293,7 @@ workflow:
       width: 280
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state):
@@ -3791,9 +3776,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -3962,7 +3944,7 @@ workflow:
       width: 360
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state, raw):
@@ -4445,9 +4427,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -4499,7 +4478,7 @@ workflow:
       width: 300
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state):
@@ -4982,9 +4961,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -5168,7 +5144,7 @@ workflow:
       width: 360
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state, raw):
@@ -5651,9 +5627,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:
@@ -5734,7 +5707,7 @@ workflow:
       width: 300
       zIndex: 0
     - data:
-        code: |
+        code: |+
           import json
 
           def main(editorial_json, state):
@@ -6217,9 +6190,6 @@ workflow:
               fail("OPERATION")
 
 
-          if __name__ == "__main__":
-              import sys
-              print(main(sys.argv[1], sys.argv[2]))
         code_language: python3
         outputs:
           repair_required:

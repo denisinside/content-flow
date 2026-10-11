@@ -1,8 +1,14 @@
 # Редакційний workflow Telegram
 
-Локальний release `telegram-generation-2026-10-10.1` генерує окремий допис Telegram для маршрутів `DIRECT` і `ARTICLE_DERIVED`. Ціль імпортованого DSL — Dify **1.17.1** з Graphon **0.7.0** і плагіном Gemini `langgenius/gemini/google`, модель `gemini-3.8-flash`. Статична сумісність і граф перевіряються локально; імпорт, publish-check, доступність моделі в конкретному workspace та якість живого тексту — окремі перевірки.
+Локальний release `telegram-generation-2026-10-10.2` генерує окремий допис Telegram для маршрутів `DIRECT` і `ARTICLE_DERIVED`. Ціль імпортованого DSL — Dify **1.17.1** з Graphon **0.7.0** і плагіном Gemini `langgenius/gemini/google`, модель `gemini-3.8-flash`. Статична сумісність і граф перевіряються локально; імпорт, publish-check, доступність моделі в конкретному workspace та якість живого тексту — окремі перевірки.
 
 ## Потік
+
+Реліз `.2` прибирає standalone CLI-блок лише з вбудованого Code-node runtime: він спричиняв `IndexError` у першому вузлі опублікованого `.1`. Усі експортовані Code nodes і повний Graphon-граф тепер перевіряються з `__name__="__main__"`, без аргументів CLI. Окремий запуск runtime збережено. Prompt, factual guards і межа чотирьох model calls не змінені.
+
+Для розгортання імпортуй поточний `telegram-generation-v1.yml` в існуючий Telegram app і опублікуй його. Після публікації онови фактичний workflow UUID і `DIFY_TELEGRAM_CONFIG_SHA256=d3254a4306bae3707068f1159020eb37d9783679f13993d6793c2d03fdbcf8a7`, перезапусти API/worker і виконай `node scripts/dify/live_telegram_checks.mjs --live --output-dir docs/live-dify-2026-10-10/telegram-fixed-published`. Активний `.env` під час підготовки виправлення не змінювався.
+
+Живий повторний прогін після публікації `.2`: підтверджений Workflow API ID; 10 із 11 сценаріїв технічно пройшли. Один сценарій двічі виявив, що перевірка помилково приймає описові факти за відповідь на бриф про ефективність курсу. Це окрема від виправлення запуску редакційна прогалина; оцінка і приклади — в `docs/LIVE_DIFY_TELEGRAM_RETEST_2026-10-10.md`.
 
 ```mermaid
 flowchart LR
