@@ -1,4 +1,12 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue'
+
+const footer = ref<HTMLElement>()
+const ribbon = ref<SVGGElement>()
+const ribbonWidth = 1400
+const ribbonCopies = [-ribbonWidth, 0, ribbonWidth]
+let disposeMotion = () => {}
+
 const marks = [
   { name: 'pencil', path: 'm4 20 1-5L16 4l4 4L9 19l-5 1ZM14 6l4 4M4 20h7' },
   { name: 'page', path: 'M5 3h10l4 4v14H5zM15 3v5h4M8 12h8M8 16h6' },
@@ -18,10 +26,103 @@ const tiles = Array.from({ length: 42 }, (_, index) => {
   const y = row * 80 + 20
   return { mark: marks[(column + row * 3) % marks.length]!, x, y, angle: [-12, 0, 10, 0][(column + row) % 4] }
 })
+
+onMounted(() => {
+  const element = footer.value
+  const track = ribbon.value
+  if (!element || !track) return
+
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+  const listeners = new AbortController()
+  let visible = false
+  let pointerInside = false
+  let pointerX = 0
+  let direction = 0
+  let velocity = 0
+  let position = 0
+  let lastTime = 0
+  let frame: number | undefined
+
+  function stop() {
+    if (frame !== undefined) cancelAnimationFrame(frame)
+    frame = undefined
+    lastTime = 0
+    velocity = 0
+    track!.style.willChange = ''
+  }
+
+  function tick(time: number) {
+    const elapsed = lastTime ? Math.min((time - lastTime) / 1000, 0.064) : 0
+    lastTime = time
+    const targetVelocity = pointerInside ? direction * 32 : 0
+    // Ease velocity, rather than position: reversals retain momentum, brake,
+    // cross zero and gently accelerate, including during rapid pointer changes.
+    velocity += (targetVelocity - velocity) * (1 - Math.exp(-elapsed / 0.6))
+    position = (position + velocity * elapsed + ribbonWidth) % ribbonWidth
+    track!.style.transform = `translate3d(${position}px, 0, 0)`
+    if (!targetVelocity && Math.abs(velocity) < 0.03) {
+      stop()
+      return
+    }
+    frame = requestAnimationFrame(tick)
+  }
+
+  function syncPlayback() {
+    if (!visible || document.hidden || reducedMotion.matches) {
+      stop()
+      return
+    }
+    if (frame === undefined && (pointerInside || velocity)) {
+      track!.style.willChange = 'transform'
+      frame = requestAnimationFrame(tick)
+    }
+  }
+
+  function updateDirection() {
+    // A small neutral zone prevents jitter at the exact viewport midpoint.
+    const midpoint = window.innerWidth / 2
+    if (pointerX < midpoint - 8) direction = -1
+    else if (pointerX > midpoint + 8) direction = 1
+    syncPlayback()
+  }
+
+  function move(event: PointerEvent) {
+    if (event.pointerType !== 'mouse' && event.pointerType !== 'pen') return
+    pointerInside = true
+    pointerX = event.clientX
+    updateDirection()
+  }
+
+  function leave() {
+    pointerInside = false
+  }
+
+  const observer = new IntersectionObserver(([entry]) => {
+    visible = entry?.isIntersecting ?? false
+    syncPlayback()
+  })
+  observer.observe(element)
+  window.addEventListener('pointermove', move, { passive: true, signal: listeners.signal })
+  window.addEventListener('resize', updateDirection, { signal: listeners.signal })
+  window.addEventListener('blur', leave, { signal: listeners.signal })
+  document.addEventListener('pointerleave', leave, { signal: listeners.signal })
+  document.addEventListener('visibilitychange', syncPlayback, { signal: listeners.signal })
+  reducedMotion.addEventListener('change', syncPlayback, { signal: listeners.signal })
+  disposeMotion = () => {
+    listeners.abort()
+    observer.disconnect()
+    stop()
+  }
+})
+
+onBeforeUnmount(() => disposeMotion())
 </script>
 
 <template>
-  <footer class="editorial-footer">
+  <footer
+    ref="footer"
+    class="editorial-footer"
+  >
     <div
       class="editorial-footer-pattern"
       aria-hidden="true"
@@ -36,21 +137,29 @@ const tiles = Array.from({ length: 42 }, (_, index) => {
         stroke-linejoin="round"
         focusable="false"
       >
-        <svg
-          v-for="(tile, index) in tiles"
-          :key="index"
-          :x="tile.x"
-          :y="tile.y"
-          width="28"
-          height="28"
-          viewBox="0 0 24 24"
-          :transform="`rotate(${tile.angle} ${tile.x + 14} ${tile.y + 14})`"
-        >
-          <path
-            :d="tile.mark.path"
-            :transform="tile.mark.transform"
-          />
-        </svg>
+        <g ref="ribbon">
+          <g
+            v-for="copy in ribbonCopies"
+            :key="copy"
+            :transform="`translate(${copy} 0)`"
+          >
+            <svg
+              v-for="(tile, index) in tiles"
+              :key="index"
+              :x="tile.x"
+              :y="tile.y"
+              width="28"
+              height="28"
+              viewBox="0 0 24 24"
+              :transform="`rotate(${tile.angle} ${tile.x + 14} ${tile.y + 14})`"
+            >
+              <path
+                :d="tile.mark.path"
+                :transform="tile.mark.transform"
+              />
+            </svg>
+          </g>
+        </g>
       </svg>
     </div>
     <div class="editorial-footer-inner">
