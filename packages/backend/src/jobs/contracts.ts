@@ -19,6 +19,7 @@ export interface JobHandler {
   execute(context: JobContext): Promise<unknown>;
   resume?(context: JobContext, providerRunId: string): Promise<unknown>;
   failed?(context: JobContext, error: unknown): Promise<void>;
+  completed?(context: JobContext, result: unknown): Promise<void>;
   commit(tx: Prisma.TransactionClient, result: unknown, job: Job): Promise<JobCommitResult>;
 }
 export class JobFailure extends Error {

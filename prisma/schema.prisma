@@ -26,6 +26,7 @@ model UserProfile {
   workspaceMemberships WorkspaceMember[]
   sentInvites WorkspaceInvite[] @relation("InviteSender")
   acceptedInvites WorkspaceInvite[] @relation("InviteAcceptor")
+  exportRequests ExportRequest[] @relation("ExportRequester")
   styleRevisions WorkspaceStyleRevision[]
   createdAssets Asset[] @relation("AssetCreator")
   createdMaterials Material[] @relation("MaterialCreator")
@@ -45,6 +46,17 @@ model UserProfile {
   outlineRevisions OutlineRevision[] @relation("OutlineCreator")
   articleDrafts ArticleDraft[] @relation("ArticleDraftEditor")
   articleVersions ArticleVersion[] @relation("ArticleVersionCreator")
+  articleAnnotations ArticleAnnotation[] @relation("AnnotationCreator")
+  annotationPosts ArticleAnnotationPost[] @relation("AnnotationPostCreator")
+  googleConnections GoogleDriveConnection[]
+  googleOAuthAttempts GoogleOAuthAttempt[]
+  googleDocBindings GoogleDocBinding[] @relation("GoogleDocBindingCreator")
+  googleDocSnapshots GoogleDocSnapshot[] @relation("GoogleDocSnapshotCapturer")
+  googleDocBindCommands GoogleDocBindCommand[] @relation("GoogleDocBindCommandCreator")
+  googleDocCreateCommands GoogleDocCreateCommand[]
+  googleDocSyncPreviews GoogleDocSyncPreview[] @relation("GoogleDocSyncPreviewRequester")
+  googleDocSyncOperations GoogleDocSyncOperation[] @relation("GoogleDocSyncOperationRequester")
+  googleDocSyncStates GoogleDocSyncState[] @relation("GoogleDocSyncBackgroundUser")
   articleApprovals ArticleVersion[] @relation("ArticleApprover")
   articleWithdrawals ArticleVersion[] @relation("ArticleWithdrawer")
   adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftEditor")
@@ -200,7 +212,19 @@ model Project {
   briefRevisions BriefRevision[]
   articleDrafts ArticleDraft[]
   articleVersions ArticleVersion[]
+  googleDocBindings GoogleDocBinding[]
+  googleDocBindCommands GoogleDocBindCommand[]
+  googleDocCreateCommands GoogleDocCreateCommand[]
+  googleDocSyncPreviews GoogleDocSyncPreview[]
+  googleDocSyncOperations GoogleDocSyncOperation[]
+  googleDocSyncStates GoogleDocSyncState[]
+  googleDocRemoteThreads GoogleDocRemoteThread[]
+  googleDocAnnotationEvents GoogleDocAnnotationEvent[]
+  googleDocSnapshotCandidates GoogleDocSnapshotCandidate[]
   adaptations Adaptation[]
+  exportRequests ExportRequest[]
+  exportItems ExportItem[]
+  exportArtifacts ExportArtifact[]
   adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftProjectWorkspace")
   adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionProjectWorkspace")
   outline Outline?
@@ -240,6 +264,7 @@ model Asset {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   sourceSnapshots SourceSnapshot[]
   originalMaterials Material[] @relation("MaterialOriginal")
+  exportArtifacts ExportArtifact[]
   @@unique([projectId, id])
   @@unique([bucket, objectKey])
   @@index([projectId, state, createdAt])
@@ -320,6 +345,8 @@ enum JobOperation {
   OUTLINE_GENERATION
   ARTICLE_GENERATION
   TELEGRAM_GENERATION
+  EXPORT_BUILD
+  GOOGLE_DOCS_SYNC
   @@schema("contextflow")
 }
 
@@ -374,6 +401,8 @@ model Job {
   outlineRevisions OutlineRevision[]
   articleVersions ArticleVersion[]
   adaptationRevisions AdaptationRevision[]
+  exportRequest ExportRequest?
+  googleDocSyncOperation GoogleDocSyncOperation?
   @@unique([projectId, id])
   @@unique([projectId, operation, commandKey])
   @@index([status, nextAttemptAt])
@@ -435,9 +464,312 @@ model AppSession {
   lastUserActivityAt     DateTime    @default(now()) @db.Timestamptz(3)
   expiresAt              DateTime    @db.Timestamptz(3)
   revokedAt              DateTime?   @db.Timestamptz(3)
+  googleOAuthAttempts    GoogleOAuthAttempt[]
+  googleDocSyncPreviews GoogleDocSyncPreview[] @relation("GoogleDocPreviewSession")
+  googleDocSyncOperations GoogleDocSyncOperation[] @relation("GoogleDocOperationSession")
 
+  @@unique([id, userId])
   @@index([userId])
   @@index([expiresAt])
+  @@schema("contextflow")
+}
+
+model GoogleOAuthAttempt {
+  id String @id @db.Uuid
+  userId String @db.Uuid
+  user UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  appSessionId String @db.Uuid
+  appSession AppSession @relation(fields: [appSessionId, userId], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  stateDigest String @unique @db.Char(64)
+  encryptedVerifier String? @db.Text
+  tokenKeyVersion Int
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  expiresAt DateTime @db.Timestamptz(3)
+  consumedAt DateTime? @db.Timestamptz(3)
+  @@index([appSessionId, expiresAt])
+  @@schema("contextflow")
+}
+
+model GoogleDriveConnection {
+  id String @id @db.Uuid
+  userId String @db.Uuid
+  user UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  googlePermissionId String @db.VarChar(128)
+  displayName String? @db.VarChar(200)
+  encryptedTokens String? @db.Text
+  tokenKeyVersion Int
+  grantedScope String @db.VarChar(128)
+  accessExpiresAt DateTime @db.Timestamptz(3)
+  refreshExpiresAt DateTime? @db.Timestamptz(3)
+  generation Int @default(1)
+  connectedAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+  googleDocBindings GoogleDocBinding[]
+  googleDocCreateCommands GoogleDocCreateCommand[]
+  googleDocSyncPreviews GoogleDocSyncPreview[]
+  googleDocSyncOperations GoogleDocSyncOperation[]
+  googleDocSyncStates GoogleDocSyncState[]
+  @@unique([userId, googlePermissionId])
+  @@unique([id, userId])
+  @@schema("contextflow")
+}
+
+model GoogleDocBinding {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  connectionId String @db.Uuid
+  connectionUserId String @db.Uuid
+  connection GoogleDriveConnection @relation(fields: [connectionId, connectionUserId], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  documentId String @db.VarChar(1024)
+  tabId String @db.VarChar(128)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("GoogleDocBindingCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  endedAt DateTime? @db.Timestamptz(3)
+  snapshots GoogleDocSnapshot[]
+  bindCommands GoogleDocBindCommand[]
+  syncPreviews GoogleDocSyncPreview[]
+  syncOperations GoogleDocSyncOperation[]
+  syncState GoogleDocSyncState?
+  remoteThreads GoogleDocRemoteThread[]
+  annotationEvents GoogleDocAnnotationEvent[]
+  snapshotCandidates GoogleDocSnapshotCandidate[]
+  @@unique([id, projectId])
+  @@index([projectId, createdAt(sort: Desc), id(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model GoogleDocSnapshot {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  remoteRevision String @db.VarChar(256)
+  payload Json
+  converted Json
+  contentHash String @db.Char(64)
+  capturedBy String @db.Uuid
+  capturer UserProfile @relation("GoogleDocSnapshotCapturer", fields: [capturedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  capturedAt DateTime @default(now()) @db.Timestamptz(3)
+  previews GoogleDocSyncPreview[] @relation("GoogleDocPreviewRemoteSnapshot")
+  readbackOperations GoogleDocSyncOperation[] @relation("GoogleDocOperationReadbackSnapshot")
+  baselineStates GoogleDocSyncState[] @relation("GoogleDocStateBaselineSnapshot")
+  latestStates GoogleDocSyncState[] @relation("GoogleDocStateLatestSnapshot")
+  latestThreads GoogleDocRemoteThread[] @relation("GoogleDocThreadLatestSnapshot")
+  annotationEvents GoogleDocAnnotationEvent[]
+  candidates GoogleDocSnapshotCandidate[]
+  @@unique([projectId, id])
+  @@index([projectId, bindingId, capturedAt(sort: Desc), id(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model GoogleDocBindCommand {
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("GoogleDocBindCommandCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  commandKey String @db.Uuid
+  payloadHash String @db.Char(64)
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@id([projectId, createdBy, commandKey])
+  @@index([projectId, bindingId])
+  @@schema("contextflow")
+}
+
+enum GoogleDocCreateState {
+  SUBMITTED
+  UNKNOWN
+  CREATED
+  FAILED
+  @@schema("contextflow")
+}
+
+model GoogleDocCreateCommand {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  userId String @db.Uuid
+  user UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  connectionId String @db.Uuid
+  connection GoogleDriveConnection @relation(fields: [connectionId, userId], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  commandKey String @db.Uuid
+  payloadHash String @db.Char(64)
+  title String @db.VarChar(200)
+  state GoogleDocCreateState @default(SUBMITTED)
+  documentId String? @db.VarChar(1024)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([projectId, userId, commandKey])
+  @@index([projectId, userId, createdAt(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model GoogleDocSyncPreview {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  requestedBy String @db.Uuid
+  requester UserProfile @relation("GoogleDocSyncPreviewRequester", fields: [requestedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  connectionId String @db.Uuid
+  connection GoogleDriveConnection @relation(fields: [connectionId, requestedBy], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  sessionId String @db.Uuid
+  session AppSession @relation("GoogleDocPreviewSession", fields: [sessionId, requestedBy], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  noticeAcceptedAt DateTime @db.Timestamptz(3)
+  sourceVersionId String? @db.Uuid
+  sourceVersion ArticleVersion? @relation("GoogleDocPreviewSourceVersion", fields: [projectId, sourceVersionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  remoteSnapshotId String @db.Uuid
+  remoteSnapshot GoogleDocSnapshot @relation("GoogleDocPreviewRemoteSnapshot", fields: [projectId, remoteSnapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  expectedArticleRevision Int
+  kind String @db.VarChar(32)
+  frozenJson Json
+  payloadHash String @db.Char(64)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  expiresAt DateTime @db.Timestamptz(3)
+  operations GoogleDocSyncOperation[]
+  @@unique([projectId, id])
+  @@index([projectId, bindingId, createdAt(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model GoogleDocSyncOperation {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  requestedBy String @db.Uuid
+  requester UserProfile @relation("GoogleDocSyncOperationRequester", fields: [requestedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  connectionId String @db.Uuid
+  connection GoogleDriveConnection @relation(fields: [connectionId, requestedBy], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  sessionId String? @db.Uuid
+  session AppSession? @relation("GoogleDocOperationSession", fields: [sessionId, requestedBy], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  noticeAcceptedAt DateTime @db.Timestamptz(3)
+  backgroundGeneration Int?
+  commandKey String @db.Uuid
+  kind String @db.VarChar(32)
+  state String @db.VarChar(32)
+  manifestJson Json
+  payloadHash String @db.Char(64)
+  jobId String @unique @db.Uuid
+  job Job @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  sourceVersionId String? @db.Uuid
+  sourceVersion ArticleVersion? @relation("GoogleDocOperationSourceVersion", fields: [projectId, sourceVersionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  previewId String? @db.Uuid
+  preview GoogleDocSyncPreview? @relation(fields: [projectId, previewId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  submittedAt DateTime? @db.Timestamptz(3)
+  outcomeJson Json?
+  readbackSnapshotId String? @db.Uuid
+  readbackSnapshot GoogleDocSnapshot? @relation("GoogleDocOperationReadbackSnapshot", fields: [projectId, readbackSnapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  resultVersionId String? @db.Uuid
+  resultVersion ArticleVersion? @relation("GoogleDocOperationResultVersion", fields: [projectId, resultVersionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  @@unique([projectId, id])
+  @@unique([projectId, requestedBy, commandKey])
+  @@unique([projectId, jobId])
+  @@index([projectId, bindingId, createdAt(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model GoogleDocSyncState {
+  bindingId String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  baselineSnapshotId String? @db.Uuid
+  baselineSnapshot GoogleDocSnapshot? @relation("GoogleDocStateBaselineSnapshot", fields: [projectId, baselineSnapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  baselineVersionId String? @db.Uuid
+  baselineVersion ArticleVersion? @relation("GoogleDocStateBaselineVersion", fields: [projectId, baselineVersionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  latestSnapshotId String? @db.Uuid
+  latestSnapshot GoogleDocSnapshot? @relation("GoogleDocStateLatestSnapshot", fields: [projectId, latestSnapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  latestCandidateId String? @db.Uuid
+  latestCandidate ArticleVersion? @relation("GoogleDocStateLatestCandidate", fields: [projectId, latestCandidateId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  status String @db.VarChar(32)
+  lastReadAt DateTime? @db.Timestamptz(3)
+  lastSuccessAt DateTime? @db.Timestamptz(3)
+  errorCategory String? @db.VarChar(64)
+  backgroundConnectionId String? @db.Uuid
+  backgroundConnection GoogleDriveConnection? @relation(fields: [backgroundConnectionId, backgroundUserId], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  backgroundUserId String? @db.Uuid
+  backgroundUser UserProfile? @relation("GoogleDocSyncBackgroundUser", fields: [backgroundUserId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  backgroundGrantedAt DateTime? @db.Timestamptz(3)
+  backgroundNoticeAcceptedAt DateTime? @db.Timestamptz(3)
+  backgroundGeneration Int @default(0)
+  nextPollAt DateTime? @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([projectId, bindingId])
+  @@unique([bindingId, projectId])
+  @@schema("contextflow")
+}
+
+model GoogleDocRemoteThread {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  remoteId String @db.VarChar(1000)
+  kind String @db.VarChar(16)
+  status String @db.VarChar(32)
+  payloadJson Json
+  quoteText String @db.Text
+  rangesJson Json
+  authorJson Json
+  localAnnotationId String? @db.Uuid
+  localAnnotation ArticleAnnotation? @relation(fields: [projectId, localAnnotationId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  latestSnapshotId String @db.Uuid
+  latestSnapshot GoogleDocSnapshot @relation("GoogleDocThreadLatestSnapshot", fields: [projectId, latestSnapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  events GoogleDocAnnotationEvent[]
+  @@unique([bindingId, kind, remoteId])
+  @@unique([projectId, id])
+  @@unique([bindingId, projectId, id])
+  @@index([bindingId, localAnnotationId])
+  @@schema("contextflow")
+}
+
+model GoogleDocAnnotationEvent {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  threadId String? @db.Uuid
+  thread GoogleDocRemoteThread? @relation(fields: [bindingId, projectId, threadId], references: [bindingId, projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotId String @db.Uuid
+  snapshot GoogleDocSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  eventHash String @db.Char(64)
+  payloadJson Json
+  capturedAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([bindingId, eventHash])
+  @@index([projectId, bindingId, capturedAt(sort: Desc)])
+  @@schema("contextflow")
+}
+
+model GoogleDocSnapshotCandidate {
+  id String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bindingId String @db.Uuid
+  binding GoogleDocBinding @relation(fields: [bindingId, projectId], references: [id, projectId], onDelete: Restrict, onUpdate: NoAction)
+  snapshotId String @db.Uuid
+  snapshot GoogleDocSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  sourceVersionId String? @db.Uuid
+  sourceVersion ArticleVersion? @relation("GoogleDocCandidateSourceVersion", fields: [projectId, sourceVersionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  articleVersionId String @db.Uuid
+  articleVersion ArticleVersion @relation("GoogleDocCandidateArticleVersion", fields: [projectId, articleVersionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  dedupeHash String @db.Char(64)
+  frozenInputsJson Json
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([bindingId, dedupeHash])
+  @@index([projectId, articleVersionId])
   @@schema("contextflow")
 }
 
@@ -878,6 +1210,15 @@ model ArticleVersion {
  article Article @relation("ArticleVersions",fields:[projectId,articleId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  approvedFor Article[] @relation("ApprovedArticleVersion")
  draftBases ArticleDraft[] @relation("ArticleDraftBase")
+ annotations ArticleAnnotation[] @relation("AnnotationSourceVersion")
+ annotationResults ArticleAnnotation[] @relation("AnnotationResultVersion")
+  googleDocPreviews GoogleDocSyncPreview[] @relation("GoogleDocPreviewSourceVersion")
+  googleDocOperations GoogleDocSyncOperation[] @relation("GoogleDocOperationSourceVersion")
+  googleDocOperationResults GoogleDocSyncOperation[] @relation("GoogleDocOperationResultVersion")
+  googleDocBaselineStates GoogleDocSyncState[] @relation("GoogleDocStateBaselineVersion")
+  googleDocCandidateStates GoogleDocSyncState[] @relation("GoogleDocStateLatestCandidate")
+  googleDocSourceCandidates GoogleDocSnapshotCandidate[] @relation("GoogleDocCandidateSourceVersion")
+  googleDocCandidates GoogleDocSnapshotCandidate[] @relation("GoogleDocCandidateArticleVersion")
  number Int
  content Json
  plainText String @db.Text
@@ -927,6 +1268,7 @@ model ArticleVersion {
  reviewer UserProfile? @relation("ArticleReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  reviewedAt DateTime? @db.Timestamptz(3)
  claims ArticleVersionClaim[]
+  exportItems ExportItem[] @relation("ExportArticleVersion")
  sourceAdaptations AdaptationRevision[] @relation("AdaptationArticleSource")
  reviewedSourceAdaptations AdaptationRevision[] @relation("AdaptationReviewedArticle")
  draftAdaptations AdaptationDraft[] @relation("AdaptationDraftArticleSource")
@@ -947,6 +1289,61 @@ model ArticleVersionClaim {
  quote String @db.VarChar(10000)
  linkedText String @db.Text
  @@id([articleVersionId,locator])
+ @@schema("contextflow")
+}
+
+enum ArticleAnnotationKind {
+ COMMENT
+ SUGGESTION
+ @@schema("contextflow")
+}
+enum ArticleAnnotationStatus {
+ OPEN
+ RESOLVED
+ ACCEPTED
+ REJECTED
+ @@schema("contextflow")
+}
+model ArticleAnnotation {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ articleVersionId String @db.Uuid
+ sourceVersion ArticleVersion @relation("AnnotationSourceVersion",fields:[projectId,articleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ resultVersionId String? @db.Uuid
+ resultVersion ArticleVersion? @relation("AnnotationResultVersion",fields:[projectId,resultVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ kind ArticleAnnotationKind
+ status ArticleAnnotationStatus @default(OPEN)
+ revision Int @default(0)
+ anchorStart Int
+ anchorEnd Int
+ quote String @db.Text
+ prefix String @db.VarChar(120)
+ suffix String @db.VarChar(120)
+ body String @db.VarChar(2000)
+ replacementText String? @db.Text
+ commandKey String @db.Uuid
+ payloadHash String @db.Char(64)
+ createdBy String @db.Uuid
+ creator UserProfile @relation("AnnotationCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ posts ArticleAnnotationPost[]
+ googleDocRemoteThreads GoogleDocRemoteThread[]
+ @@unique([projectId,id])
+ @@unique([projectId,createdBy,commandKey])
+ @@index([projectId,createdAt])
+ @@schema("contextflow")
+}
+model ArticleAnnotationPost {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ annotationId String @db.Uuid
+ annotation ArticleAnnotation @relation(fields:[projectId,annotationId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ body String @db.VarChar(2000)
+ action String @db.VarChar(16)
+ createdBy String @db.Uuid
+ creator UserProfile @relation("AnnotationPostCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([projectId,annotationId,createdAt])
  @@schema("contextflow")
 }
 
@@ -1048,6 +1445,7 @@ model AdaptationRevision {
  reviewer UserProfile? @relation("AdaptationReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  reviewedAt DateTime? @db.Timestamptz(3)
  claims AdaptationRevisionClaim[]
+ exportItems ExportItem[] @relation("ExportAdaptationRevision")
  @@unique([projectId,id])
  @@unique([projectId,adaptationId,id])
  @@unique([adaptationId,number])
@@ -1067,4 +1465,69 @@ model AdaptationRevisionClaim {
  linkedText String @db.Text
  @@id([revisionId,locator])
  @@schema("contextflow")
+}
+
+enum ExportFormat {
+  TXT
+  MARKDOWN
+  ZIP
+  @@schema("contextflow")
+}
+
+model ExportRequest {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  requestedBy String @db.Uuid
+  requester UserProfile @relation("ExportRequester",fields:[requestedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  jobId String @unique @db.Uuid
+  job Job @relation(fields:[projectId,jobId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  format ExportFormat
+  manifest Json
+  manifestHash String @db.Char(64)
+  items ExportItem[]
+  artifact ExportArtifact?
+  itemsSealed Boolean @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([projectId,id])
+  @@unique([projectId,jobId])
+  @@index([projectId,createdAt,id])
+  @@schema("contextflow")
+}
+
+model ExportItem {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  requestId String @db.Uuid
+  request ExportRequest @relation(fields:[projectId,requestId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  ordinal Int
+  articleVersionId String? @db.Uuid
+  articleVersion ArticleVersion? @relation("ExportArticleVersion",fields:[projectId,articleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  adaptationRevisionId String? @db.Uuid
+  adaptationRevision AdaptationRevision? @relation("ExportAdaptationRevision",fields:[projectId,adaptationRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  @@unique([projectId,id])
+  @@unique([requestId,ordinal])
+  @@unique([requestId,articleVersionId])
+  @@unique([requestId,adaptationRevisionId])
+  @@schema("contextflow")
+}
+
+model ExportArtifact {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  requestId String @unique @db.Uuid
+  request ExportRequest @relation(fields:[projectId,requestId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  assetId String @unique @db.Uuid
+  asset Asset @relation(fields:[projectId,assetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  sha256 String @db.Char(64)
+  byteSize Int
+  contentType String @db.VarChar(100)
+  filename String @db.VarChar(200)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([projectId,id])
+  @@unique([projectId,requestId])
+  @@index([projectId,createdAt,id])
+  @@schema("contextflow")
 }

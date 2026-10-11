@@ -122,6 +122,8 @@ export class DurableJobWorker {
       });
       const result = await Promise.race([execution, aborted]);
       await this.service.succeed(job, attempt, handler, result);
+      // Staging bookkeeping is released only after the fenced commit succeeds.
+      await handler.completed?.(context, result);
     } catch (error) {
       if (controller.signal.aborted) await this.service.reconcile();
       await this.service.fail(job, attempt, error);

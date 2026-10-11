@@ -45,6 +45,8 @@ export { DifyOutlineProvider, OutlineProviderError, outlineWorkflowRelease, outl
 export type { OutlineProviderInput, OutlineWorkflowSettings } from './editorial/provider.js';
 export { createOutlineJobHandler } from './editorial/jobs-handler.js';
 export { ArticleService } from './editorial/article.service.js';
+export { ArticleAnnotationService } from './editorial/article-annotation.service.js';
+export { createArticleAnnotationInput, replyArticleAnnotationInput, actArticleAnnotationInput, listArticleAnnotationsInput } from './editorial/article-annotations.js';
 export { articleContentSchema, articleDocumentDetails, saveArticleDraftInput, importArticleInput, checkpointArticleInput,
   reviewArticleInput, generateArticleInput, articleInputManifestSchema, articleOutputSchema, articleWorkflowReleaseSchema } from './editorial/article-contracts.js';
 export type { ArticleContent, ArticleNode, ArticleMark, ArticleMapping, ArticleInputManifest, ArticleOutput, ArticleWorkflowRelease } from './editorial/article-contracts.js';
@@ -58,3 +60,24 @@ export type { TelegramContent, TelegramOutput, TelegramInputManifest, TelegramWo
 export { DifyTelegramProvider, TelegramProviderError, telegramWorkflowRelease, telegramWorkflowSettings, TELEGRAM_CONTRACT } from './editorial/telegram-provider.js';
 export type { TelegramProviderInput, TelegramWorkflowSettings } from './editorial/telegram-provider.js';
 export { createTelegramJobHandler } from './editorial/telegram-jobs-handler.js';
+export { ExportService } from './export/export.service.js';
+export { createExportJobHandler } from './export/export-jobs-handler.js';
+export { createExportInput, exportManifestSchema, exportJobManifestSchema } from './export/export-contracts.js';
+export type { CreateExportInput, ExportManifest, ExportManifestItem, ExportJobManifest } from './export/export-contracts.js';
+export { renderExportFiles, zipExportFiles } from './export/export-renderer.js';
+export { GoogleOAuthClient, GoogleOAuthError, GOOGLE_DOCS_FILE_SCOPE } from './google-docs/google-oauth-client.js';
+export type { GoogleOAuthTokens, GoogleOAuthClientOptions } from './google-docs/google-oauth-client.js';
+export { GoogleOAuthCrypto } from './google-docs/google-oauth-crypto.js';
+export type { GoogleOAuthCiphertext, GoogleOAuthKeyring, StoredGoogleOAuthTokens } from './google-docs/google-oauth-crypto.js';
+export { GoogleDocsClient, GoogleDocsApiError, GoogleDocsPartialUpdateError } from './google-docs/google-docs-client.js';
+export type { GoogleDocsDocument, GoogleDocsBatchResponse, GoogleDocsClientOptions } from './google-docs/google-docs-client.js';
+export { googleTabToArticleContent, articleContentToGoogleRequests, mapGoogleRangeToArticle } from './google-docs/article-conversion.js';
+export type { GoogleTabImportResult } from './google-docs/article-conversion.js';
+export { loadGoogleOAuthRuntime } from './google-docs/google-oauth-runtime.js';
+export type { GoogleOAuthRuntime } from './google-docs/google-oauth-runtime.js';
+export { GoogleSyncCredentials } from './google-docs/google-sync-credentials.js';
+export type { GoogleSyncCredentialsContext } from './google-docs/google-sync-credentials.js';
+export * from './google-docs/google-doc-sync-contracts.js';
+export { GoogleDocSyncService } from './google-docs/google-doc-sync.service.js';
+export { createGoogleDocSyncHandler } from './google-docs/google-doc-sync-handler.js';
+export { GoogleDocSyncPoller } from './google-docs/google-doc-sync-poller.js';

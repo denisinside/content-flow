@@ -1,0 +1,576 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+
+type OutputFormat = 'ARTICLE' | 'TELEGRAM_POST'
+type PackageFormat = 'TXT' | 'MARKDOWN' | 'ZIP'
+type ExportStatus = 'REQUESTED' | 'BUILDING' | 'READY' | 'FAILED' | 'CANCELLED' | 'OBSOLETE'
+interface ReadinessItem {
+  format: string
+  title: string
+  revisionId: string | null
+  number: number | null
+  reviewCounter: number | null
+  contentMode: 'FACTUAL' | 'CREATIVE' | null
+  ready: boolean
+  reasons: string[]
+}
+interface ExportRecord {
+  id: string
+  format: PackageFormat
+  status: ExportStatus
+  createdAt: string
+  jobId: string
+  retryAllowed: boolean
+  errorCategory: string | null
+  filename: string | null
+}
+interface Readiness {
+  projectRevision: number
+  ready: boolean
+  items: ReadinessItem[]
+  exports: ExportRecord[]
+}
+interface Selection {
+  format: OutputFormat
+  revisionId: string
+  reviewCounter: number
+  title: string
+  number: number
+  contentMode: 'FACTUAL' | 'CREATIVE' | null
+}
+const props = defineProps<{ projectId: string; topic: string; csrfToken: string; userId: string; archived?: boolean }>()
+const emit = defineEmits<{ 'session-expired': [] }>()
+const base = `/api/v1/projects/${encodeURIComponent(props.projectId)}/exports`
+const projectBase = `/api/v1/projects/${encodeURIComponent(props.projectId)}`
+const state = ref<Readiness | null>(null)
+const selected = ref<Selection[]>([])
+const packageFormat = ref<PackageFormat>('TXT')
+const loading = ref(true)
+const busy = ref(false)
+const error = ref('')
+const notice = ref('')
+let disposed = false
+let sessionEnded = false
+let controller = new AbortController()
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+const objectUrls = new Set<string>()
+let pendingCommand: { key: string; identity: string } | null = null
+
+const pendingExports = computed(() => (state.value?.exports ?? []).some(item => ['REQUESTED', 'BUILDING'].includes(item.status)))
+const selectedMatchesReadiness = computed(() => selected.value.length > 0 && selected.value.every(selection => {
+  const item = state.value?.items.find(candidate => candidate.format === selection.format)
+  return !!item && item.ready && item.revisionId === selection.revisionId && item.reviewCounter === selection.reviewCounter
+}))
+const canBuild = computed(() => {
+  if (props.archived || busy.value || !selectedMatchesReadiness.value) return false
+  return packageFormat.value === 'ZIP' ? selected.value.length >= 1 && selected.value.length <= 2 : selected.value.length === 1
+})
+const readyCount = computed(() => state.value?.items.filter(item => item.ready).length ?? 0)
+
+function supported(item: ReadinessItem): item is ReadinessItem & { format: OutputFormat; revisionId: string; number: number; reviewCounter: number } {
+  return (item.format === 'ARTICLE' || item.format === 'TELEGRAM_POST') && !!item.revisionId && item.number !== null && item.reviewCounter !== null
+}
+function isSelected(item: ReadinessItem) {
+  return supported(item) && selected.value.some(row => row.format === item.format && row.revisionId === item.revisionId && row.reviewCounter === item.reviewCounter)
+}
+function toggle(item: ReadinessItem) {
+  if (!supported(item) || !item.ready || busy.value) return
+  const existing = selected.value.findIndex(row => row.format === item.format)
+  const same = existing >= 0 && selected.value[existing]?.revisionId === item.revisionId && selected.value[existing]?.reviewCounter === item.reviewCounter
+  if (same) selected.value.splice(existing, 1)
+  else {
+    if (existing >= 0) selected.value.splice(existing, 1)
+    selected.value.push({ format: item.format, revisionId: item.revisionId, reviewCounter: item.reviewCounter, title: item.title, number: item.number, contentMode: item.contentMode })
+  }
+  pendingCommand = null
+  if (selected.value.length > 1 && packageFormat.value !== 'ZIP') packageFormat.value = 'ZIP'
+}
+function removeSelection(item: Selection) {
+  selected.value = selected.value.filter(row => row.format !== item.format || row.revisionId !== item.revisionId || row.reviewCounter !== item.reviewCounter)
+  pendingCommand = null
+}
+function reasonLabel(reason: string) {
+  const value = reason.toLowerCase()
+  if (value.includes('approval') || value.includes('not_approved') || value.includes('unapproved')) return 'Потрібне погодження редактора.'
+  if (value.includes('stale') || value.includes('review') || value.includes('changed')) return 'Залежності змінилися — перегляньте матеріал.'
+  if (value.includes('invalid') || value.includes('withdraw') || value.includes('evidence') || value.includes('conflict')) return 'Є недійсна або відкликана фактична основа.'
+  if (value.includes('unimplemented') || value.includes('not_implemented') || value.includes('unsupported') || value.includes('not_available')) return 'Цей формат ще не можна експортувати.'
+  if (value.includes('missing') || value.includes('required')) return 'Не готові потрібні для цього матеріалу дані.'
+  return 'Матеріал поки не готовий до експорту.'
+}
+function formatLabel(format: string) {
+  if (format === 'ARTICLE') return 'Стаття'
+  if (format === 'TELEGRAM_POST') return 'Допис у Telegram'
+  if (format === 'LINKEDIN_TEXT') return 'Текст у LinkedIn'
+  if (format === 'LINKEDIN_COVER') return 'Обкладинка LinkedIn'
+  if (format === 'LINKEDIN_CAROUSEL') return 'Карусель LinkedIn'
+  if (format === 'INSTAGRAM_COVER') return 'Обкладинка Instagram'
+  if (format === 'INSTAGRAM_CAROUSEL') return 'Карусель Instagram'
+  if (format === 'INSTAGRAM_STORIES') return 'Історії Instagram'
+  return 'Інший вибраний формат'
+}
+function statusLabel(status: ExportStatus) {
+  return ({ REQUESTED: 'У черзі', BUILDING: 'Готуємо файл', READY: 'Готовий', FAILED: 'Не вдалося підготувати', CANCELLED: 'Скасований', OBSOLETE: 'Входи змінилися' } satisfies Record<ExportStatus, string>)[status]
+}
+function safeError(category: string | null) {
+  if (!category) return 'Спробуйте повторити або створити новий файл.'
+  const value = category.toLowerCase()
+  if (value.includes('stale') || value.includes('obsolete') || value.includes('conflict') || value.includes('changed')) return 'Поки файл готувався, вибрані матеріали змінилися. Перевірте готовність і створіть новий файл.'
+  if (value.includes('denied') || value.includes('invalid') || value.includes('eligib')) return 'Перевірте погодження та готовність вибраних матеріалів.'
+  return 'Сталася помилка підготовки. Попередні погоджені матеріали залишилися доступними.'
+}
+function dateLabel(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'Час недоступний' : new Intl.DateTimeFormat('uk-UA', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+}
+function exportError(status: number) {
+  if (status === 409) return 'Матеріали змінилися. Вибір збережено; оновлено перевірку готовності.'
+  if (status === 403) return 'Завантаження недоступне для цього облікового запису.'
+  if (status === 404) return 'Файл більше недоступний. Оновіть історію експорту.'
+  return 'Не вдалося виконати запит. Спробуйте ще раз.'
+}
+
+async function getState(): Promise<boolean> {
+  const response = await fetch(base, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
+  if (response.status === 401) { sessionEnded = true; emit('session-expired'); return false }
+  if (!response.ok) throw new Error(exportError(response.status))
+  state.value = await response.json() as Readiness
+  return true
+}
+async function refresh() {
+  try {
+    if (await getState()) {
+      error.value = ''
+      if (pendingExports.value) schedulePoll(1800)
+      else clearTimeout(pollTimer)
+    }
+  } catch (cause) {
+    if (!disposed && !sessionEnded) {
+      error.value = cause instanceof Error ? cause.message : 'Не вдалося перевірити готовність.'
+      if (pendingExports.value) schedulePoll(3500)
+    }
+  } finally { loading.value = false }
+}
+function schedulePoll(delay: number) {
+  clearTimeout(pollTimer)
+  if (!disposed && !sessionEnded) pollTimer = setTimeout(() => void refresh(), delay)
+}
+function commandKeyFor(identity: string) {
+  if (pendingCommand?.identity !== identity) pendingCommand = { key: crypto.randomUUID(), identity }
+  return pendingCommand.key
+}
+async function createExport() {
+  if (!canBuild.value || !state.value) return
+  const payload = { expectedProjectRevision: state.value.projectRevision, format: packageFormat.value, items: selected.value.map(({ format, revisionId, reviewCounter }) => ({ format, revisionId, reviewCounter })) }
+  const identity = JSON.stringify(payload)
+  busy.value = true; error.value = ''; notice.value = ''
+  try {
+    const response = await fetch(base, { credentials: 'same-origin', signal: controller.signal, method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify({ ...payload, commandKey: commandKeyFor(identity) }) })
+    if (response.status === 401) { sessionEnded = true; emit('session-expired'); return }
+    if (!response.ok) {
+      if (response.status === 409) await getState()
+      throw new Error(exportError(response.status))
+    }
+    await response.json() as { exportId: string; jobId: string }
+    pendingCommand = null
+    notice.value = 'Файл додано до черги. Матеріали можна й далі переглядати.'
+    await refresh()
+    schedulePoll(700)
+  } catch (cause) {
+    if (!disposed && !sessionEnded) error.value = cause instanceof Error ? cause.message : 'Не вдалося створити файл.'
+  } finally { busy.value = false }
+}
+function contentDispositionFilename(value: string | null, fallback: string) {
+  if (!value) return fallback
+  const extended = value.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const plain = value.match(/filename="?([^";]+)"?/i)?.[1]
+  let name = fallback
+  try { if (extended) name = decodeURIComponent(extended); else if (plain) name = plain } catch { if (plain) name = plain }
+  return name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+$/, 'export') || fallback
+}
+async function download(item: ExportRecord) {
+  if (busy.value || item.status !== 'READY') return
+  busy.value = true; error.value = ''
+  try {
+    const response = await fetch(`${base}/${encodeURIComponent(item.id)}/download`, { credentials: 'same-origin', signal: controller.signal })
+    if (response.status === 401) { sessionEnded = true; emit('session-expired'); return }
+    if (!response.ok) throw new Error(exportError(response.status))
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob); objectUrls.add(url)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = contentDispositionFilename(response.headers.get('Content-Disposition'), item.filename || `export-${item.id}.${item.format.toLowerCase()}`)
+    anchor.hidden = true
+    document.body.append(anchor); anchor.click(); anchor.remove()
+    window.setTimeout(() => { URL.revokeObjectURL(url); objectUrls.delete(url) }, 0)
+    notice.value = 'Завантаження розпочато.'
+  } catch (cause) { if (!disposed && !sessionEnded) error.value = cause instanceof Error ? cause.message : 'Файл не вдалося завантажити.' }
+  finally { busy.value = false }
+}
+async function jobAction(item: ExportRecord, action: 'retry' | 'cancel') {
+  if (busy.value) return
+  busy.value = true; error.value = ''
+  try {
+    const response = await fetch(`${projectBase}/jobs/${encodeURIComponent(item.jobId)}/${action}`, { credentials: 'same-origin', method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: '{}' })
+    if (response.status === 401) { sessionEnded = true; emit('session-expired'); return }
+    if (!response.ok) throw new Error(exportError(response.status))
+    await refresh()
+    notice.value = action === 'retry' ? 'Повторну підготовку поставлено в чергу.' : 'Скасування передано завданню.'
+  } catch (cause) { if (!disposed && !sessionEnded) error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
+  finally { busy.value = false }
+}
+function retry(item: ExportRecord) { return jobAction(item, 'retry') }
+function cancel(item: ExportRecord) { return jobAction(item, 'cancel') }
+
+onMounted(() => { void refresh() })
+onBeforeUnmount(() => {
+  disposed = true
+  controller.abort()
+  clearTimeout(pollTimer)
+  for (const url of objectUrls) URL.revokeObjectURL(url)
+  objectUrls.clear()
+})
+</script>
+
+<template>
+  <main
+    class="export-workspace"
+    aria-labelledby="export-title"
+  >
+    <header class="export-heading">
+      <div>
+        <p class="export-context">
+          {{ props.archived ? 'Архівований проєкт' : 'Проєкт' }} · {{ props.topic }}
+        </p>
+        <h1 id="export-title">
+          Готовність і експорт
+        </h1>
+        <p class="export-lead">
+          Оберіть погоджені матеріали для файлу. Статтю включено лише тоді, коли ви її виберете.
+        </p>
+      </div>
+    </header>
+
+    <section
+      v-if="loading"
+      class="export-loading"
+      aria-label="Перевіряємо готовність матеріалів"
+      role="status"
+    >
+      <Skeleton class="export-skeleton" />
+      <Skeleton class="export-skeleton export-skeleton-short" />
+    </section>
+
+    <template v-else-if="state">
+      <p
+        class="export-readiness"
+        role="status"
+        aria-live="polite"
+      >
+        Готові матеріали: {{ readyCount }} із {{ state.items.length }} форматів у проєкті.
+      </p>
+
+      <section
+        class="export-items"
+        aria-labelledby="export-items-title"
+      >
+        <div class="export-section-heading">
+          <h2 id="export-items-title">
+            Матеріали проєкту
+          </h2>
+          <Button
+            variant="outline"
+            class="workspace-button"
+            :disabled="busy"
+            @click="refresh"
+          >
+            Оновити перевірку
+          </Button>
+        </div>
+        <p
+          v-if="!state.items.length"
+          class="export-empty"
+        >
+          У проєкті поки немає вибраних текстових форматів для експорту.
+        </p>
+        <article
+          v-for="item in state.items"
+          :key="item.format"
+          class="export-item"
+        >
+          <label class="export-choice">
+            <input
+              type="checkbox"
+              :aria-label="`Вибрати ${formatLabel(item.format)}`"
+              :checked="isSelected(item)"
+              :disabled="!supported(item) || !item.ready || busy || props.archived"
+              @change="toggle(item)"
+            >
+            <span class="export-item-title">{{ item.title || formatLabel(item.format) }}</span>
+          </label>
+          <p class="export-item-state">
+            <span>{{ supported(item) && item.ready ? 'Можна експортувати' : formatLabel(item.format) }}</span>
+            <span
+              v-if="item.contentMode === 'CREATIVE'"
+              class="export-unverified"
+            >Авторський текст · без перевіреної основи</span>
+          </p>
+          <p
+            v-if="!item.ready || !supported(item)"
+            class="export-reasons"
+          >
+            {{ item.reasons.length ? [...new Set(item.reasons.map(reasonLabel))].join(' ') : reasonLabel('UNIMPLEMENTED') }}
+          </p>
+          <details
+            v-if="item.revisionId"
+            class="export-provenance"
+          >
+            <summary>Версія й перегляд</summary>
+            <dl><dt>Версія матеріалу</dt><dd>{{ item.number ?? '—' }}</dd><dt>Перегляди залежностей</dt><dd>{{ item.reviewCounter ?? '—' }}</dd><dt>Ідентифікатор версії</dt><dd>{{ item.revisionId }}</dd></dl>
+          </details>
+        </article>
+      </section>
+
+      <section
+        class="export-builder"
+        aria-labelledby="export-builder-title"
+      >
+        <h2 id="export-builder-title">
+          Створити файл
+        </h2>
+        <p
+          v-if="props.archived"
+          class="export-reasons"
+        >
+          Архівований проєкт доступний для перегляду, але новий файл створити не можна.
+        </p>
+        <p
+          v-else-if="!selected.length"
+          class="export-muted"
+        >
+          Спочатку виберіть готовий матеріал.
+        </p>
+        <div
+          v-else
+          class="export-selected"
+          aria-label="Вибрані матеріали"
+        >
+          <div
+            v-for="item in selected"
+            :key="`${item.format}:${item.revisionId}:${item.reviewCounter}`"
+            class="export-selected-row"
+          >
+            <span>{{ item.title }} · версія {{ item.number }}<span v-if="item.contentMode === 'CREATIVE'"> · авторський текст</span></span>
+            <span
+              v-if="!selectedMatchesReadiness"
+              class="export-stale-choice"
+            >Потрібно вибрати актуальну версію</span>
+            <Button
+              variant="ghost"
+              class="workspace-button"
+              :disabled="busy"
+              @click="removeSelection(item)"
+            >
+              Прибрати
+            </Button>
+          </div>
+        </div>
+        <fieldset
+          class="export-formats"
+          :disabled="busy || props.archived || !selected.length"
+        >
+          <legend>Формат файлу</legend>
+          <label><input
+            v-model="packageFormat"
+            type="radio"
+            value="TXT"
+          > Текст TXT</label>
+          <label><input
+            v-model="packageFormat"
+            type="radio"
+            value="MARKDOWN"
+          > Markdown</label>
+          <label><input
+            v-model="packageFormat"
+            type="radio"
+            value="ZIP"
+          > ZIP-архів</label>
+          <p
+            v-if="packageFormat !== 'ZIP' && selected.length !== 1"
+            class="export-muted"
+          >
+            TXT і Markdown містять один матеріал. Для кількох виберіть ZIP.
+          </p>
+          <p
+            v-if="packageFormat === 'ZIP' && selected.length > 2"
+            class="export-reasons"
+          >
+            ZIP наразі підтримує до двох вибраних матеріалів.
+          </p>
+        </fieldset>
+        <Button
+          class="workspace-button workspace-button-primary"
+          :disabled="!canBuild"
+          @click="createExport"
+        >
+          {{ busy ? 'Виконуємо…' : 'Підготувати файл' }}
+        </Button>
+      </section>
+
+      <section
+        class="export-history"
+        aria-labelledby="export-history-title"
+      >
+        <h2 id="export-history-title">
+          Файли й завдання
+        </h2>
+        <p
+          v-if="pendingExports"
+          class="export-muted"
+          role="status"
+          aria-live="polite"
+        >
+          Оновлюємо стан підготовки, поки файл у черзі.
+        </p>
+        <p
+          v-if="!state.exports.length"
+          class="export-muted"
+        >
+          Створені файли з’являться тут.
+        </p>
+        <article
+          v-for="item in state.exports"
+          :key="item.id"
+          class="export-history-row"
+        >
+          <div>
+            <h3>{{ item.filename || `${item.format} · ${dateLabel(item.createdAt)}` }}</h3>
+            <p>{{ statusLabel(item.status) }} · {{ dateLabel(item.createdAt) }}</p>
+            <p
+              v-if="item.status === 'FAILED' || item.status === 'OBSOLETE'"
+              class="export-reasons"
+            >
+              {{ safeError(item.status === 'OBSOLETE' ? 'OBSOLETE' : item.errorCategory) }}
+            </p>
+          </div>
+          <div class="export-history-actions">
+            <Button
+              v-if="item.status === 'READY'"
+              variant="outline"
+              class="workspace-button"
+              :disabled="busy"
+              @click="download(item)"
+            >
+              Завантажити
+            </Button>
+            <Button
+              v-if="item.status === 'FAILED' && item.retryAllowed"
+              variant="outline"
+              class="workspace-button"
+              :disabled="busy || props.archived"
+              @click="retry(item)"
+            >
+              Повторити
+            </Button>
+            <Button
+              v-if="['REQUESTED', 'BUILDING'].includes(item.status)"
+              variant="ghost"
+              class="workspace-button"
+              :disabled="busy"
+              @click="cancel(item)"
+            >
+              Скасувати
+            </Button>
+            <details class="export-job-details">
+              <summary>Докладніше</summary><p>Завдання {{ item.jobId }} · {{ item.errorCategory ? safeError(item.errorCategory) : 'Технічний стан збережено в історії.' }}</p>
+            </details>
+          </div>
+        </article>
+      </section>
+    </template>
+
+    <p
+      v-if="error"
+      class="export-error"
+      role="alert"
+    >
+      {{ error }}
+    </p>
+    <p
+      v-else-if="notice"
+      class="export-notice"
+      role="status"
+      aria-live="polite"
+    >
+      {{ notice }}
+    </p>
+  </main>
+</template>
+
+<style scoped>
+.export-workspace { width: 100%; max-width: 1220px; min-width: 0; margin-inline: auto; color: var(--ink); }
+.export-heading { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin: 0 0 22px; }
+.export-heading h1 { max-width: 18ch; margin: 0; font: 550 39px/1.2 SourceSerif, Georgia, serif; letter-spacing: -.025em; }
+.export-context { max-width: 60ch; margin: 0 0 7px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.export-lead { max-width: 70ch; margin: 10px 0 0; color: var(--lead-ink, #555a60); font: 17px/1.55 SourceSerif, Georgia, serif; }
+.export-readiness { margin: 0; padding: 12px 0; border-block: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
+.export-items, .export-builder, .export-history { margin-top: 32px; }
+.export-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.export-workspace h2 { margin: 0; font: 550 25px/1.3 SourceSerif, Georgia, serif; }
+.export-item { min-width: 0; padding: 16px 0; border-top: 1px solid var(--rule); }
+.export-item:first-of-type { margin-top: 12px; }
+.export-choice { display: flex; align-items: flex-start; gap: 12px; min-height: 36px; cursor: pointer; }
+.export-choice input, .export-formats input { flex: none; width: 17px; height: 17px; margin: 3px 0 0; accent-color: var(--graphite, #343a40); }
+.export-item-title { font: 550 21px/1.35 SourceSerif, Georgia, serif; overflow-wrap: anywhere; }
+.export-item-state { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 5px 0 0 29px; color: var(--approved, #32664b); font-size: 13px; }
+.export-unverified { color: var(--review, #945000); }
+.export-reasons { margin: 8px 0 0 29px; color: var(--review, #945000); font-size: 13px; line-height: 1.5; }
+.export-provenance { margin: 8px 0 0 29px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.export-provenance summary, .export-job-details summary { min-height: 36px; display: inline-flex; align-items: center; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.export-provenance dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 6px 0 0; }
+.export-provenance dt { color: var(--muted); }
+.export-provenance dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.export-builder { padding: 22px 0; border-block: 1px solid var(--rule); }
+.export-selected { margin-top: 10px; border-top: 1px solid var(--rule); }
+.export-selected-row { display: flex; align-items: center; gap: 8px 16px; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--rule); font-size: 14px; overflow-wrap: anywhere; }
+.export-stale-choice { color: var(--review, #945000); }
+.export-formats { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 18px 0; padding: 0; border: 0; }
+.export-formats legend { width: 100%; margin-bottom: 8px; color: var(--muted); font-size: 13px; }
+.export-formats label { display: inline-flex; align-items: flex-start; gap: 8px; min-height: 36px; color: var(--ink); font-size: 14px; cursor: pointer; }
+.export-muted, .export-empty { margin: 10px 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.export-empty { padding: 18px 0; border-block: 1px solid var(--rule); }
+.export-history { border-top: 1px solid var(--ink); }
+.export-history > h2 { padding: 18px 0; }
+.export-history-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 16px 0; border-top: 1px solid var(--rule); }
+.export-history-row h3 { margin: 0; font: 550 19px/1.4 SourceSerif, Georgia, serif; overflow-wrap: anywhere; }
+.export-history-row p { margin: 5px 0; color: var(--muted); font-size: 13px; }
+.export-history-row .export-reasons { margin-left: 0; color: var(--review, #945000); }
+.export-history-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 12px; }
+.export-job-details { width: 100%; color: var(--muted); font-size: 12px; text-align: right; }
+.export-job-details p { max-width: 55ch; overflow-wrap: anywhere; }
+.export-error, .export-notice { margin: 14px 0; padding: 12px 0; border-block: 1px solid var(--rule); color: var(--review, #945000); font-size: 13px; line-height: 1.5; }
+.export-notice { color: var(--approved, #32664b); }
+.export-loading { display: grid; gap: 12px; padding-block: 18px; }
+.export-skeleton { width: 100%; height: 44px; }
+.export-skeleton-short { width: 60%; }
+.export-workspace :deep(button:focus-visible), .export-workspace summary:focus-visible, .export-workspace input:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
+@media (max-width: 760px) {
+  .export-heading { align-items: start; margin-bottom: 18px; }
+  .export-heading h1 { font-size: 34px; }
+  .export-lead { font-size: 16px; }
+  .export-history-row { flex-direction: column; }
+  .export-history-actions { justify-content: flex-start; }
+  .export-job-details { text-align: left; }
+}
+@media (max-width: 480px) {
+  .export-section-heading { align-items: flex-start; flex-direction: column; }
+  .export-selected-row { align-items: flex-start; flex-direction: column; }
+  .export-formats { align-items: flex-start; flex-direction: column; }
+  .export-builder > .workspace-button { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .export-workspace *, .export-workspace *::before, .export-workspace *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+</style>

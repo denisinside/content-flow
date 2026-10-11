@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import type { Prisma, PrismaClient, Job, ArticleDraft, ArticleVersion } from '../generated/prisma/client.js';
+import type { Prisma, PrismaClient, Job, ArticleDraft, ArticleVersion, ArticleOrigin, ContentMode } from '../generated/prisma/client.js';
 import { FactualBasisService } from '../claims/factual-basis.service.js';
 import { DurableJobService, canonicalManifestHash } from '../jobs/job-service.js';
 import { JobFailure } from '../jobs/contracts.js';
@@ -12,6 +12,18 @@ import { articleContentSchema, articleDocumentDetails, articleInputManifestSchem
 
 function json<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 type Inputs = Pick<ArticleDraft, 'briefRevisionId' | 'basisRevisionId' | 'outlineRevisionId' | 'workspaceId' | 'workspaceStyleRevision' | 'sourceSnapshotId' | 'contentMode' | 'origin'>;
+export type FrozenGoogleArticleInputs = {
+  sourceVersionId: string | null;
+  expectedArticleRevision: number;
+  contentMode: ContentMode;
+  origin: ArticleOrigin;
+  briefRevisionId: string | null;
+  basisRevisionId: string | null;
+  outlineRevisionId: string | null;
+  workspaceId: string;
+  workspaceStyleRevision: number;
+  sourceSnapshotId: string | null;
+};
 function inputData(value: Inputs): Inputs { return { briefRevisionId: value.briefRevisionId, basisRevisionId: value.basisRevisionId, outlineRevisionId: value.outlineRevisionId, workspaceId: value.workspaceId, workspaceStyleRevision: value.workspaceStyleRevision, sourceSnapshotId: value.sourceSnapshotId, contentMode: value.contentMode, origin: value.origin }; }
 const briefInclude = { requiredClaims: true, contextSnapshots: true, style: true } as const;
 // Up to 30 sections with bounded author/reviewer passes run in the worker.
@@ -133,6 +145,93 @@ export class ArticleService {
     await tx.articleVersion.update({ where: { id: version.id }, data: { claimsSealed: true } });
     return version;
   }
+  // Annotation service holds the same authorized Project lock in this transaction.
+  // Accepted suggestions create candidates; draft and approval pointers stay intact.
+  async appendAnnotationCandidate(tx: Prisma.TransactionClient, user: string, project: string, sourceVersionId: string, content: ArticleContent, expectedRevision: number) {
+    const article = await this.article(tx, project, expectedRevision, false);
+    const source = await tx.articleVersion.findFirst({ where: { id: sourceVersionId, projectId: project, articleId: article.id } });
+    if (!source || source.withdrawnAt || !article.draft || article.draft.baseVersionId !== source.id || article.draft.sha256 !== source.sha256 || !this.sameInputs(source, article.draft)) {
+      throw new ConflictException('The saved article changed; review the suggestion against the current version');
+    }
+    const parsed = articleContentSchema.parse(content), inputs = inputData(source);
+    if (inputs.origin === 'AI') inputs.origin = 'MANUAL';
+    await this.mappings(tx, project, parsed, inputs, true);
+    const version = await this.append(tx, project, article.id, user, parsed, inputs, article.revision);
+    await tx.article.update({ where: { id: article.id }, data: { revision: { increment: 1 } } });
+    return version.id;
+  }
+  /** Freeze the selected source's exact input tuple without refreshing stale parents. */
+  async freezeGoogleInputs(tx: Prisma.TransactionClient, user: string, project: string, sourceVersionId: string | null, expectedRevision: number): Promise<FrozenGoogleArticleInputs> {
+    await this.lock(tx, user, project);
+    const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
+    if (!p.formats.includes('ARTICLE')) throw new ConflictException('Select Article before syncing Google Docs');
+    const article = await tx.article.findUnique({ where: { projectId: project }, include: { draft: true } });
+    if ((article?.revision ?? 0) !== expectedRevision) throw new ConflictException('Article changed; reload before syncing Google Docs');
+
+    let inputs: Inputs;
+    if (sourceVersionId) {
+      if (!article) throw new NotFoundException('Article version not found');
+      const source = await tx.articleVersion.findFirst({ where: { id: sourceVersionId, projectId: project, articleId: article.id } });
+      if (!source || !source.claimsSealed || canonicalManifestHash(source.content) !== source.sha256) throw new ConflictException('Selected article version failed integrity checks');
+      inputs = inputData(source);
+    } else if (article?.draft) {
+      inputs = inputData(article.draft);
+    } else {
+      const mode = (await tx.brief.findUnique({ where: { projectId: project }, include: { currentRevision: true } }))?.currentRevision?.contentMode ?? 'CREATIVE';
+      inputs = await this.currentInputs(tx, project, mode, 'UNVERIFIED_IMPORTED');
+    }
+    if (inputs.workspaceId !== p.workspaceId) throw new ConflictException('Article inputs belong to a different Workspace');
+    if (inputs.sourceSnapshotId && !await tx.sourceSnapshot.findFirst({ where: { id: inputs.sourceSnapshotId, projectId: project } })) {
+      throw new ConflictException('Article source snapshot is unavailable for this Project');
+    }
+    return { sourceVersionId, expectedArticleRevision: expectedRevision, ...inputData(inputs) };
+  }
+  /** Append an unverified Google-import candidate while preserving the draft and approval. */
+  async appendGoogleCandidate(tx: Prisma.TransactionClient, user: string, project: string, content: ArticleContent, frozen: FrozenGoogleArticleInputs, jobId?: string): Promise<string> {
+    await this.lock(tx, user, project);
+    const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
+    if (!p.formats.includes('ARTICLE')) throw new ConflictException('Select Article before syncing Google Docs');
+    if (frozen.workspaceId !== p.workspaceId || frozen.expectedArticleRevision < 0) throw new ConflictException('Frozen Article inputs do not match this Project');
+    const frozenInputs: Inputs = { contentMode: frozen.contentMode, origin: frozen.origin, briefRevisionId: frozen.briefRevisionId,
+      basisRevisionId: frozen.basisRevisionId, outlineRevisionId: frozen.outlineRevisionId, workspaceId: frozen.workspaceId,
+      workspaceStyleRevision: frozen.workspaceStyleRevision, sourceSnapshotId: frozen.sourceSnapshotId };
+    if (frozen.sourceSnapshotId && !await tx.sourceSnapshot.findFirst({ where: { id: frozen.sourceSnapshotId, projectId: project } })) {
+      throw new ConflictException('Frozen source snapshot is unavailable for this Project');
+    }
+
+    if (frozen.sourceVersionId) {
+      const articleForSource = await tx.article.findUnique({ where: { projectId: project } });
+      const source = articleForSource ? await tx.articleVersion.findFirst({ where: { id: frozen.sourceVersionId, projectId: project, articleId: articleForSource.id } }) : null;
+      if (!source || !source.claimsSealed || canonicalManifestHash(source.content) !== source.sha256 || !articleContentSchema.safeParse(source.content).success || !this.sameInputs(source, frozenInputs)) {
+        throw new ConflictException('Selected article version or its frozen inputs failed integrity checks');
+      }
+    }
+
+    const parsed = articleContentSchema.parse(content);
+    const stripEvidence = (node: ArticleContent['document']): ArticleContent['document'] => ({
+      ...node,
+      ...(node.marks ? { marks: node.marks.filter(mark => mark.type !== 'evidence') } : {}),
+      ...(node.content ? { content: node.content.map(stripEvidence) } : {}),
+    });
+    const imported = articleContentSchema.parse({ ...parsed, document: stripEvidence(parsed.document) });
+    const candidateInputs: Inputs = { ...frozenInputs, origin: 'UNVERIFIED_IMPORTED' };
+    const payloadHash = canonicalManifestHash(imported);
+    const operation = jobId ? await tx.googleDocSyncOperation.findUnique({ where: { projectId_jobId: { projectId: project, jobId } } }) : null;
+    if (jobId && !operation) throw new ConflictException('Google sync operation not found for candidate replay');
+    const existing = operation?.resultVersionId ? await tx.articleVersion.findFirst({ where: { id: operation.resultVersionId, projectId: project } }) : null;
+    if (existing) {
+      if (existing.sha256 !== payloadHash || canonicalManifestHash(existing.content) !== payloadHash || !this.sameInputs(existing, candidateInputs)
+        || existing.sourceArticleRevision !== frozen.expectedArticleRevision || existing.origin !== 'UNVERIFIED_IMPORTED'
+        || operation?.sourceVersionId !== frozen.sourceVersionId) {
+        throw new ConflictException('Google sync job already produced a different Article candidate');
+      }
+      return existing.id;
+    }
+
+    const article = await tx.article.findUnique({ where: { projectId: project } }) ?? await tx.article.create({ data: { projectId: project } });
+    const version = await this.append(tx, project, article.id, user, imported, candidateInputs, frozen.expectedArticleRevision);
+    return version.id;
+  }
   checkpoint(user: string, project: string, input: { expectedRevision: number }) {
     return this.command(user, project, async tx => {
       const article = await this.article(tx, project, input.expectedRevision, false), draft = article.draft;
@@ -240,6 +339,20 @@ export class ArticleService {
         if (version.origin === 'AI' && version.sourceArticleRevision !== article.revision) throw new ConflictException('Article changed after generation; preserve local work');
         await this.reviewable(tx, project, version);
         await this.writeDraft(tx, article.id, project, user, articleContentSchema.parse(version.content), version, versionId);
+        // Only an explicit application acknowledges this exact remote snapshot as
+        // the comparison base. Merely fetching or approving never does so.
+        const googleCandidates = await tx.googleDocSnapshotCandidate.findMany({ where: { projectId: project, articleVersionId: versionId }, include: { binding: true, snapshot: true } });
+        for (const candidate of googleCandidates) {
+          if (candidate.binding.endedAt || candidate.snapshot.bindingId !== candidate.bindingId) continue;
+          const converted = candidate.snapshot.converted;
+          const remote = converted && typeof converted === 'object' && !Array.isArray(converted) ? (converted as Record<string, unknown>)['content'] : null;
+          const parsed = articleContentSchema.safeParse(remote);
+          const candidateContent = articleContentSchema.parse(version.content);
+          const source = candidate.sourceVersionId ? await tx.articleVersion.findFirst({ where: { projectId: project, id: candidate.sourceVersionId } }) : null;
+          const expectedTitle = source ? articleContentSchema.parse(source.content).title : parsed.success ? parsed.data.title : null;
+          if (!parsed.success || candidateContent.title !== expectedTitle || canonicalManifestHash({ ...parsed.data, title: candidateContent.title }) !== version.sha256) throw new ConflictException('Google candidate snapshot integrity check failed');
+          await tx.googleDocSyncState.updateMany({ where: { projectId: project, bindingId: candidate.bindingId }, data: { baselineSnapshotId: candidate.snapshotId, baselineVersionId: versionId } });
+        }
       } else {
         if (version.approvedAt || !article.draft || article.draft.baseVersionId !== versionId || article.draft.sha256 !== version.sha256 || !this.sameInputs(article.draft, version)) throw new ConflictException('Approve only the exact current saved checkpoint');
         const details = await this.reviewable(tx, project, version);

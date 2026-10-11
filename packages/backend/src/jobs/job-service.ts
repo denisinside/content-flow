@@ -30,14 +30,14 @@ export class DurableJobService {
   constructor(readonly prisma: PrismaClient, private readonly options: { noticeVersion: string; leaseMs?: number; retryBaseMs?: number }) {}
   get leaseMs(): number { return this.options.leaseMs ?? 30_000; }
 
-  async assertEffects(tx: Prisma.TransactionClient, projectId: string, userId: string): Promise<void> {
+  async assertEffects(tx: Prisma.TransactionClient, projectId: string, userId: string, requiresExternalProcessing = true): Promise<void> {
     const access = await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
       JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
       JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = w."id"
       JOIN contextflow."UserProfile" u ON u."id" = m."userId"
       WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
       AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL
-      AND u."externalProcessingNoticeVersion" = ${this.options.noticeVersion} AND u."externalProcessingAcceptedAt" IS NOT NULL
+      AND (NOT ${requiresExternalProcessing} OR (u."externalProcessingNoticeVersion" = ${this.options.noticeVersion} AND u."externalProcessingAcceptedAt" IS NOT NULL))
       FOR SHARE OF p, w, m, u`;
     if (!access.length) throw new ForbiddenException('Project access or external-processing acceptance is no longer valid');
   }
@@ -47,7 +47,7 @@ export class DurableJobService {
       throw new BadRequestException('Invalid job command key or contract');
     }
     const deadlineMs = jobDeadlineMs(input);
-    await this.assertEffects(tx, input.projectId, input.userId);
+    await this.assertEffects(tx, input.projectId, input.userId, input.operation !== 'EXPORT_BUILD');
     const hash = canonicalManifestHash({ contractVersion: input.contractVersion, inputManifest: input.inputManifest });
     // A transaction advisory lock serializes replay before insert, avoiding an aborted transaction on unique conflict.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${input.projectId + input.operation + input.commandKey}, 0))::text`;
@@ -106,7 +106,7 @@ export class DurableJobService {
     return this.prisma.$transaction(async tx => {
       const job = await this.lock(tx, id);
       if (!job || job.projectId !== projectId) throw new NotFoundException('Job not found');
-      await this.assertEffects(tx, projectId, userId);
+      await this.assertEffects(tx, projectId, userId, job.operation !== 'EXPORT_BUILD');
       if (!retryAllowed(job)) throw new ConflictException('This job cannot be safely retried; explicitly start a new run');
       return tx.job.update({ where: { id }, data: { status: 'QUEUED', nextAttemptAt: new Date(), publishedAt: null,
         errorCategory: null, progressStage: 'WAITING', updatedAt: new Date() } });
@@ -125,7 +125,7 @@ export class DurableJobService {
         WHERE "status" = 'RUNNING' AND "deadlineAt" > CURRENT_TIMESTAMP`;
       const running = await tx.job.count({ where: { status: 'RUNNING', deadlineAt: { gt: now } } });
       if (running >= 2 || (job.operation === 'DOCUMENT_IMPORT' && active.some(row => row.operation === 'DOCUMENT_IMPORT'))) return null;
-      try { await this.assertEffects(tx, job.projectId, job.requestedBy); }
+      try { await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD'); }
       catch {
         await tx.job.update({ where: { id }, data: { status: 'FAILED', errorCategory: 'ACCESS_REVOKED', updatedAt: now, progressStage: 'FAILED' } });
         return null;
@@ -153,7 +153,7 @@ export class DurableJobService {
   async heartbeat(job: Job, attempt: JobAttempt): Promise<void> {
     await this.prisma.$transaction(async tx => {
       await this.owned(tx, job, attempt);
-      await this.assertEffects(tx, job.projectId, job.requestedBy);
+      await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD');
       const now = new Date();
       await tx.jobAttempt.update({ where: { id: attempt.id }, data: { heartbeatAt: now, leaseExpiresAt: new Date(now.getTime() + this.leaseMs) } });
     });
@@ -167,7 +167,7 @@ export class DurableJobService {
     if (runId !== undefined && (!runId || runId.length > 200)) throw new JobFailure('INVALID_CONTRACT');
     await this.prisma.$transaction(async tx => {
       await this.owned(tx, job, attempt);
-      await this.assertEffects(tx, job.projectId, job.requestedBy);
+      await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD');
       if (validate) await validate(tx);
       await tx.jobAttempt.update({ where: { id: attempt.id }, data: { providerSubmittedAt: new Date(),
         providerOutcome: 'MAY_STILL_RUN', ...(runId ? { providerRunId: runId } : {}) } });
@@ -179,10 +179,10 @@ export class DurableJobService {
       const current = await this.owned(tx, job, attempt);
       // Claim commits serialize with review/basis edits before acquiring shared
       // ancestry locks, avoiding concurrent shared-to-exclusive lock upgrades.
-      if (job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION' || job.operation === 'ARTICLE_GENERATION' || job.operation === 'TELEGRAM_GENERATION') {
+      if (job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION' || job.operation === 'ARTICLE_GENERATION' || job.operation === 'TELEGRAM_GENERATION' || job.operation === 'EXPORT_BUILD' || job.operation === 'GOOGLE_DOCS_SYNC') {
         await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id" = ${job.projectId}::uuid FOR UPDATE`;
       }
-      await this.assertEffects(tx, job.projectId, job.requestedBy);
+      await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD');
       const resultRefs = await handler.commit(tx, result, current);
       await this.owned(tx, job, attempt);
       const now = new Date();

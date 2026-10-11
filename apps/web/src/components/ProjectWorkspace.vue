@@ -11,6 +11,7 @@ import FactsWorkspace from './FactsWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
 const ArticleWorkspace = defineAsyncComponent(() => import('./ArticleWorkspace.vue'))
 const TelegramWorkspace = defineAsyncComponent(() => import('./TelegramWorkspace.vue'))
+const ExportWorkspace = defineAsyncComponent(() => import('./ExportWorkspace.vue'))
 
 type ProjectFormat =
   | 'ARTICLE'
@@ -72,9 +73,10 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|telegram))?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|telegram|export))?\/?$/i)?.[1] ?? null)
 const isArticle = computed(() => /\/article\/?$/i.test(pathname.value))
 const isTelegram = computed(() => /\/telegram\/?$/i.test(pathname.value))
+const isExport = computed(() => /\/export\/?$/i.test(pathname.value))
 const isDetail = computed(() => page.value !== null)
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
 const isBrief = computed(() => /\/brief\/?$/i.test(pathname.value))
@@ -556,7 +558,7 @@ onBeforeUnmount(() => {
     <section
       v-else
       id="workspace-task"
-      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isTelegram ? 'telegram-title' : 'project-detail-title') : undefined"
+      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isTelegram ? 'telegram-title' : isExport ? 'export-title' : 'project-detail-title') : undefined"
       class="workspace-content project-detail"
       tabindex="-1"
     >
@@ -575,7 +577,7 @@ onBeforeUnmount(() => {
         </Button>
 
         <a
-          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isTelegram)"
+          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isTelegram || isExport)"
           class="project-navigation-title"
           :href="`/projects/${currentProject.id}`"
           @click.prevent="routeTo(`/projects/${currentProject.id}`)"
@@ -588,7 +590,7 @@ onBeforeUnmount(() => {
         >
           <a
             :href="`/projects/${currentProject.id}`"
-            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isTelegram ? 'page' : undefined"
+            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isTelegram && !isExport ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}`)"
           >Огляд</a>
           <a
@@ -618,6 +620,11 @@ onBeforeUnmount(() => {
             :aria-current="isTelegram ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}/telegram`)"
           >Telegram</a>
+          <a
+            :href="`/projects/${currentProject.id}/export`"
+            :aria-current="isExport ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/export`)"
+          >Експорт</a>
         </nav>
       </aside>
 
@@ -668,6 +675,16 @@ onBeforeUnmount(() => {
             :key="currentProject.id"
             :project-id="currentProject.id"
             :project-topic="currentProject.topic"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+          />
+        </template><template v-else-if="isExport">
+          <ExportWorkspace
+            :key="currentProject.id"
+            :project-id="currentProject.id"
+            :topic="currentProject.topic"
             :csrf-token="csrfToken"
             :user-id="userId"
             :archived="Boolean(currentProject.archivedAt)"
@@ -910,6 +927,21 @@ onBeforeUnmount(() => {
                 @click="routeTo(`/projects/${currentProject.id}/telegram`)"
               >
                 Відкрити Telegram
+              </Button>
+            </div>
+            <div class="project-sources-entry">
+              <div>
+                <h2>Готовність і експорт</h2>
+                <p class="project-detail-copy">
+                  Перевірте погоджені матеріали й завантажте вибраний файл.
+                </p>
+              </div>
+              <Button
+                class="workspace-button workspace-button-secondary"
+                variant="outline"
+                @click="routeTo(`/projects/${currentProject.id}/export`)"
+              >
+                Відкрити експорт
               </Button>
             </div>
             <div

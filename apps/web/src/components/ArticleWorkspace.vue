@@ -8,10 +8,12 @@ import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import StarterKit from '@tiptap/starter-kit'
 import { Button } from '@/components/ui/button'
 import ArticlePreview from './ArticlePreview.vue'
+import ArticleAnnotations from './ArticleAnnotations.vue'
+import GoogleDocsBinding from './GoogleDocsBinding.vue'
 
 interface Content { title: string; document: JSONContent }
-interface Version { id: string; number: number; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string; status: string; sourceArticleRevision: number; approvedAt?: string; withdrawnAt?: string; reviewCounter?: number; staleReasons?: string[]; blockingReasons?: string[]; eligible?: boolean; hasUnmapped?: boolean }
-interface Draft { baseVersionId?: string | null; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string }
+interface Version { id: string; number: number; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string; status: string; sourceArticleRevision: number; sha256?: string; approvedAt?: string; withdrawnAt?: string; reviewCounter?: number; staleReasons?: string[]; blockingReasons?: string[]; eligible?: boolean; hasUnmapped?: boolean }
+interface Draft { baseVersionId?: string | null; sha256?: string; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string }
 interface Evidence { claimRevisionId: string; evidenceId: string; wording: string; quote: string; snapshotId: string; materialTitle: string }
 interface State { article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleEvidence: Evidence[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { contentMode: string } } | null; outline: { currentApprovedRevisionId: string | null } | null } }
 interface Job { id: string; status: string; operation: string; retryAllowed: boolean }
@@ -31,7 +33,8 @@ const busy = ref(false)
 const loading = ref(true)
 const error = ref('')
 const conflict = ref(false)
-const inspector = ref<'history' | 'evidence' | 'proposal' | 'import' | null>(null)
+const inspector = ref<'history' | 'evidence' | 'proposal' | 'import' | 'annotations' | 'google-docs' | null>(null)
+const googleDocsVisited = ref(false)
 const inspectorHeading = ref<HTMLHeadingElement | null>(null)
 const contentsOpen = ref(false)
 let contentsViewport: MediaQueryList | undefined
@@ -39,6 +42,7 @@ let inspectorOpener: HTMLElement | null = null
 let inspectorReadingPosition = { left: 0, top: 0 }
 const candidate = ref<Version | null>(null)
 const selectedEvidence = ref<Evidence | null>(null)
+const annotationAnchor = ref<{ start: number; end: number; quote: string } | null>(null)
 const linkedWording = ref('')
 const importedText = ref('')
 const acknowledgeUnmapped = ref(false)
@@ -89,8 +93,15 @@ const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'R
 const actionableJobs = computed(() => jobs.value.filter(job => !['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const completedJobs = computed(() => jobs.value.filter(job => ['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const proposals = computed(() => state.value?.article?.versions.filter(version => version.origin === 'AI' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
+const importedCandidates = computed(() => state.value?.article?.versions.filter(version => version.origin === 'UNVERIFIED_IMPORTED' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
 const saveStatus = computed(() => saving.value ? 'Зберігаємо…' : conflict.value ? 'Потрібно узгодити зміни' : error.value && dirty.value ? 'Не збережено' : dirty.value ? 'Є незбережені зміни' : 'Збережено')
 const approval = computed(() => state.value?.article?.versions.find(version => version.id === state.value?.article?.currentApprovedVersionId))
+const annotationVersion = computed(() => {
+  const article = state.value?.article
+  const versionId = article?.draft?.baseVersionId ?? article?.currentApprovedVersionId ?? article?.versions[0]?.id ?? null
+  const version = article?.versions.find(row => row.id === versionId)
+  return { id: versionId, contentHash: article?.draft?.baseVersionId === versionId ? article.draft.sha256 ?? version?.sha256 ?? null : version?.sha256 ?? null }
+})
 function dependencyStatus(reasons: string[]) {
   const labels: Record<string, string> = { WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', BRIEF_CHANGED: 'змінився бриф', MISSING_FACTUAL_BASIS: 'немає придатної фактичної основи', INVALID_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', INVALID_ORIGINAL_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', FACTUAL_BASIS_CHANGED: 'змінилася фактична основа', OUTLINE_CHANGED: 'змінилася погоджена структура', INVALID_ORIGINAL_EVIDENCE: 'початкові докази статті втратили придатність' }
   return reasons.map(reason => labels[reason] ?? 'змінилися редакційні залежності').join('; ')
@@ -198,6 +209,55 @@ async function reconcile(useLocal: boolean) {
 function discardRecovery() { recovered.value = null; sessionStorage.removeItem(recoveryKey) }
 function restore() { const data = recovered.value; if (!data) return; hydration = true; title.value = data.content.title; contentMode.value = data.contentMode; editor.value?.commands.setContent(data.content.document, { emitUpdate: false }); editEpoch.value++; hydration = false; recovered.value = null; expectedRevision.value = data.expectedRevision; conflict.value = expectedRevision.value !== (state.value?.article?.revision ?? 0); retain(); if (!conflict.value) void save() }
 function closeInspector() { inspector.value = null }
+function openGoogleDocs() { googleDocsVisited.value = true; inspector.value = inspector.value === 'google-docs' ? null : 'google-docs' }
+function selectionAnchor() {
+  const current = editor.value
+  if (!current || current.state.selection.empty) return null
+  const { selection } = current.state
+  const from = selection.$from, to = selection.$to
+  if (!from.parent.isTextblock || from.parent !== to.parent || from.before() !== to.before()) return null
+  const blocks: { position: number; start: number; text: string }[] = []
+  let offset = 0
+  current.state.doc.descendants((node, position) => {
+    if (node.type.name !== 'paragraph' && node.type.name !== 'heading') return
+    if (blocks.length) offset += 2
+    const start = offset
+    let text = ''
+    node.forEach(child => { text += child.type.name === 'hardBreak' ? '\n' : child.text ?? '' })
+    blocks.push({ position, start, text })
+    offset += text.length
+  })
+  const entry = blocks.find(row => row.position === from.before())
+  if (!entry) return null
+  const start = entry.start + from.parentOffset
+  const end = entry.start + to.parentOffset
+  if (end <= start || end > entry.start + entry.text.length) return null
+  const quote = entry.text.slice(from.parentOffset, to.parentOffset)
+  const actual = current.state.doc.textBetween(selection.from, selection.to, '\n')
+  return quote && quote === actual ? { start, end, quote } : null
+}
+async function openAnnotations() {
+  if (inspector.value === 'annotations') { inspector.value = null; return }
+  annotationAnchor.value = selectionAnchor()
+  if (annotationAnchor.value && !readonly.value) {
+    if (!await save()) { error.value = error.value || 'Збережіть чернетку, щоб додати коментар до її версії.'; return }
+    try {
+      const checkpoint = await request('/article/checkpoint', { expectedRevision: expectedRevision.value }) as State
+      state.value = checkpoint
+      expectedRevision.value = checkpoint.article?.revision ?? expectedRevision.value
+    } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося зафіксувати версію статті.'; return }
+  }
+  inspector.value = 'annotations'
+}
+async function annotationCandidateCreated(versionId: string) {
+  try {
+    const refreshed = await request('/article') as State
+    state.value = refreshed
+    expectedRevision.value = refreshed.article?.revision ?? expectedRevision.value
+    candidate.value = refreshed.article?.versions.find(version => version.id === versionId) ?? null
+    if (candidate.value) inspector.value = 'proposal'
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося оновити версію статті.' }
+}
 function format(kind: string) { const chain = editor.value?.chain().focus(); if (!chain) return; if (kind === 'bold') chain.toggleBold().run(); if (kind === 'italic') chain.toggleItalic().run(); if (kind === 'heading') chain.toggleHeading({ level: 2 }).run(); if (kind === 'list') chain.toggleBulletList().run() }
 function inspectEvidence(event: Event) { const target = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-evidence-id]'); if (!target) return false; const item = state.value?.eligibleEvidence.find(row => row.evidenceId === target.dataset.evidenceId); if (!item) return false; event.preventDefault(); selectedEvidence.value = item; linkedWording.value = target.dataset.linkedWording ?? ''; inspector.value = 'evidence'; return true }
 function linkEvidence(item: Evidence) { const current = editor.value; if (!current) return; const { from, to } = current.state.selection; const quote = current.state.doc.textBetween(from, to, '\n'); if (!quote.trim()) { error.value = 'Спочатку виділіть речення, яке підтверджує цей факт.'; return }; current.chain().focus().unsetMark('evidence').setMark('evidence', { claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId, quote }).run(); selectedEvidence.value = item; linkedWording.value = quote }
@@ -333,6 +393,18 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           @click="inspector = inspector === 'history' ? null : 'history'"
         >
           Історія версій
+        </Button><Button
+          class="workspace-button"
+          variant="ghost"
+          @click="openAnnotations"
+        >
+          Коментарі й правки
+        </Button><Button
+          class="workspace-button"
+          variant="ghost"
+          @click="openGoogleDocs"
+        >
+          Google Документи
         </Button>
       </div>
       <div
@@ -345,6 +417,18 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           @click="inspector = 'history'"
         >
           Історія версій
+        </Button><Button
+          class="workspace-button"
+          variant="ghost"
+          @click="openAnnotations"
+        >
+          Коментарі й правки
+        </Button><Button
+          class="workspace-button"
+          variant="ghost"
+          @click="openGoogleDocs"
+        >
+          Google Документи
         </Button>
       </div>
       <div
@@ -471,7 +555,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           </footer>
         </article>
         <aside
-          v-if="inspector"
+          v-show="!!inspector"
           class="article-inspector"
           aria-labelledby="article-inspector-heading"
           @keydown.esc.stop="closeInspector"
@@ -482,7 +566,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               ref="inspectorHeading"
               tabindex="-1"
             >
-              {{ inspector === 'history' ? 'Версії статті' : inspector === 'evidence' ? 'Докази' : inspector === 'import' ? 'Готова стаття' : 'Пропозиція AI' }}
+              {{ inspector === 'history' ? 'Версії статті' : inspector === 'evidence' ? 'Докази' : inspector === 'import' ? 'Готова стаття' : inspector === 'annotations' ? 'Коментарі й правки' : inspector === 'google-docs' ? 'Google Документи' : candidate?.origin === 'AI' ? 'Пропозиція AI' : candidate?.origin === 'UNVERIFIED_IMPORTED' ? 'Імпортована версія' : 'Пропозиція правки' }}
             </h2><button
               type="button"
               aria-label="Закрити контекст"
@@ -512,6 +596,31 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               Додати як чернетку
             </Button>
           </template>
+          <ArticleAnnotations
+            v-if="inspector === 'annotations'"
+            :project-id="projectId"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :target-version-id="annotationVersion.id"
+            :content-hash="annotationVersion.contentHash"
+            :expected-article-revision="expectedRevision"
+            :anchor="annotationAnchor"
+            :readonly="readonly"
+            @session-expired="emit('session-expired')"
+            @candidate-created="annotationCandidateCreated"
+          />
+          <GoogleDocsBinding
+            v-if="googleDocsVisited"
+            v-show="inspector === 'google-docs'"
+            :project-id="projectId"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :expected-article-revision="expectedRevision"
+            :target-version-id="annotationVersion?.id ?? null"
+            :archived="!!archived"
+            @session-expired="emit('session-expired')"
+            @candidate-created="annotationCandidateCreated"
+          />
           <template v-if="inspector === 'evidence'">
             <section
               v-if="selectedEvidence"
@@ -607,11 +716,11 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             </section>
           </template>
           <template v-if="inspector === 'proposal' && candidate">
-            <p>Пропозиція AI · Не застосовано</p><h3>{{ candidate.content.title }}</h3><h4>Поточний текст</h4><ArticlePreview :document="payload().content.document" /><h4>Запропонований текст</h4><ArticlePreview :document="candidate.content.document" /><p v-if="candidate.sourceArticleRevision !== expectedRevision || dirty">
+            <p>{{ candidate.origin === 'AI' ? 'Пропозиція AI · Не застосовано' : candidate.origin === 'UNVERIFIED_IMPORTED' ? 'Імпортована версія · Не застосовано' : 'Пропозиція правки · Не застосовано' }}</p><h3>{{ candidate.content.title }}</h3><h4>Поточний текст</h4><ArticlePreview :document="payload().content.document" /><h4>Запропонований текст</h4><ArticlePreview :document="candidate.content.document" /><p v-if="(candidate.origin === 'AI' && candidate.sourceArticleRevision !== expectedRevision) || dirty">
               Чернетка змінилася після запуску. Цю пропозицію не можна застосувати до поточного тексту.
             </p><Button
               class="workspace-button workspace-button-primary"
-              :disabled="busy || dirty || conflict || readonly || candidate.sourceArticleRevision !== expectedRevision"
+              :disabled="busy || dirty || conflict || readonly || (candidate.origin === 'AI' && candidate.sourceArticleRevision !== expectedRevision)"
               @click="action(`/article/${candidate.id}/apply`, {}, true)"
             >
               Застосувати до чернетки
@@ -620,10 +729,19 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
         </aside>
       </div>
       <div
-        v-if="proposals.length && inspector !== 'history' && inspector !== 'proposal'"
+        v-if="(proposals.length || importedCandidates.length) && inspector !== 'history' && inspector !== 'proposal'"
         class="article-proposals"
       >
         <Button
+          v-for="version in importedCandidates"
+          :key="version.id"
+          class="workspace-button"
+          variant="outline"
+          @click="candidate = version; inspector = 'proposal'"
+        >
+          Переглянути імпортовану версію {{ version.number }}
+        </Button><Button
+          v-if="proposals.length"
           class="workspace-button"
           variant="outline"
           @click="candidate = proposals[0] ?? null; inspector = 'proposal'"
