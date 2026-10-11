@@ -1,6 +1,6 @@
 # ContextFlow agent guide
 
-ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1, M2 and M3.1–M3.3 are DONE locally; next work is docs/PLAN.md M3.4. Read docs/STATUS.md and the relevant module for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
+ContextFlow turns user sources into reviewed articles, channel content and visuals with evidence/version traceability. Use the smallest correct modular-monolith design. M1, M2, M3.1–M3.4 and Google Docs GD-00–GD-06 are DONE locally; next milestone is docs/PLAN.md M4.1. Google cloud rollout and owner manual checks remain separate. Read docs/STATUS.md and the relevant module for current scope; earlier receipts are historical evidence and need not be loaded unless the task touches their boundary. See docs/RUNBOOK.md for actual commands and docs/ENVIRONMENT.md for local/cloud settings.
 
 ## Read only what the task needs
 

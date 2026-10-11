@@ -160,21 +160,7 @@ export class TelegramService {
     const staleReasons = inputs ? await this.stale(tx, project, inputs) : [];
     const sourceArticleIssues = approvedArticle ? await this.articles.inspectVersion(tx, project, approvedArticle) : null;
     const revisions = await Promise.all((adaptation?.revisions ?? []).map(async row => {
-      const staleReasons = await this.stale(tx, project, row), content = telegramContentSchema.parse(row.content);
-      const reviewedBasis = row.reviewedAt ? row.reviewedBasisRevisionId : row.basisRevisionId;
-      const reviewedBrief = row.reviewedAt ? row.reviewedBriefRevisionId : row.briefRevisionId;
-      const details = await this.evidenceDetail(tx, project, content, { ...row, basisRevisionId: reviewedBasis });
-      const blockingReasons = details.issues.map(issue => issue.reason);
-      if (!content.text.trim()) blockingReasons.push('EMPTY_CONTENT');
-      if (details.hasUnmapped && !row.acknowledgedUnmapped) blockingReasons.push('UNMAPPED_NOT_ACKNOWLEDGED');
-      if (staleReasons.includes('INVALID_ORIGINAL_FACTUAL_BASIS') || staleReasons.includes('INVALID_ORIGINAL_SOURCE_ARTICLE') || staleReasons.includes('INVALID_ORIGINAL_SOURCE_EVIDENCE')) blockingReasons.push('ORIGINAL_DEPENDENCY_BLOCKED');
-      if (row.contentMode === 'FACTUAL') {
-        if (!reviewedBasis || !(await this.facts.inspectBasisRevision(tx, project, reviewedBasis)).valid) blockingReasons.push('FACTUAL_BASIS_BLOCKED');
-      }
-      if (reviewedBrief) {
-        const required = await tx.briefRequiredClaim.findMany({ where: { projectId: project, briefRevisionId: reviewedBrief } });
-        if (required.some(item => !content.mappings.some(mapping => mapping.claimRevisionId === item.claimRevisionId))) blockingReasons.push('REQUIRED_FACTS_MISSING');
-      }
+      const inspection = await this.inspectRevision(tx, project, row), content = telegramContentSchema.parse(row.content);
       const mappingDetails = await Promise.all(content.mappings.map(async mapping => {
         const evidence = await tx.claimEvidence.findFirst({ where: { id: mapping.evidenceId, claimRevisionId: mapping.claimRevisionId, projectId: project },
           include: { claimRevision: true, snapshot: { include: { material: true } } } });
@@ -182,9 +168,7 @@ export class TelegramService {
           evidence: evidence ? { wording: evidence.claimRevision.wording, quote: evidence.quote, snapshotId: evidence.snapshotId,
             materialTitle: evidence.snapshot.material.label } : null };
       }));
-      return { ...json(row), status: row.withdrawnAt ? 'WITHDRAWN' : row.approvedAt ? 'APPROVED' : 'PROPOSED', staleReasons,
-        mappingDetails, hasUnmapped: details.hasUnmapped, blockingReasons: [...new Set(blockingReasons)],
-        eligible: !!row.approvedAt && !row.withdrawnAt && !staleReasons.length && !blockingReasons.length };
+      return { ...json(row), status: row.withdrawnAt ? 'WITHDRAWN' : row.approvedAt ? 'APPROVED' : 'PROPOSED', mappingDetails, ...inspection };
     }));
     return { adaptation: adaptation ? { id: adaptation.id, revision: adaptation.revision, draft: json(adaptation.draft), currentApprovedRevisionId: adaptation.currentApprovedRevisionId,
       revisions } : null,
@@ -194,6 +178,29 @@ export class TelegramService {
       staleReasons, mappingIssues: detail.issues, hasUnmapped: detail.hasUnmapped, blockingReasons: [...basisState.blockingReasons, ...(detail.issues.length ? ['INVALID_EVIDENCE_MAPPINGS'] : [])] };
   }
   get(user: string, project: string) { return this.command(user, project, tx => this.state(tx, project), false); }
+
+  // The caller holds the authorized Project transaction/lock. Export and editor
+  // share this inspection so delivery cannot use weaker freshness rules.
+  async inspectRevision(tx: Prisma.TransactionClient, project: string, row: AdaptationRevision) {
+    const staleReasons = await this.stale(tx, project, row), content = telegramContentSchema.parse(row.content);
+    const reviewedBasis = row.reviewedAt ? row.reviewedBasisRevisionId : row.basisRevisionId;
+    const reviewedBrief = row.reviewedAt ? row.reviewedBriefRevisionId : row.briefRevisionId;
+    const details = await this.evidenceDetail(tx, project, content, { ...row, basisRevisionId: reviewedBasis });
+    const blockingReasons = details.issues.map(issue => issue.reason);
+    if (row.projectId !== project || canonicalManifestHash(row.content) !== row.sha256) blockingReasons.push('CONTENT_INTEGRITY');
+    if (!content.text.trim()) blockingReasons.push('EMPTY_CONTENT');
+    if (!row.claimsSealed) blockingReasons.push('UNSEALED_EVIDENCE');
+    if (row.withdrawnAt) blockingReasons.push('APPROVAL_WITHDRAWN');
+    if (details.hasUnmapped && !row.acknowledgedUnmapped) blockingReasons.push('UNMAPPED_NOT_ACKNOWLEDGED');
+    if (staleReasons.some(reason => ['INVALID_ORIGINAL_FACTUAL_BASIS', 'INVALID_ORIGINAL_SOURCE_ARTICLE', 'INVALID_ORIGINAL_SOURCE_EVIDENCE'].includes(reason))) blockingReasons.push('ORIGINAL_DEPENDENCY_BLOCKED');
+    if (row.contentMode === 'FACTUAL' && (!reviewedBasis || !(await this.facts.inspectBasisRevision(tx, project, reviewedBasis)).valid)) blockingReasons.push('FACTUAL_BASIS_BLOCKED');
+    if (reviewedBrief) {
+      const required = await tx.briefRequiredClaim.findMany({ where: { projectId: project, briefRevisionId: reviewedBrief } });
+      if (required.some(item => !content.mappings.some(mapping => mapping.claimRevisionId === item.claimRevisionId))) blockingReasons.push('REQUIRED_FACTS_MISSING');
+    }
+    return { staleReasons, blockingReasons: [...new Set(blockingReasons)], hasUnmapped: details.hasUnmapped,
+      eligible: !!row.approvedAt && !row.withdrawnAt && !staleReasons.length && !blockingReasons.length };
+  }
 
   private async writeDraft(tx: Prisma.TransactionClient, adaptationId: string, project: string, user: string, content: TelegramContent, inputs: Inputs, baseRevisionId: string | null, origin: 'MANUAL' | 'AI') {
     await this.evidenceDetail(tx, project, content, inputs, true);
