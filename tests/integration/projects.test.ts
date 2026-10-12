@@ -1,7 +1,11 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { access } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { Pool } from 'pg';
 import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { DependencyHealthService, loadRuntimeConfig } from '@contextflow/backend';
+import { DependencyHealthService, DurableJobService, EXTERNAL_PROCESSING_NOTICE, JobFenceLost, loadRuntimeConfig,
+  PrivateAssetStore, PrivateObjectCleanup, privateStorageConfig, type JobHandler } from '@contextflow/backend';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../../apps/api/src/app.module.js';
 import { loadAuthConfig } from '../../apps/api/src/auth/auth-config.js';
@@ -18,10 +22,14 @@ type ProjectDto = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  trashedAt: string | null;
+  purgeAfter: string | null;
+  canPurge: boolean;
+  workspaceOwnerId: string;
 };
 
 type ApiIdentity = { id: string; email: string; cookie: string; session: ProviderSession };
-type WorkspaceDto = { id: string; name: string; ownerId: string; archivedAt: string | null; styleRevision: number; members?: { userId: string }[] };
+type WorkspaceDto = { id: string; name: string; ownerId: string; archivedAt: string | null; styleRevision: number; lifecycleRevision: number; members?: { userId: string }[] };
 type HttpContext = { baseUrl: string; origin: string };
 type ApiReply<T> = { response: Response; body: T };
 
@@ -35,6 +43,10 @@ describe('isolated project and private asset API', () => {
   const authConfig = loadAuthConfig();
   const provider = new AuthProvider(authConfig);
   const health = new DependencyHealthService(runtime);
+  const jobs = new DurableJobService(health.prisma, { noticeVersion: EXTERNAL_PROCESSING_NOTICE.version });
+  const privateStore = new PrivateAssetStore(privateStorageConfig({ NODE_ENV: 'test' }));
+  const storedFixtureObjects: { bucket: string; objectKey: string }[] = [];
+  const migration = new Pool({ connectionString: runtime.directDatabaseUrl, ssl: false });
   const sessions = new SessionService(health.prisma, provider, authConfig);
   const identities: ApiIdentity[] = [];
   const primaryWorkspaces = new Map<string, string>();
@@ -123,6 +135,10 @@ describe('isolated project and private asset API', () => {
     return created.body.workspace.id;
   }
 
+  async function workspaceRevision(workspaceId: string) {
+    return (await health.prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { lifecycleRevision: true } })).lifecycleRevision;
+  }
+
   async function createProject(identityValue: ApiIdentity, topic = 'A project topic', formats: string[] = ['LINKEDIN_TEXT'], workspaceId?: string) {
     return request<{ project: ProjectDto }>(identityValue, 'POST', '/api/v1/projects', { topic, formats, workspaceId: workspaceId ?? await primaryWorkspace(identityValue) });
   }
@@ -131,12 +147,15 @@ describe('isolated project and private asset API', () => {
     // Tear down in FK order, restricted to synthetic test identities and their projects.
     const ownerIds = identities.map(value => value.id);
     if (ownerIds.length) {
-      const projects = await health.prisma.project.findMany({ where: { createdBy: { in: ownerIds } }, select: { id: true } });
+      const projects = await health.prisma.project.findMany({ where: { createdBy: { in: ownerIds } }, select: { id: true, revision: true, workspace: { select: { ownerId: true } } } });
       const projectIds = projects.map(project => project.id);
       if (projectIds.length) {
-        await health.prisma.asset.deleteMany({ where: { projectId: { in: projectIds } } });
-        await health.prisma.projectMember.deleteMany({ where: { projectId: { in: projectIds } } });
-        await health.prisma.project.deleteMany({ where: { id: { in: projectIds } } });
+        await health.prisma.workspace.updateMany({ where: { ownerId: { in: ownerIds }, trashedAt: { not: null } }, data: { trashedAt: null, purgeAfter: null, archivedAt: null, lifecycleRevision: { increment: 1 } } });
+        for (const project of projects) {
+          const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+          await health.prisma.project.update({ where: { id: project.id }, data: { trashedAt: old, purgeAfter: new Date(old.getTime() + 30 * 24 * 60 * 60 * 1000) } });
+          await health.prisma.$queryRaw`SELECT contextflow.purge_project_graph(${project.id}::uuid,${project.workspace.ownerId}::uuid,${project.revision})`;
+        }
       }
       const workspaces = await health.prisma.workspace.findMany({ where: { ownerId: { in: ownerIds } }, select: { id: true } });
       const workspaceIds = workspaces.map(workspace => workspace.id);
@@ -146,6 +165,9 @@ describe('isolated project and private asset API', () => {
         await health.prisma.workspaceMember.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
         await health.prisma.workspace.deleteMany({ where: { id: { in: workspaceIds } } });
       }
+      const client = await migration.connect();
+      try { await client.query('DELETE FROM contextflow."PrivateObjectDeletion" WHERE "requestedBy"=ANY($1::uuid[])', [ownerIds]); }
+      finally { client.release(); }
       await health.prisma.projectMember.deleteMany({ where: { userId: { in: ownerIds } } });
       await health.prisma.appSession.deleteMany({ where: { userId: { in: ownerIds } } });
       await health.prisma.userProfile.deleteMany({ where: { id: { in: ownerIds } } });
@@ -158,6 +180,8 @@ describe('isolated project and private asset API', () => {
       }
     }
     await app?.close();
+    for (const object of storedFixtureObjects) await privateStore.remove(object.bucket, object.objectKey);
+    await migration.end();
     await health.onModuleDestroy();
   });
 
@@ -239,6 +263,150 @@ describe('isolated project and private asset API', () => {
     expect((await request(member, 'GET', `/api/v1/projects/${foreign.body.project.id}/assets/${asset.id}`)).response.status).toBe(404);
   });
 
+  it('applies member lifecycle CAS and exposes trashed Projects only in recovery listings', async () => {
+    const owner = await identity(), member = await identity(), outsider = await identity();
+    const workspaceId = await primaryWorkspace(owner);
+    await health.prisma.workspaceMember.create({ data: { workspaceId, userId: member.id } });
+    const project = (await createProject(owner, 'Lifecycle project', ['ARTICLE'], workspaceId)).body.project;
+    await health.prisma.userProfile.update({ where: { id: owner.id }, data: { externalProcessingNoticeVersion: EXTERNAL_PROCESSING_NOTICE.version, externalProcessingAcceptedAt: new Date() } });
+    const queued = await health.prisma.$transaction(tx => jobs.create(tx, { projectId: project.id, userId: owner.id, operation: 'ARTICLE_GENERATION',
+      contractVersion: 'article-v1', commandKey: 'm43-lifecycle-fence', inputManifest: { fixture: true } }));
+    const claimed = await jobs.claim(queued.id, 1, 'm43-lifecycle-test');
+    expect(claimed).not.toBeNull();
+    await jobs.providerIntent(claimed!.job, claimed!.attempt, 'synthetic-remote-run');
+    const archived = await request<{ project: ProjectDto }>(member, 'POST', `/api/v1/projects/${project.id}/archive`, { expectedRevision: project.revision });
+    expect(archived.response.status).toBe(201);
+    expect(archived.body.project).toMatchObject({ revision: 2, archivedAt: expect.any(String), trashedAt: null });
+    const terminal = await health.prisma.job.findUniqueOrThrow({ where: { id: queued.id }, include: { attempts: true } });
+    expect(terminal).toMatchObject({ status: 'OUTCOME_UNKNOWN', providerOutcome: 'MAY_STILL_RUN', fencingToken: 2 });
+    expect(terminal.attempts[0]).toMatchObject({ providerOutcome: 'MAY_STILL_RUN', finishedAt: expect.any(Date) });
+    let lateCommit = false;
+    const handler: JobHandler = { operation: 'ARTICLE_GENERATION', execute: async () => ({}), commit: async () => { lateCommit = true; return {}; } };
+    await expect(jobs.succeed(claimed!.job, claimed!.attempt, handler, { fixture: true })).rejects.toBeInstanceOf(JobFenceLost);
+    expect(lateCommit).toBe(false);
+    expect((await request(owner, 'POST', `/api/v1/projects/${project.id}/trash`, { expectedRevision: 1 })).response.status).toBe(409);
+    const trashed = await request<{ project: ProjectDto }>(owner, 'POST', `/api/v1/projects/${project.id}/trash`, { expectedRevision: 2 });
+    expect(trashed.response.status).toBe(201);
+    expect(trashed.body.project).toMatchObject({ revision: 3, archivedAt: expect.any(String), trashedAt: expect.any(String), canPurge: true });
+    expect((await request(member, 'GET', `/api/v1/projects/${project.id}`)).response.status).toBe(404);
+    expect((await request<{ projects: ProjectDto[] }>(member, 'GET', `/api/v1/projects?workspaceId=${workspaceId}&state=TRASHED`)).body.projects.map(row => row.id)).toContain(project.id);
+    expect((await request(owner, 'POST', `/api/v1/projects/${project.id}/purge`, { expectedRevision: 3 })).response.status).toBe(409);
+    expect((await request(outsider, 'POST', `/api/v1/projects/${project.id}/purge`, { expectedRevision: 1 })).response.status).toBe(404);
+    expect((await request(outsider, 'POST', `/api/v1/projects/${project.id}/restore`, { expectedRevision: 3 })).response.status).toBe(404);
+    const restored = await request<{ project: ProjectDto }>(member, 'POST', `/api/v1/projects/${project.id}/restore`, { expectedRevision: 3 });
+    expect(restored.response.status).toBe(201);
+    expect(restored.body.project).toMatchObject({ revision: 4, archivedAt: expect.any(String), trashedAt: null, purgeAfter: null });
+    const priorArchive = restored.body.project.archivedAt;
+    await health.prisma.workspaceMember.updateMany({ where: { workspaceId, userId: member.id, leftAt: null }, data: { leftAt: new Date() } });
+    const workspaceTrash = await request<{ workspace: WorkspaceDto }>(owner, 'POST', `/api/v1/workspaces/${workspaceId}/trash`, { expectedRevision: await workspaceRevision(workspaceId) });
+    expect(workspaceTrash.response.status).toBe(201);
+    expect((await request(owner, 'GET', `/api/v1/workspaces/${workspaceId}/style`)).response.status).toBe(404);
+    expect((await request<{ workspaces: WorkspaceDto[] }>(owner, 'GET', '/api/v1/workspaces')).body.workspaces.map(row => row.id)).toContain(workspaceId);
+    expect((await request(owner, 'POST', `/api/v1/workspaces/${workspaceId}/restore`, { expectedRevision: workspaceTrash.body.workspace.lifecycleRevision })).response.status).toBe(201);
+    expect((await health.prisma.project.findUniqueOrThrow({ where: { id: project.id } })).archivedAt?.toISOString()).toBe(priorArchive);
+  });
+
+  it('permanently purges a retained Project graph and journals private object cleanup without touching sibling Projects', async () => {
+    // Integration runs use a disposable TEST schema; discard pending journal rows left by an interrupted earlier run.
+    const priorJournals = await migration.connect();
+    try { await priorJournals.query('DELETE FROM contextflow."PrivateObjectDeletion" WHERE "state"=\'PENDING\''); }
+    finally { priorJournals.release(); }
+    const owner = await identity(), workspaceId = await primaryWorkspace(owner);
+    const project = (await createProject(owner, 'Retained graph', ['ARTICLE'], workspaceId)).body.project;
+    const sibling = (await createProject(owner, 'Keep sibling', ['ARTICLE'], workspaceId)).body.project;
+    const materialId = randomUUID(), snapshotId = randomUUID(), text = 'Synthetic included source for purge graph.';
+    const stored = await privateStore.put(project.id, randomUUID(), Buffer.from(text));
+    const { bucket, objectKey } = stored;
+    storedFixtureObjects.push(stored);
+    await health.prisma.material.create({ data: { id: materialId, projectId: project.id, kind: 'TEXT', purpose: 'NOTES', label: 'Purge fixture', createdBy: owner.id } });
+    await health.prisma.sourceSnapshot.create({ data: { id: snapshotId, projectId: project.id, materialId, sequence: 1, normalizedText: text,
+      sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text), origin: 'MANUAL_TEXT', createdBy: owner.id } });
+    await health.prisma.material.update({ where: { id: materialId }, data: { currentSnapshotId: snapshotId, revision: { increment: 1 }, updatedAt: new Date() } });
+    const asset = await health.prisma.asset.create({ data: { id: randomUUID(), projectId: project.id, bucket, objectKey,
+      mediaType: 'text/plain', bytes: BigInt(Buffer.byteLength(text)), sha256: createHash('sha256').update(text).digest('hex'),
+      state: 'AVAILABLE', purpose: 'ORIGINAL', createdBy: owner.id } });
+    const trashed = await request<{ project: ProjectDto }>(owner, 'POST', `/api/v1/projects/${project.id}/trash`, { expectedRevision: 1 });
+    expect(trashed.response.status).toBe(201);
+    await health.prisma.project.update({ where: { id: project.id }, data: { trashedAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000), purgeAfter: new Date(Date.now() - 24 * 60 * 60 * 1000) } });
+    const purged = await request<{ purge: { projectId: string; deletedRows: number; cleanupPending: number }; cleanupPending: boolean }>(owner,
+      'POST', `/api/v1/projects/${project.id}/purge`, { expectedRevision: 2 });
+    expect(purged.response.status).toBe(201);
+    expect(purged.body).toMatchObject({ cleanupPending: true, purge: { projectId: project.id, cleanupPending: 1 } });
+    expect(await health.prisma.project.findUnique({ where: { id: project.id } })).toBeNull();
+    expect(await health.prisma.sourceSnapshot.findUnique({ where: { id: snapshotId } })).toBeNull();
+    expect(await health.prisma.material.findUnique({ where: { id: materialId } })).toBeNull();
+    expect(await health.prisma.asset.findUnique({ where: { id: asset.id } })).toBeNull();
+    expect(await health.prisma.project.findUnique({ where: { id: sibling.id } })).not.toBeNull();
+    expect(await health.prisma.privateObjectDeletion.findFirst({ where: { projectId: project.id, bucket, objectKey,
+      state: 'PENDING', requestedBy: owner.id } })).not.toBeNull();
+    const cleanup = new PrivateObjectCleanup(health.prisma, privateStore);
+    const unavailable = new PrivateObjectCleanup(health.prisma, { remove: async () => { throw new Error('synthetic storage outage'); } });
+    expect(await unavailable.processOne()).toBe(true);
+    expect(await health.prisma.privateObjectDeletion.findFirst({ where: { projectId: project.id, objectKey }, select: { errorCategory: true, attempts: true } }))
+      .toMatchObject({ errorCategory: 'STORAGE_UNAVAILABLE', attempts: 1 });
+    await health.prisma.privateObjectDeletion.updateMany({ where: { projectId: project.id, objectKey, state: 'PENDING' }, data: { retryAfter: new Date(0) } });
+    await privateStore.remove(bucket, objectKey); // Simulate unlink succeeding just before a database commit failure.
+    expect(await cleanup.processOne()).toBe(true); // Retrying an already absent private file must be idempotent.
+    expect(await health.prisma.privateObjectDeletion.findFirst({ where: { projectId: project.id, objectKey }, select: { state: true, attempts: true, errorCategory: true } }))
+      .toMatchObject({ state: 'DELETED', attempts: 2, errorCategory: null });
+    await expect(access(resolve(privateStore.config.directory, ...objectKey.split('/')))).rejects.toMatchObject({ code: 'ENOENT' });
+    const referencedObject = await privateStore.put(sibling.id, randomUUID(), Buffer.from('Referenced live object.'));
+    storedFixtureObjects.push(referencedObject);
+    const liveAsset = await health.prisma.asset.create({ data: { id: randomUUID(), projectId: sibling.id, bucket: referencedObject.bucket,
+      objectKey: referencedObject.objectKey, mediaType: 'text/plain', bytes: 23n, sha256: createHash('sha256').update('Referenced live object.').digest('hex'),
+      state: 'AVAILABLE', purpose: 'ORIGINAL', createdBy: owner.id } });
+    const client = await migration.connect();
+    try {
+      await client.query('INSERT INTO contextflow."PrivateObjectDeletion"("id","projectId","workspaceId","requestedBy","bucket","objectKey") VALUES($1,$2,$3,$4,$5,$6)',
+        [randomUUID(), project.id, workspaceId, owner.id, referencedObject.bucket, referencedObject.objectKey]);
+    } finally { client.release(); }
+    let removedReferencedObject = false;
+    const referenceGuard = new PrivateObjectCleanup(health.prisma, { remove: async (targetBucket, targetKey) => {
+      removedReferencedObject = true; await privateStore.remove(targetBucket, targetKey);
+    } });
+    expect(await referenceGuard.processOne()).toBe(true);
+    expect(removedReferencedObject).toBe(false);
+    expect(await health.prisma.privateObjectDeletion.findFirst({ where: { projectId: project.id, objectKey: referencedObject.objectKey }, select: { errorCategory: true, attempts: true } }))
+      .toMatchObject({ errorCategory: 'REFERENCE_CONFLICT', attempts: 1 });
+    expect(await health.prisma.asset.findUnique({ where: { id: liveAsset.id } })).not.toBeNull();
+    await expect(access(resolve(privateStore.config.directory, ...referencedObject.objectKey.split('/')))).resolves.toBeUndefined();
+    const journalClient = await migration.connect();
+    try { await journalClient.query('DELETE FROM contextflow."PrivateObjectDeletion" WHERE "projectId"=$1 AND "objectKey"=$2', [project.id, referencedObject.objectKey]); }
+    finally { journalClient.release(); }
+    const shadowProject = (await createProject(owner, 'Catalog shadow guard', ['ARTICLE'], workspaceId)).body.project;
+    const shadowTrash = await request<{ project: ProjectDto }>(owner, 'POST', `/api/v1/projects/${shadowProject.id}/trash`, { expectedRevision: 1 });
+    expect(shadowTrash.response.status).toBe(201);
+    await health.prisma.project.update({ where: { id: shadowProject.id }, data: { trashedAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000), purgeAfter: new Date(Date.now() - 24 * 60 * 60 * 1000) } });
+    const triggerModes = async (client: typeof health.prisma) => client.$queryRaw<Array<{ tableName: string; triggerName: string; mode: string }>>`
+      SELECT c.relname AS "tableName", t.tgname AS "triggerName", t.tgenabled::text AS mode
+      FROM pg_catalog.pg_trigger t
+      JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='contextflow' AND NOT t.tgisinternal
+        AND c.relname IN ('Project','Material','SourceSnapshot','Brief','Article','Job')
+      ORDER BY c.relname,t.tgname`;
+    const triggerModesBefore = await triggerModes(health.prisma);
+    await health.prisma.$transaction(async tx => {
+      // A caller-controlled pg_temp catalog name must not replace pg_catalog in the SECURITY DEFINER purge.
+      await tx.$executeRaw`CREATE TEMP TABLE pg_trigger(tgrelid oid, tgname name, tgenabled "char", tgisinternal boolean) ON COMMIT DROP`;
+      await tx.$queryRaw`SELECT contextflow.purge_project_graph(${shadowProject.id}::uuid,${owner.id}::uuid,2)`;
+      const triggerModesAfter = await triggerModes(tx as typeof health.prisma);
+      expect(triggerModesAfter).toEqual(triggerModesBefore);
+    });
+    expect(await health.prisma.project.findUnique({ where: { id: shadowProject.id } })).toBeNull();
+    const trashedWorkspace = await request<{ workspace: WorkspaceDto }>(owner, 'POST', `/api/v1/workspaces/${workspaceId}/trash`, { expectedRevision: 1 });
+    expect(trashedWorkspace.response.status).toBe(201);
+    expect((await request(owner, 'POST', `/api/v1/workspaces/${workspaceId}/purge`, { expectedRevision: trashedWorkspace.body.workspace.lifecycleRevision })).response.status).toBe(409);
+    await health.prisma.workspace.update({ where: { id: workspaceId }, data: { trashedAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000), purgeAfter: new Date(Date.now() - 24 * 60 * 60 * 1000) } });
+    const purgedWorkspace = await request<{ purge: { workspaceId: string; deletedProjects: number } }>(owner, 'POST', `/api/v1/workspaces/${workspaceId}/purge`,
+      { expectedRevision: trashedWorkspace.body.workspace.lifecycleRevision });
+    if (purgedWorkspace.response.status !== 201) await health.prisma.$queryRaw`SELECT contextflow.purge_workspace_graph(${workspaceId}::uuid,${owner.id}::uuid,${trashedWorkspace.body.workspace.lifecycleRevision})`;
+    expect(purgedWorkspace.response.status, JSON.stringify(purgedWorkspace.body)).toBe(201);
+    expect(purgedWorkspace.body.purge).toMatchObject({ workspaceId, deletedProjects: 1 });
+    expect(await health.prisma.workspace.findUnique({ where: { id: workspaceId } })).toBeNull();
+    expect(await health.prisma.project.findUnique({ where: { id: sibling.id } })).toBeNull();
+  });
+
   it('transfers ownership atomically, lets members leave, and archives/restores sole-owner history', async () => {
     const owner = await identity();
     const member = await identity();
@@ -264,7 +432,7 @@ describe('isolated project and private asset API', () => {
     expect(archived.archivedAt).not.toBeNull();
     expect(archived.ownerId).toBe(newOwner.id);
     expect((await request(newOwner, 'GET', `/api/v1/projects/${project.body.project.id}`)).response.status).toBe(200);
-    expect((await request(newOwner, 'POST', `/api/v1/workspaces/${workspaceId}/restore`)).response.status).toBe(201);
+    expect((await request(newOwner, 'POST', `/api/v1/workspaces/${workspaceId}/restore`, { expectedRevision: await workspaceRevision(workspaceId) })).response.status).toBe(201);
     expect((await createProject(newOwner, 'After restore', ['ARTICLE'], workspaceId)).response.status).toBe(201);
   });
 
@@ -280,9 +448,33 @@ describe('isolated project and private asset API', () => {
     expect(updated.body.style).toMatchObject({ revision: 2, tone: 'Clear and concise' });
     expect((await request(owner, 'PATCH', `/api/v1/workspaces/${workspaceId}/style`, { expectedRevision: 1, tone: 'Stale' })).response.status).toBe(409);
     expect((await health.prisma.workspaceStyleRevision.findUniqueOrThrow({ where: { workspaceId_revision: { workspaceId, revision: 1 } } })).tone).toBe('');
-    expect((await request(owner, 'POST', `/api/v1/workspaces/${workspaceId}/archive`)).response.status).toBe(409);
+    const project = (await createProject(member, 'Brief inherits Workspace style', ['ARTICLE'], workspaceId)).body.project;
+    const context = [] as { purpose: 'BRANDBOOK' | 'STYLE_SAMPLE'; id: string; snapshotId: string; text: string }[];
+    for (const purpose of ['BRANDBOOK', 'STYLE_SAMPLE'] as const) {
+      const id = randomUUID(), snapshotId = randomUUID(), text = `Frozen ${purpose} text.`;
+      await health.prisma.material.create({ data: { id, projectId: project.id, kind: 'TEXT', purpose, label: purpose, createdBy: owner.id } });
+      await health.prisma.sourceSnapshot.create({ data: { id: snapshotId, projectId: project.id, materialId: id, sequence: 1, normalizedText: text,
+        sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text), origin: 'MANUAL_TEXT', createdBy: owner.id } });
+      await health.prisma.material.update({ where: { id }, data: { included: true, currentSnapshotId: snapshotId, revision: { increment: 1 }, updatedAt: new Date() } });
+      context.push({ purpose, id, snapshotId, text });
+    }
+    const briefInput = { expectedRevision: 0, contentMode: 'CREATIVE', topic: 'Synthetic', audience: 'Readers', centralMessage: 'Message', category: 'Education',
+      targetLength: 500, cta: 'Read', exclusions: [], notes: '', requiredClaimRevisionIds: [] };
+    const firstBrief = await request<{ brief: { currentRevision: { tone: string; workspaceStyleRevision: number; style: { brandbook: string }; contextSnapshots: { snapshotId: string; capturedPurpose: string }[] } } }>(member,
+      'POST', `/api/v1/projects/${project.id}/brief`, briefInput);
+    expect(firstBrief.response.status).toBe(201);
+    expect(firstBrief.body.brief.currentRevision).toMatchObject({ tone: 'Clear and concise', workspaceStyleRevision: 2, style: { brandbook: '' },
+      contextSnapshots: context.map(row => ({ snapshotId: row.snapshotId, capturedPurpose: row.purpose })).sort((a, b) => a.snapshotId.localeCompare(b.snapshotId)) });
+    const nextStyle = await request<{ style: { revision: number } }>(owner, 'PATCH', `/api/v1/workspaces/${workspaceId}/style`,
+      { expectedRevision: 2, tone: 'Warm and direct', brandbook: 'Brand rules v2' });
+    expect(nextStyle.body.style.revision).toBe(3);
+    const secondBrief = await request<{ brief: { history: { tone: string; workspaceStyleRevision: number; style: { brandbook: string } }[]; currentRevision: { tone: string; workspaceStyleRevision: number; style: { brandbook: string } } } }>(member,
+      'POST', `/api/v1/projects/${project.id}/brief`, { ...briefInput, expectedRevision: 1 });
+    expect(secondBrief.body.brief.currentRevision).toMatchObject({ tone: 'Warm and direct', workspaceStyleRevision: 3, style: { brandbook: 'Brand rules v2' } });
+    expect(secondBrief.body.brief.history.find(row => row.workspaceStyleRevision === 2)).toMatchObject({ tone: 'Clear and concise', style: { brandbook: '' } });
+    expect((await request(owner, 'POST', `/api/v1/workspaces/${workspaceId}/archive`, { expectedRevision: await workspaceRevision(workspaceId) })).response.status).toBe(409);
     expect((await request(member, 'POST', `/api/v1/workspaces/${workspaceId}/leave`)).response.status).toBe(204);
-    expect((await request(owner, 'POST', `/api/v1/workspaces/${workspaceId}/archive`)).response.status).toBe(201);
+    expect((await request(owner, 'POST', `/api/v1/workspaces/${workspaceId}/archive`, { expectedRevision: await workspaceRevision(workspaceId) })).response.status).toBe(201);
     expect((await request(owner, 'PATCH', `/api/v1/workspaces/${workspaceId}/style`, { expectedRevision: 2, tone: 'Blocked' })).response.status).toBe(409);
   });
 

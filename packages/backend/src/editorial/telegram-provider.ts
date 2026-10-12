@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { telegramOutputSchema, type TelegramOutput, type TelegramWorkflowRelease } from './telegram-contracts.js';
 
-export const TELEGRAM_CONTRACT = 'telegram-v1';
+export const TELEGRAM_CONTRACT = 'adaptation-v1';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 // Loop events repeat bounded editorial state. These limits do not enlarge the
 // canonical Telegram output accepted below.
@@ -13,18 +13,20 @@ const MAX_INPUT_BYTES = 350000;
 
 type ReleaseArtifact = {
   schemaVersion: 'contextflow-dify-release-v1';
-  operation: 'TELEGRAM_GENERATION';
+  operation: 'ADAPTATION_GENERATION';
   releaseId: string;
   configDigest: string;
-  publishedWorkflowIdEnv: 'DIFY_TELEGRAM_WORKFLOW_ID';
-  configDigestEnv: 'DIFY_TELEGRAM_CONFIG_SHA256';
+  publishedWorkflowIdEnv: 'DIFY_ADAPTATION_WORKFLOW_ID';
+  configDigestEnv: 'DIFY_ADAPTATION_CONFIG_SHA256';
   apiBaseEnv: 'DIFY_API_BASE_URL';
-  apiKeyEnv: 'DIFY_TELEGRAM_API_KEY';
+  apiKeyEnv: 'DIFY_ADAPTATION_API_KEY';
   contractVersion: typeof TELEGRAM_CONTRACT;
   promptTemplateVersion: string;
   promptTemplateFile: string;
   inputVariable: 'editorial_json';
-  outputVariable: 'telegram_json';
+  outputVariable: 'adaptation_json';
+  reportVariable: 'adaptation_report';
+  reportSchemaVersion: 'adaptation-editorial-report-v1';
   responseMode: 'streaming';
   provider: 'dify';
   model: { provider: string; name: string; mode: string; completionParams: Record<string, string | number | boolean> };
@@ -35,17 +37,18 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'TELEGRAM_GENERATION', releaseId: 'telegram-generation-2026-10-10.2',
-  configDigest: 'd3254a4306bae3707068f1159020eb37d9783679f13993d6793c2d03fdbcf8a7', publishedWorkflowIdEnv: 'DIFY_TELEGRAM_WORKFLOW_ID',
-  configDigestEnv: 'DIFY_TELEGRAM_CONFIG_SHA256',
-  apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_TELEGRAM_API_KEY', contractVersion: TELEGRAM_CONTRACT,
-  promptTemplateVersion: 'telegram-generation-v1', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
-  outputVariable: 'telegram_json', responseMode: 'streaming', provider: 'dify',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'ADAPTATION_GENERATION', releaseId: 'adaptation-generation-2026-10-12.1',
+  configDigest: 'cdbf1b551e583edccf21865081ffedef6f018a12231f44dec538f7a2f1b81603', publishedWorkflowIdEnv: 'DIFY_ADAPTATION_WORKFLOW_ID',
+  configDigestEnv: 'DIFY_ADAPTATION_CONFIG_SHA256',
+  apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_ADAPTATION_API_KEY', contractVersion: TELEGRAM_CONTRACT,
+  promptTemplateVersion: 'adaptation-generation-v2', promptTemplateFile: 'prompt.md', inputVariable: 'editorial_json',
+  outputVariable: 'adaptation_json', reportVariable: 'adaptation_report', reportSchemaVersion: 'adaptation-editorial-report-v1',
+  responseMode: 'streaming', provider: 'dify',
   model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
     max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
-  workflowDslFile: 'telegram-generation-v1.yml',
-  workflowDslSha256: 'b84a7bec0941e39e047f5242e296c0ec214ef964f800d16171e305c7083d38cd',
+  workflowDslFile: 'adaptation-generation-v1.yml',
+  workflowDslSha256: 'd3ffa9e56ec840163cc04d7b8c9fe1203392250d27af3b256ff8890e7a6d85ba',
 };
 
 export type TelegramWorkflowSettings = TelegramWorkflowRelease & { apiKey: string };
@@ -190,33 +193,36 @@ async function streamRun(response: Response, settings: TelegramWorkflowSettings,
 }
 
 const editorialReportSchema = z.object({
-  schemaVersion: z.literal('telegram-editorial-report-v1'),
+  schemaVersion: z.literal('adaptation-editorial-report-v1'),
   status: z.enum(['ready', 'needs_human', 'insufficient_evidence']),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/u).nullable(),
 }).passthrough();
-function extractionFromRun(run: DifyRun): TelegramOutput {
+function extractionFromRun(run: DifyRun, expectedFormat?: TelegramOutput['format']): TelegramOutput {
   if (run.data.status !== 'succeeded') throw new TelegramProviderError('PROVIDER_FAILED', 'Telegram workflow did not succeed', 'KNOWN_FAILED');
-  const report = run.data.outputs?.['telegram_report'];
+  const report = run.data.outputs?.[release.reportVariable];
   if (typeof report !== 'string' || Buffer.byteLength(report) > MAX_EDITORIAL_REPORT_BYTES) {
-    throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Telegram workflow editorial report did not match its contract');
+    throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow editorial report did not match its contract');
   }
   const parsedReport = editorialReportSchema.safeParse(safeJson(report));
-  if (!parsedReport.success) throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Telegram workflow editorial report did not match its contract');
+  if (!parsedReport.success) throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow editorial report did not match its contract');
   if (parsedReport.data.status !== 'ready') {
-    throw new TelegramProviderError('PROVIDER_FAILED', 'Telegram workflow requires editorial intervention before a candidate can be accepted', 'KNOWN_FAILED');
+    throw new TelegramProviderError('PROVIDER_FAILED', 'Channel workflow requires editorial intervention before a candidate can be accepted', 'KNOWN_FAILED');
   }
   if (!parsedReport.data.contentHash) throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Telegram workflow review hash did not match its output');
   const raw = run.data.outputs?.[release.outputVariable];
   const output = typeof raw === 'string' ? safeJson(raw) : raw;
   const parsed = telegramOutputSchema.safeParse(output);
-  if (!parsed.success) throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Telegram workflow output did not match telegram-v1');
+  if (!parsed.success) throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow output did not match adaptation-v1');
+  if (expectedFormat && parsed.data.format !== expectedFormat) {
+    throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow output format did not match the frozen request');
+  }
   if (parsedReport.data.contentHash !== sha256(JSON.stringify(parsed.data))) {
     throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Telegram workflow review hash did not match its output');
   }
   return parsed.data;
 }
 
-export type TelegramProviderInput = { schemaVersion: 'telegram-context-v1'; inputMode: 'DIRECT' | 'ARTICLE_DERIVED';
+export type TelegramProviderInput = { schemaVersion: 'channel-context-v1'; format: TelegramOutput['format']; inputMode: 'DIRECT' | 'ARTICLE_DERIVED';
   contentMode: 'FACTUAL' | 'CREATIVE'; includeLink: boolean;
   brief: Record<string, unknown>; style: { brandbook: string; tone: string; settings: unknown };
   claims: Array<{ claimRevisionId: string; wording: string; evidence: Array<{ evidenceId: string; quote: string; snapshotId: string }> }>;
@@ -228,8 +234,9 @@ export class DifyTelegramProvider {
   async execute(settings: TelegramWorkflowSettings, jobId: string, input: TelegramProviderInput, signal: AbortSignal,
     beforeSubmit: () => Promise<void>, recordRun: (id: string) => Promise<void>): Promise<{ output: TelegramOutput; workflowRunId: string; model: string | null }> {
     const inputBytes = Buffer.byteLength(JSON.stringify(input));
-    if (inputBytes > MAX_INPUT_BYTES || !input.brief || input.schemaVersion !== 'telegram-context-v1'
+    if (inputBytes > MAX_INPUT_BYTES || !input.brief || input.schemaVersion !== 'channel-context-v1'
       || input.inputMode === 'DIRECT' && input.article !== null || input.inputMode === 'ARTICLE_DERIVED' && !input.article
+      || input.format !== 'TELEGRAM_POST' && input.includeLink
       || input.contentMode === 'FACTUAL' && input.claims.length === 0)
       throw new TelegramProviderError('INVALID_INPUT', 'Frozen Telegram context is empty, inconsistent or exceeds its limit', 'NOT_SUBMITTED');
     const origin = settings.endpoint;
@@ -250,7 +257,7 @@ export class DifyTelegramProvider {
       throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Telegram workflow did not honor the pinned streaming response mode', 'UNKNOWN');
     }
     const run = await streamRun(response, settings, signal, recordRun);
-    return { output: extractionFromRun(run), workflowRunId: run.workflow_run_id, model: run.data.model ?? null };
+    return { output: extractionFromRun(run, input.format), workflowRunId: run.workflow_run_id, model: run.data.model ?? null };
   }
   async resume(settings: TelegramWorkflowSettings, runId: string, signal: AbortSignal): Promise<{ output: TelegramOutput; workflowRunId: string; model: string | null }> {
     if (!uuid(runId)) throw new TelegramProviderError('CONFIG', 'Captured Telegram workflow run ID is invalid');

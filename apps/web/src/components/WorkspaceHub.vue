@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   DialogClose, DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle,
   SelectContent, SelectItem, SelectItemIndicator, SelectItemText, SelectPortal, SelectRoot, SelectTrigger, SelectValue, SelectViewport,
@@ -18,11 +18,18 @@ interface Workspace {
   name: string
   ownerId: string
   archivedAt: string | null
+  trashedAt: string | null
+  purgeAfter: string | null
+  lifecycleRevision: number
   members?: Member[]
 }
 
-const props = defineProps<{ csrfToken: string; userId: string }>()
-const emit = defineEmits<{ 'session-expired': []; 'workspace-changed': [] }>()
+const props = defineProps<{ csrfToken: string; userId: string; refreshEpoch?: number }>()
+const emit = defineEmits<{
+  'session-expired': []
+  'workspace-changed': []
+  'workspace-state': [state: { selected: Workspace | null; workspaces: Workspace[] }]
+}>()
 
 const workspaces = ref<Workspace[]>([])
 const selectedId = ref<string | null>(null)
@@ -72,7 +79,19 @@ let selectionVersion = 0
 let listVersion = 0
 
 const selected = computed(() => workspaces.value.find(workspace => workspace.id === selectedId.value) ?? null)
+function publishWorkspaceState() {
+  const active = selectedDetail.value?.id === selectedId.value ? selectedDetail.value : selected.value
+  emit('workspace-state', { selected: active ?? null, workspaces: workspaces.value })
+}
 const isOwner = computed(() => selected.value?.ownerId === props.userId)
+const selectedLifecycleHint = computed(() => {
+  if (!selected.value?.trashedAt) return 'Простір архівовано.'
+  const date = selected.value.purgeAfter ? new Date(selected.value.purgeAfter) : null
+  const label = date && !Number.isNaN(date.getTime())
+    ? new Intl.DateTimeFormat('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' }).format(date)
+    : 'дату не визначено'
+  return `Простір у кошику. Його можна відновити до остаточного видалення; власнику воно доступне після ${label}.`
+})
 const members = computed(() => selectedDetail.value?.members ?? [])
 const otherMembers = computed(() => members.value.filter(member => member.userId !== props.userId))
 const storageKey = `contextflow.workspace.${props.userId}`
@@ -125,6 +144,7 @@ async function loadWorkspaces(preferredId = selectedId.value) {
       : all.find(workspace => !workspace.archivedAt)?.id ?? all[0]?.id ?? null
     if (next === selectedId.value && next) void loadWorkspaceDetail(next)
     else selectWorkspace(next)
+    publishWorkspaceState()
   } catch (cause) {
     if (version !== listVersion) return
     error.value = cause instanceof Error ? cause.message : 'Не вдалося завантажити простори.'
@@ -149,6 +169,7 @@ function selectWorkspace(id: string | null) {
     selectionVersion += 1
     window.localStorage.removeItem(storageKey)
   }
+  publishWorkspaceState()
 }
 
 async function loadWorkspaceDetail(id: string) {
@@ -156,7 +177,10 @@ async function loadWorkspaceDetail(id: string) {
   detailLoading.value = true
   try {
     const result = await request<{ workspace: Workspace }>(`/api/v1/workspaces/${encodeURIComponent(id)}`)
-    if (version === selectionVersion && selectedId.value === id) selectedDetail.value = result.workspace
+    if (version === selectionVersion && selectedId.value === id) {
+      selectedDetail.value = result.workspace
+      publishWorkspaceState()
+    }
   } catch (cause) {
     if (version === selectionVersion) actionError.value = cause instanceof Error ? cause.message : 'Не вдалося завантажити учасників.'
   } finally {
@@ -177,6 +201,7 @@ function switchWorkspace(id: string) {
 
 function allowWorkspaceChange() {
   const hasDraft = !!document.querySelector('.workspace-hub [data-workspace-leave-risk="true"]')
+    || !!document.querySelector('.workspace-recovery [data-workspace-leave-risk="true"]')
     || Array.from(document.querySelectorAll<HTMLInputElement>('.workspace-hub input[type="file"]')).some(input => input.files?.length)
   return !hasDraft || window.confirm('У поточному проєкті є незбережені зміни. Зміна простору закриє їх. Залишити цей проєкт?')
 }
@@ -266,7 +291,8 @@ async function finishLifecycle(action: 'leave' | 'archive' | 'restore') {
   busy.value = true
   actionError.value = ''
   try {
-    await request(`/api/v1/workspaces/${encodeURIComponent(id)}/${action}`, 'POST', {})
+    const body = action === 'leave' ? {} : { expectedRevision: selected.value.lifecycleRevision }
+    await request(`/api/v1/workspaces/${encodeURIComponent(id)}/${action}`, 'POST', body)
     confirmAction.value = null
     await loadWorkspaces(action === 'restore' ? id : null)
     notice.value = action === 'leave' ? 'Ви вийшли з робочого простору.' : action === 'archive' ? 'Простір архівовано.' : 'Простір відновлено.'
@@ -289,6 +315,10 @@ onMounted(() => {
     window.history.replaceState({}, '', url.pathname + url.search + (remainingFragment ? `#${remainingFragment}` : ''))
   }
   void loadWorkspaces()
+})
+
+watch(() => props.refreshEpoch, (next, previous) => {
+  if (next !== previous) void loadWorkspaces()
 })
 </script>
 
@@ -358,7 +388,7 @@ onMounted(() => {
                   :value="workspace.id"
                   class="workspace-select-option"
                 >
-                  <SelectItemText>{{ workspace.name }}{{ workspace.archivedAt ? ' · Архів' : '' }}</SelectItemText>
+                  <SelectItemText>{{ workspace.name }}{{ workspace.trashedAt ? ' · Кошик' : workspace.archivedAt ? ' · Архів' : '' }}</SelectItemText>
                   <SelectItemIndicator class="workspace-option-check">
                     <svg
                       viewBox="0 0 24 24"
@@ -759,14 +789,14 @@ onMounted(() => {
       </Button>
     </section>
     <section
-      v-else-if="selected?.archivedAt"
+      v-else-if="selected?.archivedAt || selected?.trashedAt"
       class="workspace-empty-state"
       aria-labelledby="workspace-archived-title"
     >
       <h1 id="workspace-archived-title">
         {{ selected.name }}
       </h1>
-      <p>Простір архівовано.</p>
+      <p>{{ selectedLifecycleHint }}</p>
       <Button
         v-if="isOwner"
         class="workspace-button workspace-button-primary"
@@ -777,7 +807,7 @@ onMounted(() => {
       </Button>
     </section>
     <ProjectWorkspace
-      v-if="selected && !selected.archivedAt"
+      v-if="selected && !selected.archivedAt && !selected.trashedAt"
       :key="selected.id"
       :csrf-token="csrfToken"
       :workspace-id="selected.id"

@@ -62,7 +62,7 @@ export class GoogleDocBindingService {
         JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
         JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = w."id"
         LEFT JOIN contextflow."Article" a ON a."projectId" = p."id"
-        WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+        WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
           AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL
         FOR UPDATE OF p FOR SHARE OF w, m`
       : await tx.$queryRaw<Array<{ revision: number | null; formats: string[] }>>`
@@ -70,7 +70,7 @@ export class GoogleDocBindingService {
         JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
         JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = w."id"
         LEFT JOIN contextflow."Article" a ON a."projectId" = p."id"
-        WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+        WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
           AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL
         FOR SHARE OF p, w, m`;
     const row = rows[0];

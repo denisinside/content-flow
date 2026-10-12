@@ -16,6 +16,7 @@ interface Version { id: string; number: number; content: Content; contentMode: '
 interface Draft { baseVersionId?: string | null; sha256?: string; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string }
 interface Evidence { claimRevisionId: string; evidenceId: string; wording: string; quote: string; snapshotId: string; materialTitle: string }
 interface State { article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleEvidence: Evidence[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { contentMode: string } } | null; outline: { currentApprovedRevisionId: string | null } | null } }
+interface LanguageSuggestion { id: string; targetType: 'ARTICLE' | 'ADAPTATION'; sourceRevisionId: string; contentHash: string; locator: { field: 'TITLE' | 'BODY' | 'COVER_TEXT'; start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean; resultVersionId?: string | null }
 interface Job { id: string; status: string; operation: string; retryAllowed: boolean }
 const props = defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; archived?: boolean }>()
 const emit = defineEmits<{ 'session-expired': [] }>()
@@ -48,6 +49,10 @@ const importedText = ref('')
 const acknowledgeUnmapped = ref(false)
 const recovered = ref<{ content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; expectedRevision: number } | null>(null)
 const jobs = ref<Job[]>([])
+const languageSuggestions = ref<LanguageSuggestion[]>([])
+const selectedLanguageIds = ref<string[]>([])
+const languageMessage = ref('')
+const languageBusy = ref(false)
 const recoveryKey = `cf:article:${props.userId}:${props.projectId}`
 const base = `/api/v1/projects/${encodeURIComponent(props.projectId)}`
 let disposed = false
@@ -57,6 +62,7 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let inFlight: Promise<boolean> | null = null
 let commandKey: string | null = null
+let languageRequest = 0
 const controller = new AbortController()
 function articleSections(document: EditorNode) {
   const sections: { id: string; title: string; level: number; position: number; size: number }[] = []
@@ -93,6 +99,7 @@ const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'R
 const actionableJobs = computed(() => jobs.value.filter(job => !['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const completedJobs = computed(() => jobs.value.filter(job => ['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const proposals = computed(() => state.value?.article?.versions.filter(version => version.origin === 'AI' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
+const languageCandidates = computed(() => [...new Set(languageSuggestions.value.map(item => item.resultVersionId).filter((id): id is string => !!id))].map(id => state.value?.article?.versions.find(version => version.id === id)).filter((item): item is Version => !!item))
 const importedCandidates = computed(() => state.value?.article?.versions.filter(version => version.origin === 'UNVERIFIED_IMPORTED' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
 const saveStatus = computed(() => saving.value ? 'Зберігаємо…' : conflict.value ? 'Потрібно узгодити зміни' : error.value && dirty.value ? 'Не збережено' : dirty.value ? 'Є незбережені зміни' : 'Збережено')
 const approval = computed(() => state.value?.article?.versions.find(version => version.id === state.value?.article?.currentApprovedVersionId))
@@ -102,11 +109,83 @@ const annotationVersion = computed(() => {
   const version = article?.versions.find(row => row.id === versionId)
   return { id: versionId, contentHash: article?.draft?.baseVersionId === versionId ? article.draft.sha256 ?? version?.sha256 ?? null : version?.sha256 ?? null }
 })
+const languageSourceCurrent = computed(() => {
+  const draft = state.value?.article?.draft
+  const source = state.value?.article?.versions.find(row => row.id === annotationVersion.value.id)
+  return !dirty.value && !!draft && !!source?.sha256 && draft.baseVersionId === source.id && draft.sha256 === source.sha256
+})
+async function loadLanguageSuggestions() {
+  const sourceRevisionId = annotationVersion.value.id
+  const requestId = ++languageRequest
+  if (!sourceRevisionId) { languageSuggestions.value = []; return }
+  try {
+    const params = new URLSearchParams({ targetType: 'ARTICLE', sourceRevisionId })
+    const response = await fetch(`${base}/language-suggestions?${params}`, { credentials: 'same-origin', signal: controller.signal })
+    if (response.status === 401) { emit('session-expired'); return }
+    if (!response.ok) return
+    const result = (await response.json() as { suggestions: LanguageSuggestion[] }).suggestions
+    if (!Array.isArray(result)) return
+    if (requestId !== languageRequest || annotationVersion.value.id !== sourceRevisionId) return
+    languageSuggestions.value = result
+    selectedLanguageIds.value = selectedLanguageIds.value.filter(id => languageSuggestions.value.some(item => item.id === id && item.status === 'OPEN' && !item.stale))
+  } catch { /* Language review is secondary; saved article content remains available. */ }
+}
+async function reviewLanguage() {
+  if (languageBusy.value || readonly.value) return
+  languageBusy.value = true; languageMessage.value = ''; error.value = ''
+  try {
+    if (!await save()) return
+    const draft = state.value?.article?.draft
+    const baseVersion = state.value?.article?.versions.find(item => item.id === draft?.baseVersionId)
+    if (dirty.value || !annotationVersion.value.id || !baseVersion || draft?.sha256 !== baseVersion.sha256) await action('/article/checkpoint')
+    const sourceRevisionId = annotationVersion.value.id
+    const exactVersion = state.value?.article?.versions.find(item => item.id === sourceRevisionId)
+    if (dirty.value || !sourceRevisionId || !exactVersion?.sha256 || !state.value?.article?.draft?.sha256 || state.value.article.draft.sha256 !== exactVersion.sha256) throw new Error('Збережіть версію статті перед мовною перевіркою.')
+    const requestId = ++languageRequest
+    const response = await fetch(`${base}/language-suggestions/review`, { credentials: 'same-origin', signal: controller.signal, method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify({ targetType: 'ARTICLE', sourceRevisionId, expectedRevision: state.value?.article?.revision }) })
+    if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
+    if (!response.ok) { if (response.status === 409) conflict.value = true; throw new Error(response.status === 409 ? 'Стаття змінилася. Оновіть її перед мовною перевіркою.' : 'Не вдалося перевірити мову статті.') }
+    const suggestions = (await response.json() as { suggestions: LanguageSuggestion[] }).suggestions
+    if (disposed || requestId !== languageRequest || annotationVersion.value.id !== sourceRevisionId) return
+    languageSuggestions.value = suggestions
+    selectedLanguageIds.value = languageSuggestions.value.filter(item => item.status === 'OPEN' && !item.stale).map(item => item.id)
+    languageMessage.value = languageSuggestions.value.length ? 'Перегляньте пропозиції та виберіть, які застосувати.' : 'Мовних зауважень не знайдено.'
+  } catch (cause) { if (!disposed) languageMessage.value = cause instanceof Error ? cause.message : 'Не вдалося перевірити мову статті.' }
+  finally { languageBusy.value = false }
+}
+async function mutateLanguage(path: string, body: unknown) {
+  if (languageBusy.value || readonly.value || dirty.value || !languageSourceCurrent.value || !state.value?.article) return
+  const mutationSource = annotationVersion.value.id
+  languageBusy.value = true; languageMessage.value = ''
+  try {
+    const response = await fetch(`${base}/language-suggestions${path}`, { credentials: 'same-origin', signal: controller.signal, method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify(body) })
+    if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
+    if (!response.ok) { if (response.status === 409) conflict.value = true; throw new Error(response.status === 409 ? 'Стаття змінилася. Оновіть її перед застосуванням пропозицій.' : 'Не вдалося оновити мовні пропозиції.') }
+    if (disposed || annotationVersion.value.id !== mutationSource) return
+    if (path === '/accept') {
+      const result = await response.json() as { candidateVersionId?: string }
+      await load()
+      selectedLanguageIds.value = []
+      candidate.value = result.candidateVersionId ? state.value?.article?.versions.find(version => version.id === result.candidateVersionId) ?? null : null
+      if (candidate.value) inspector.value = 'proposal'
+      languageMessage.value = candidate.value ? 'Створено непогоджену версію. Перегляньте її та застосуйте явно.' : 'Створено непогоджену версію. Знайдіть її в історії та застосуйте явно.'
+    }
+    await loadLanguageSuggestions()
+  } catch (cause) { if (!disposed) languageMessage.value = cause instanceof Error ? cause.message : 'Не вдалося оновити мовні пропозиції.' }
+  finally { languageBusy.value = false }
+}
+function acceptLanguage() {
+  const first = languageSuggestions.value.find(item => selectedLanguageIds.value.includes(item.id) && item.status === 'OPEN' && !item.stale)
+  if (!first || !selectedLanguageIds.value.length || !languageSourceCurrent.value) return
+  void mutateLanguage('/accept', { targetType: 'ARTICLE', sourceRevisionId: first.sourceRevisionId, expectedRevision: state.value?.article?.revision, suggestionIds: [...selectedLanguageIds.value] })
+}
+function rejectLanguage(item: LanguageSuggestion) { if (!languageSourceCurrent.value) return; void mutateLanguage(`/${encodeURIComponent(item.id)}/reject`, { expectedRevision: state.value?.article?.revision }) }
+watch(() => annotationVersion.value.id, () => { void loadLanguageSuggestions() })
 function dependencyStatus(reasons: string[]) {
   const labels: Record<string, string> = { WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', BRIEF_CHANGED: 'змінився бриф', MISSING_FACTUAL_BASIS: 'немає придатної фактичної основи', INVALID_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', INVALID_ORIGINAL_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', FACTUAL_BASIS_CHANGED: 'змінилася фактична основа', OUTLINE_CHANGED: 'змінилася погоджена структура', INVALID_ORIGINAL_EVIDENCE: 'початкові докази статті втратили придатність' }
   return reasons.map(reason => labels[reason] ?? 'змінилися редакційні залежності').join('; ')
 }
-watch(readonly, value => editor.value?.setEditable(!value))
+watch([readonly, languageBusy], ([isReadonly, reviewing]) => editor.value?.setEditable(!isReadonly && !reviewing))
 watch([title, contentMode], () => changed())
 function resizeTitle() {
   const input = titleInput.value
@@ -486,7 +565,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             v-model="title"
             maxlength="500"
             rows="2"
-            :readonly="readonly || busy"
+            :readonly="readonly || busy || languageBusy"
             class="article-title"
           />
           <div
@@ -553,6 +632,92 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               </Button>
             </div>
           </footer>
+          <section
+            v-if="!readonly"
+            class="article-language"
+            aria-labelledby="article-language-heading"
+          >
+            <div class="article-language-heading">
+              <h2 id="article-language-heading">
+                Мова й пунктуація
+              </h2>
+              <Button
+                class="workspace-button"
+                variant="outline"
+                :disabled="busy || saving || languageBusy || conflict || !!recovered"
+                @click="reviewLanguage"
+              >
+                {{ languageBusy ? 'Перевіряємо…' : 'Перевірити мову' }}
+              </Button>
+            </div>
+            <p
+              v-if="languageMessage"
+              role="status"
+            >
+              {{ languageMessage }}
+            </p>
+            <p
+              v-if="languageSuggestions.length && !languageSourceCurrent"
+              class="article-notice"
+            >
+              Збережіть і зафіксуйте поточний текст, щоб працювати з цими пропозиціями.
+            </p>
+            <article
+              v-for="suggestion in languageSuggestions"
+              :key="suggestion.id"
+              class="article-language-item"
+            >
+              <p>{{ suggestion.finding }}</p>
+              <p class="article-language-change">
+                <del>{{ suggestion.originalText }}</del> → <ins>{{ suggestion.replacementText }}</ins>
+              </p>
+              <p
+                v-if="suggestion.stale"
+                class="article-notice"
+              >
+                Ця пропозиція стосується старішої версії.
+              </p>
+              <label
+                v-else-if="suggestion.status === 'OPEN'"
+                class="article-language-select"
+              ><input
+                v-model="selectedLanguageIds"
+                type="checkbox"
+                :value="suggestion.id"
+                :disabled="languageBusy || !languageSourceCurrent"
+              > Застосувати цю правку</label>
+              <p v-else>
+                {{ suggestion.status === 'ACCEPTED' ? 'Застосовано' : 'Відхилено' }}
+              </p>
+              <Button
+                v-if="suggestion.status === 'OPEN' && !suggestion.stale"
+                class="workspace-button"
+                variant="ghost"
+                :disabled="languageBusy || !languageSourceCurrent"
+                @click="rejectLanguage(suggestion)"
+              >
+                Відхилити
+              </Button>
+            </article>
+            <Button
+              v-if="selectedLanguageIds.length"
+              class="workspace-button workspace-button-primary"
+              :disabled="languageBusy || !languageSourceCurrent"
+              @click="acceptLanguage"
+            >
+              Створити версію з вибраними правками
+            </Button>
+            <Button
+              v-for="version in languageCandidates"
+              :key="version.id"
+              class="workspace-button"
+              variant="outline"
+              :disabled="languageBusy"
+              @click="candidate = version; inspector = 'proposal'"
+            >
+              Переглянути версію {{ version.number }} з мовними правками
+            </Button>
+          </section>
         </article>
         <aside
           v-show="!!inspector"
@@ -706,7 +871,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               >
                 Відкликати погодження
               </Button><Button
-                v-if="version.status === 'PROPOSED' && version.origin === 'AI' && version.id !== state.article?.draft?.baseVersionId"
+                v-if="version.status === 'PROPOSED' && version.origin !== 'UNVERIFIED_IMPORTED' && version.id !== state.article?.draft?.baseVersionId"
                 class="workspace-button"
                 variant="outline"
                 @click="candidate = version; inspector = 'proposal'"
@@ -818,6 +983,15 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 .article-writing :deep(blockquote) { border-left: 1px solid var(--rule); padding-left: 20px; margin: 32px 0; font-size: 29px; line-height: 1.5; }
 .article-writing :deep(.article-evidence) { border-bottom: 1px solid var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); cursor: pointer; }
 .article-review { margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--rule); font-family: var(--sans); font-size: 13px; color: var(--muted); }
+.article-language { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.article-language-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.article-language-heading h2 { margin: 0; font: 550 21px/1.3 SourceSerif, Georgia, serif; }
+.article-language > p, .article-language-item > p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.article-language-item { padding: 12px 0; border-top: 1px solid var(--rule); }
+.article-language-change { font: 17px/1.5 SourceSerif, Georgia, serif !important; overflow-wrap: anywhere; }
+.article-language-change del { color: var(--review, #945000); }
+.article-language-change ins { color: var(--approved, #32664b); text-decoration-thickness: 1px; }
+.article-language-select { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
 .article-mode { display: flex; gap: 7px; align-items: center; min-height: 44px; color: var(--ink); }
 .article-review > div { justify-content: space-between; }
 .article-inspector { min-width: 0; margin-top: 48px; border-left: 1px solid var(--rule); padding-left: 20px; font-size: 14px; overflow-wrap: anywhere; }

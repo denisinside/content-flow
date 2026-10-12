@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import WorkspaceHub from './components/WorkspaceHub.vue'
 import ProfileSettings from './components/ProfileSettings.vue'
 import SiteFooter from './components/SiteFooter.vue'
+import WorkspaceRecovery from './components/WorkspaceRecovery.vue'
 
 interface User {
   id: string
@@ -21,9 +22,23 @@ interface SessionResponse {
 
 type ViewState = 'loading' | 'signed-out' | 'signed-in' | 'unavailable'
 type AuthMode = 'login' | 'register'
+interface WorkspaceSummary {
+  id: string
+  name: string
+  ownerId: string
+  archivedAt: string | null
+  trashedAt: string | null
+  purgeAfter: string | null
+  lifecycleRevision: number
+  members?: { userId: string; displayName?: string | null; email?: string }[]
+}
 
 const state = ref<ViewState>('loading')
 const profileOpen = ref(window.location.pathname === '/settings')
+const selectedWorkspaceId = ref<string | null>(null)
+const selectedWorkspace = ref<WorkspaceSummary | null>(null)
+const workspaces = ref<WorkspaceSummary[]>([])
+const workspaceRefreshEpoch = ref(0)
 const accountMenu = ref<HTMLDetailsElement | null>(null)
 let profileReturnPath = '/projects'
 let profileReturnScroll = 0
@@ -58,6 +73,16 @@ function handleProfileLink(event: MouseEvent) {
 function syncProfileRoute() {
   profileOpen.value = window.location.pathname === '/settings'
   accountMenu.value?.removeAttribute('open')
+}
+
+function onWorkspaceState(payload: { selected: WorkspaceSummary | null; workspaces: WorkspaceSummary[] }) {
+  selectedWorkspace.value = payload.selected
+  selectedWorkspaceId.value = payload.selected?.id ?? null
+  workspaces.value = payload.workspaces
+}
+
+function onWorkspaceLifecycleChanged() {
+  workspaceRefreshEpoch.value++
 }
 
 function closeAccountOutside(event: PointerEvent) {
@@ -121,7 +146,7 @@ function clearArticleRecovery() {
   try {
     for (let index = sessionStorage.length - 1; index >= 0; index--) {
       const key = sessionStorage.key(index)
-      if (key?.startsWith('cf:article:') || key?.startsWith('cf:telegram:')) sessionStorage.removeItem(key)
+      if (key?.startsWith('cf:article:') || key?.startsWith('cf:telegram:') || key?.startsWith('cf:channel:')) sessionStorage.removeItem(key)
     }
   } catch { /* Browser storage may be disabled; server-side saves remain canonical. */ }
 }
@@ -817,13 +842,25 @@ onUnmounted(() => {
               </div>
             </template>
           </ProfileSettings>
+          <WorkspaceRecovery
+            v-show="profileOpen"
+            :csrf-token="csrfToken"
+            :user-id="user?.id ?? ''"
+            :selected-workspace-id="selectedWorkspaceId"
+            :selected-workspace="selectedWorkspace"
+            :workspaces="workspaces"
+            @session-expired="handleProjectSessionExpired"
+            @changed="onWorkspaceLifecycleChanged"
+          />
           <WorkspaceHub
             v-show="!profileOpen"
             :key="user?.id ?? ''"
             :csrf-token="csrfToken"
             :user-id="user?.id ?? ''"
+            :refresh-epoch="workspaceRefreshEpoch"
             @session-expired="handleProjectSessionExpired"
             @workspace-changed="profileReturnPath = '/projects'; profileReturnScroll = 0"
+            @workspace-state="onWorkspaceState"
           />
         </section>
       </main>

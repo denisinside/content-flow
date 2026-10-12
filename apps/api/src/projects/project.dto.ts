@@ -4,12 +4,16 @@ import { ProjectFormat, AssetPurpose, AssetState } from '@contextflow/backend';
 export class ProjectDto {
   @ApiProperty({ type: String, format: 'uuid' }) id!: string;
   @ApiProperty({ type: String, format: 'uuid' }) workspaceId!: string;
+  @ApiProperty({ type: String, format: 'uuid' }) workspaceOwnerId!: string;
+  @ApiProperty({ type: Boolean }) canPurge!: boolean;
   @ApiProperty({ type: String, maxLength: 500 }) topic!: string;
   @ApiProperty({ enum: ProjectFormat, isArray: true }) formats!: ProjectFormat[];
   @ApiProperty({ type: Number, minimum: 1 }) revision!: number;
   @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string;
   @ApiProperty({ type: String, format: 'date-time' }) updatedAt!: string;
   @ApiProperty({ type: String, format: 'date-time', nullable: true }) archivedAt!: string | null;
+  @ApiProperty({ type: String, format: 'date-time', nullable: true }) trashedAt!: string | null;
+  @ApiProperty({ type: String, format: 'date-time', nullable: true }) purgeAfter!: string | null;
 }
 export class ProjectResultDto {
   @ApiProperty({ type: ProjectDto }) project!: ProjectDto;

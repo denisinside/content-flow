@@ -7,8 +7,9 @@ import { JobFailure } from '../jobs/contracts.js';
 import { EXTERNAL_PROCESSING_NOTICE } from '../external-processing-notice.js';
 import { canonicalBriefHash } from './editorial.service.js';
 import { telegramContentSchema, telegramInputManifestSchema, telegramWorkflowReleaseSchema,
+  validateFormatContent,
   type TelegramContent, type TelegramInputManifest, type TelegramWorkflowRelease, type SaveTelegramDraftInput,
-  type ReviewTelegramInput, type GenerateTelegramInput } from './telegram-contracts.js';
+  type ReviewTelegramInput, type GenerateTelegramInput, type AdaptationFormat } from './telegram-contracts.js';
 import type { ArticleService } from './article.service.js';
 
 function json<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
@@ -24,20 +25,20 @@ export class TelegramService {
 
   private async lock(tx: Prisma.TransactionClient, user: string, project: string, write = true) {
     const rows = write
-      ? await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR UPDATE OF p FOR SHARE OF w,m`
-      : await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
+      ? await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR UPDATE OF p FOR SHARE OF w,m`
+      : await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
     if (!rows.length) throw new NotFoundException('Project not found');
   }
   private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = true) {
     return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); });
   }
-  private async adaptation(tx: Prisma.TransactionClient, project: string, expected: number, create = true) {
+  private async adaptation(tx: Prisma.TransactionClient, project: string, expected: number, format: AdaptationFormat = 'TELEGRAM_POST', create = true) {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project } });
-    if (!p.formats.includes('TELEGRAM_POST')) throw new ConflictException('Select Telegram before working on an adaptation');
-    const row = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: project, format: 'TELEGRAM_POST' } }, include: { draft: true } });
-    if ((row?.revision ?? 0) !== expected) throw new ConflictException('Telegram adaptation changed; retain local text and reload before saving');
-    if (!row && !create) throw new NotFoundException('Telegram adaptation not found');
-    return row ?? { ...await tx.adaptation.create({ data: { projectId: project, format: 'TELEGRAM_POST' } }), draft: null };
+    if (!p.formats.includes(format)) throw new ConflictException(`Select ${format} before working on an adaptation`);
+    const row = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: project, format } }, include: { draft: true } });
+    if ((row?.revision ?? 0) !== expected) throw new ConflictException('Adaptation changed; retain local text and reload before saving');
+    if (!row && !create) throw new NotFoundException('Adaptation not found');
+    return row ?? { ...await tx.adaptation.create({ data: { projectId: project, format } }), draft: null };
   }
   private async currentInputs(tx: Prisma.TransactionClient, project: string, inputMode: Inputs['inputMode'], contentMode: Inputs['contentMode'], includeLink: boolean): Promise<Inputs> {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
@@ -91,13 +92,17 @@ export class TelegramService {
     }
   }
   private async evidenceDetail(tx: Prisma.TransactionClient, project: string, content: TelegramContent, inputs: Inputs, ancestryOnly = false) {
-    const issues: MappingIssue[] = [], sorted = [...content.mappings].sort((a, b) => a.startOffset - b.startOffset);
-    let cursor = 0, hasUnmapped = false;
-    for (const mapping of sorted) {
-      if (content.text.slice(cursor, mapping.startOffset).trim()) hasUnmapped = true;
+    const issues: MappingIssue[] = [];
+    let hasUnmapped = false;
+    for (const field of ['text', 'cover'] as const) {
+      const target = field === 'text' ? content.text : content.cover?.text;
+      const sorted = content.mappings.filter(mapping => (mapping.field ?? 'text') === field).sort((a, b) => a.startOffset - b.startOffset);
+      let cursor = 0;
+      for (const mapping of sorted) {
+      if (target?.slice(cursor, mapping.startOffset).trim()) hasUnmapped = true;
       cursor = mapping.endOffset;
-      const locator = `text:${mapping.startOffset}:${mapping.endOffset}`;
-      if (content.text.slice(mapping.startOffset, mapping.endOffset) !== mapping.quote) issues.push({ locator, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId, reason: 'WORDING_CHANGED' });
+      const locator = `${field}:${mapping.startOffset}:${mapping.endOffset}`;
+      if (target?.slice(mapping.startOffset, mapping.endOffset) !== mapping.quote) issues.push({ locator, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId, reason: 'WORDING_CHANGED' });
       const evidence = await tx.claimEvidence.findFirst({ where: { id: mapping.evidenceId, claimRevisionId: mapping.claimRevisionId, projectId: project } });
       if (!evidence) throw new BadRequestException('Telegram evidence must belong to its exact claim and project');
       if (inputs.contentMode === 'CREATIVE') { issues.push({ locator, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId, reason: 'CREATIVE_MAPPING' }); continue; }
@@ -106,8 +111,9 @@ export class TelegramService {
         if (!edge) issues.push({ locator, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId, reason: 'OUTSIDE_BASIS' });
         if (evidence.invalidatedAt || evidence.relation !== 'SUPPORTS') issues.push({ locator, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId, reason: 'INVALID_EVIDENCE' });
       }
+      }
+      if (target?.slice(cursor).trim()) hasUnmapped = true;
     }
-    if (content.text.slice(cursor).trim()) hasUnmapped = true;
     return { issues, hasUnmapped };
   }
   private async stale(tx: Prisma.TransactionClient, project: string, row: Inputs & { reviewedBriefRevisionId?: string | null; reviewedBasisRevisionId?: string | null; reviewedSourceArticleVersionId?: string | null; reviewedWorkspaceStyleRevision?: number | null }) {
@@ -139,10 +145,10 @@ export class TelegramService {
     }
     return [...new Set(reasons)];
   }
-  private async state(tx: Prisma.TransactionClient, project: string) {
+  private async state(tx: Prisma.TransactionClient, project: string, format: AdaptationFormat = 'TELEGRAM_POST') {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
     const adaptation = await tx.adaptation.findUnique({
-      where: { projectId_format: { projectId: project, format: 'TELEGRAM_POST' } },
+      where: { projectId_format: { projectId: project, format } },
       include: { draft: true, revisions: { orderBy: { number: 'desc' }, include: {
         claims: { include: { evidence: { include: { claimRevision: true, snapshot: { include: { material: true } } } } } },
       } } },
@@ -154,17 +160,18 @@ export class TelegramService {
     const basisState = await this.facts.inspectBasis(tx, project, adaptation?.draft?.contentMode ?? brief?.currentRevision?.contentMode ?? 'CREATIVE');
     const eligibleBasis = (await this.facts.inspectBasis(tx, project, 'FACTUAL')).basis;
     const eligibleRows = eligibleBasis?.id ? await tx.basisClaimEvidence.findMany({ where: { projectId: project, basisId: eligibleBasis.id }, include: { evidence: { include: { claimRevision: true, snapshot: { include: { material: true } } } } } }) : [];
-    const draft = adaptation?.draft ? telegramContentSchema.parse(adaptation.draft.content) : null;
+    const draft = adaptation?.draft ? validateFormatContent(format, telegramContentSchema.parse(adaptation.draft.content)) : null;
     const inputs = adaptation?.draft;
     const detail = draft && inputs ? await this.evidenceDetail(tx, project, draft, inputs) : { issues: [], hasUnmapped: false };
     const staleReasons = inputs ? await this.stale(tx, project, inputs) : [];
     const sourceArticleIssues = approvedArticle ? await this.articles.inspectVersion(tx, project, approvedArticle) : null;
     const revisions = await Promise.all((adaptation?.revisions ?? []).map(async row => {
-      const inspection = await this.inspectRevision(tx, project, row), content = telegramContentSchema.parse(row.content);
+      const inspection = await this.inspectRevision(tx, project, row), content = validateFormatContent(format, telegramContentSchema.parse(row.content));
       const mappingDetails = await Promise.all(content.mappings.map(async mapping => {
         const evidence = await tx.claimEvidence.findFirst({ where: { id: mapping.evidenceId, claimRevisionId: mapping.claimRevisionId, projectId: project },
           include: { claimRevision: true, snapshot: { include: { material: true } } } });
-        return { ...mapping, linkedText: content.text.slice(mapping.startOffset, mapping.endOffset),
+      const target = (mapping.field ?? 'text') === 'cover' ? content.cover?.text ?? '' : content.text;
+      return { ...mapping, field: mapping.field ?? 'text', linkedText: target.slice(mapping.startOffset, mapping.endOffset),
           evidence: evidence ? { wording: evidence.claimRevision.wording, quote: evidence.quote, snapshotId: evidence.snapshotId,
             materialTitle: evidence.snapshot.material.label } : null };
       }));
@@ -172,23 +179,27 @@ export class TelegramService {
     }));
     return { adaptation: adaptation ? { id: adaptation.id, revision: adaptation.revision, draft: json(adaptation.draft), currentApprovedRevisionId: adaptation.currentApprovedRevisionId,
       revisions } : null,
-      telegramSelected: p.formats.includes('TELEGRAM_POST'), brief: brief ? { id: brief.id, revision: brief.revision, currentRevision: json(brief.currentRevision), history: json(brief.revisions) } : null,
+      format, formatSelected: p.formats.includes(format), telegramSelected: p.formats.includes('TELEGRAM_POST'), brief: brief ? { id: brief.id, revision: brief.revision, currentRevision: json(brief.currentRevision), history: json(brief.revisions) } : null,
       style: json(style), prerequisites: basisState, approvedArticle: approvedArticle ? { ...json(approvedArticle), inspection: json(sourceArticleIssues) } : null,
       eligibleEvidence: eligibleRows.map(row => ({ claimRevisionId: row.claimRevisionId, evidenceId: row.evidenceId, wording: row.evidence.claimRevision.wording, quote: row.evidence.quote, snapshotId: row.evidence.snapshotId, materialTitle: row.evidence.snapshot.material.label })),
       staleReasons, mappingIssues: detail.issues, hasUnmapped: detail.hasUnmapped, blockingReasons: [...basisState.blockingReasons, ...(detail.issues.length ? ['INVALID_EVIDENCE_MAPPINGS'] : [])] };
   }
-  get(user: string, project: string) { return this.command(user, project, tx => this.state(tx, project), false); }
+  get(user: string, project: string, format: AdaptationFormat = 'TELEGRAM_POST') { return this.command(user, project, tx => this.state(tx, project, format), false); }
 
   // The caller holds the authorized Project transaction/lock. Export and editor
   // share this inspection so delivery cannot use weaker freshness rules.
   async inspectRevision(tx: Prisma.TransactionClient, project: string, row: AdaptationRevision) {
-    const staleReasons = await this.stale(tx, project, row), content = telegramContentSchema.parse(row.content);
+    const parent = await tx.adaptation.findUnique({ where: { id: row.adaptationId }, select: { format: true } });
+    if (!parent) throw new ConflictException('Adaptation format is unavailable');
+    const format = parent.format as AdaptationFormat;
+    const staleReasons = await this.stale(tx, project, row), content = validateFormatContent(format, telegramContentSchema.parse(row.content));
     const reviewedBasis = row.reviewedAt ? row.reviewedBasisRevisionId : row.basisRevisionId;
     const reviewedBrief = row.reviewedAt ? row.reviewedBriefRevisionId : row.briefRevisionId;
     const details = await this.evidenceDetail(tx, project, content, { ...row, basisRevisionId: reviewedBasis });
     const blockingReasons = details.issues.map(issue => issue.reason);
     if (row.projectId !== project || canonicalManifestHash(row.content) !== row.sha256) blockingReasons.push('CONTENT_INTEGRITY');
-    if (!content.text.trim()) blockingReasons.push('EMPTY_CONTENT');
+    if (!content.text.trim() || format !== 'TELEGRAM_POST' && format.includes('COVER') && !content.cover?.text.trim()) blockingReasons.push('EMPTY_CONTENT');
+    if (format.includes('COVER') && !content.cover?.instruction.trim()) blockingReasons.push('COVER_INSTRUCTION_REQUIRED');
     if (!row.claimsSealed) blockingReasons.push('UNSEALED_EVIDENCE');
     if (row.withdrawnAt) blockingReasons.push('APPROVAL_WITHDRAWN');
     if (details.hasUnmapped && !row.acknowledgedUnmapped) blockingReasons.push('UNMAPPED_NOT_ACKNOWLEDGED');
@@ -218,17 +229,22 @@ export class TelegramService {
   saveDraft(user: string, project: string, raw: SaveTelegramDraftInput) {
     const input = raw;
     return this.command(user, project, async tx => {
-      const adaptation = await this.adaptation(tx, project, input.expectedRevision);
+      const format = input.format ?? 'TELEGRAM_POST';
+      const includeLink = input.includeLink ?? false;
+      const adaptation = await this.adaptation(tx, project, input.expectedRevision, format);
       const sameShape = adaptation.draft && adaptation.draft.inputMode === input.inputMode && adaptation.draft.contentMode === input.contentMode;
       const preservingTuple = !!(sameShape && !input.refreshInputs);
-      const inputs = preservingTuple ? adaptation.draft! : await this.currentInputs(tx, project, input.inputMode, input.contentMode, input.includeLink);
+      const inputs = preservingTuple ? adaptation.draft! : await this.currentInputs(tx, project, input.inputMode, input.contentMode, includeLink);
       if (inputs.inputMode !== input.inputMode || inputs.contentMode !== input.contentMode) throw new BadRequestException('Telegram input shape mismatch');
       // Include-link is a draft choice and may be changed without recapturing provenance.
-      const selectedInputs = { ...inputs, includeLink: input.includeLink };
+      if (format !== 'TELEGRAM_POST' && includeLink) throw new BadRequestException('Links are supported only for Telegram posts');
+      const selectedInputs = { ...inputs, includeLink: format === 'TELEGRAM_POST' && includeLink };
       if (preservingTuple) await this.validateSavedAncestry(tx, project, selectedInputs);
       else await this.validateInputs(tx, project, selectedInputs);
-      await this.writeDraft(tx, adaptation.id, project, user, telegramContentSchema.parse(input.content), selectedInputs, sameShape ? adaptation.draft?.baseRevisionId ?? null : null, 'MANUAL');
-      return this.state(tx, project);
+      let content: TelegramContent;
+      try { content = validateFormatContent(format, telegramContentSchema.parse(input.content)); } catch { throw new BadRequestException('Adaptation content does not match the selected format'); }
+      await this.writeDraft(tx, adaptation.id, project, user, content, selectedInputs, sameShape ? adaptation.draft?.baseRevisionId ?? null : null, 'MANUAL');
+      return this.state(tx, project, format);
     });
   }
   private sameInputs(a: Inputs, b: Inputs) { return ['inputMode', 'contentMode', 'briefRevisionId', 'basisRevisionId', 'sourceArticleVersionId', 'workspaceId', 'workspaceStyleRevision', 'includeLink'].every(k => a[k as keyof Inputs] === b[k as keyof Inputs]); }
@@ -239,21 +255,22 @@ export class TelegramService {
       content: json(content), sha256: canonicalManifestHash(content), ...provenance, sourceAdaptationRevision, origin: jobId ? 'AI' : 'MANUAL', createdBy: user,
       ...(jobId ? { jobId } : {}), ...(executionId ? { aiExecutionId: executionId } : {}) } });
     if (content.mappings.length) await tx.adaptationRevisionClaim.createMany({ data: content.mappings.map(mapping => ({ projectId: project, revisionId: version.id,
-      locator: `text:${mapping.startOffset}:${mapping.endOffset}`, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId,
-      quote: mapping.quote, linkedText: content.text.slice(mapping.startOffset, mapping.endOffset) })) });
+      locator: `${mapping.field ?? 'text'}:${mapping.startOffset}:${mapping.endOffset}`, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId,
+      quote: mapping.quote, linkedText: ((mapping.field ?? 'text') === 'cover' ? content.cover?.text ?? '' : content.text).slice(mapping.startOffset, mapping.endOffset) })) });
     await tx.adaptationRevision.update({ where: { id: version.id }, data: { claimsSealed: true } });
     return version;
   }
-  checkpoint(user: string, project: string, input: { expectedRevision: number }) {
+  checkpoint(user: string, project: string, input: { expectedRevision: number; format?: AdaptationFormat }) {
     return this.command(user, project, async tx => {
-      const adaptation = await this.adaptation(tx, project, input.expectedRevision, false), draft = adaptation.draft;
-      if (!draft) throw new ConflictException('Save the Telegram draft first');
+      const format = input.format ?? 'TELEGRAM_POST';
+      const adaptation = await this.adaptation(tx, project, input.expectedRevision, format, false), draft = adaptation.draft;
+      if (!draft) throw new ConflictException('Save the adaptation draft first');
       const base = draft.baseRevisionId ? await tx.adaptationRevision.findUnique({ where: { id: draft.baseRevisionId } }) : null;
-      if (base && !base.withdrawnAt && base.sha256 === draft.sha256 && this.sameInputs(base, draft)) return this.state(tx, project);
-      const version = await this.append(tx, project, adaptation.id, user, telegramContentSchema.parse(draft.content), draft, adaptation.revision);
+      if (base && !base.withdrawnAt && base.sha256 === draft.sha256 && this.sameInputs(base, draft)) return this.state(tx, project, format);
+      const version = await this.append(tx, project, adaptation.id, user, validateFormatContent(format, telegramContentSchema.parse(draft.content)), draft, adaptation.revision);
       await tx.adaptationDraft.update({ where: { adaptationId: adaptation.id }, data: { baseRevisionId: version.id, origin: 'MANUAL', updatedBy: user, updatedAt: new Date() } });
       await tx.adaptation.update({ where: { id: adaptation.id }, data: { revision: { increment: 1 } } });
-      return this.state(tx, project);
+      return this.state(tx, project, format);
     });
   }
   private async reviewable(tx: Prisma.TransactionClient, project: string, version: AdaptationRevision, reReview = false) {
@@ -268,11 +285,14 @@ export class TelegramService {
         if (!original || !original.approvedAt || original.withdrawnAt || (await this.articles.inspectVersion(tx, project, original)).blockingReasons.length) throw new ConflictException('Original source article approval or evidence is no longer valid');
       }
     }
-    const content = telegramContentSchema.parse(version.content);
+    const parent = await tx.adaptation.findUnique({ where: { id: version.adaptationId }, select: { format: true } });
+    if (!parent) throw new ConflictException('Adaptation format is unavailable');
+    const format = parent.format as AdaptationFormat;
+    const content = validateFormatContent(format, telegramContentSchema.parse(version.content));
     const currentInputs = reReview ? await this.currentInputs(tx, project, version.inputMode, version.contentMode, version.includeLink) : version;
     if (reReview) await this.validateInputs(tx, project, currentInputs);
     const details = await this.evidenceDetail(tx, project, content, { ...version, basisRevisionId: currentInputs.basisRevisionId });
-    if (!content.text.trim()) throw new ConflictException('Telegram post requires nonempty text');
+    if (!content.text.trim() || format.includes('COVER') && (!content.cover?.text.trim() || !content.cover.instruction.trim())) throw new ConflictException('Publication and cover instruction are required');
     if (details.issues.length) throw new ConflictException('Relink or remove invalid Telegram evidence mappings');
     const brief = await tx.briefRevision.findFirstOrThrow({ where: { id: currentInputs.briefRevisionId, projectId: project }, include: briefInclude });
     if (version.contentMode === 'FACTUAL' && brief.requiredClaims.some(row => !content.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) throw new ConflictException('Telegram post omits required facts');
@@ -280,11 +300,12 @@ export class TelegramService {
   }
   review(user: string, project: string, revisionId: string, action: 'apply' | 'approve' | 'withdraw', input: ReviewTelegramInput) {
     return this.command(user, project, async tx => {
-      const adaptation = await this.adaptation(tx, project, input.expectedRevision);
+      const format = input.format ?? 'TELEGRAM_POST';
+      const adaptation = await this.adaptation(tx, project, input.expectedRevision, format);
       const version = await tx.adaptationRevision.findFirst({ where: { id: revisionId, projectId: project, adaptationId: adaptation.id } });
-      if (!version) throw new NotFoundException('Telegram revision not found');
-      if (version.withdrawnAt) throw new ConflictException('Telegram withdrawal is terminal');
-      if (canonicalManifestHash(version.content) !== version.sha256) throw new ConflictException('Telegram revision integrity check failed');
+      if (!version) throw new NotFoundException('Adaptation revision not found');
+      if (version.withdrawnAt) throw new ConflictException('Adaptation withdrawal is terminal');
+      if (canonicalManifestHash(version.content) !== version.sha256) throw new ConflictException('Adaptation revision integrity check failed');
       if (action === 'withdraw') {
         if (!version.approvedAt) throw new ConflictException('Only an approved Telegram revision can be withdrawn');
         await tx.adaptationRevision.update({ where: { id: version.id }, data: { withdrawnBy: user, withdrawnAt: new Date(), withdrawalReason: input.reason ?? null } });
@@ -292,7 +313,7 @@ export class TelegramService {
       } else if (action === 'apply') {
         if (version.origin === 'AI' && version.sourceAdaptationRevision !== adaptation.revision) throw new ConflictException('Telegram changed after generation; preserve local work');
         await this.reviewable(tx, project, version);
-        await this.writeDraft(tx, adaptation.id, project, user, telegramContentSchema.parse(version.content), version, version.id, 'MANUAL');
+        await this.writeDraft(tx, adaptation.id, project, user, validateFormatContent(format, telegramContentSchema.parse(version.content)), version, version.id, 'MANUAL');
       } else {
         const draft = adaptation.draft;
         if (input.expectedReviewCounter === undefined || input.expectedReviewCounter !== version.reviewCounter) throw new ConflictException('Telegram review counter is required and must match');
@@ -303,12 +324,13 @@ export class TelegramService {
         } });
         await tx.adaptation.update({ where: { id: adaptation.id }, data: { currentApprovedRevisionId: version.id, revision: { increment: 1 } } });
       }
-      return this.state(tx, project);
+      return this.state(tx, project, format);
     });
   }
   rereview(user: string, project: string, revisionId: string, input: ReviewTelegramInput & { expectedReviewCounter: number }) {
     return this.command(user, project, async tx => {
-      const adaptation = await this.adaptation(tx, project, input.expectedRevision, false);
+      const format = input.format ?? 'TELEGRAM_POST';
+      const adaptation = await this.adaptation(tx, project, input.expectedRevision, format, false);
       const version = await tx.adaptationRevision.findFirst({ where: { id: revisionId, projectId: project, adaptationId: adaptation.id } });
       if (!version) throw new NotFoundException('Telegram revision not found');
       if (adaptation.currentApprovedRevisionId !== version.id || !version.approvedAt || version.withdrawnAt || version.reviewCounter !== input.expectedReviewCounter) throw new ConflictException('Re-review only the current active approval with its exact review counter');
@@ -321,37 +343,40 @@ export class TelegramService {
         reviewedSourceArticleVersionId: current.sourceArticleVersionId, reviewedWorkspaceStyleRevision: current.workspaceStyleRevision,
         reviewedBy: user, reviewedAt: new Date() } });
       await tx.adaptation.update({ where: { id: adaptation.id }, data: { revision: { increment: 1 } } });
-      return this.state(tx, project);
+      return this.state(tx, project, format);
     });
   }
   async freezeTelegram(user: string, project: string, input: GenerateTelegramInput, releaseInput: TelegramWorkflowRelease) {
     const release = telegramWorkflowReleaseSchema.parse(releaseInput);
     return this.command(user, project, async tx => {
       await this.jobs.assertEffects(tx, project, user);
-      const p = await tx.project.findUniqueOrThrow({ where: { id: project, archivedAt: null }, include: { workspace: true } });
-      if (!p.formats.includes('TELEGRAM_POST')) throw new ConflictException('Select Telegram before generation');
-      const adaptation = await this.adaptation(tx, project, input.expectedRevision);
-      const current = await this.currentInputs(tx, project, input.inputMode, input.contentMode, input.includeLink);
+      const p = await tx.project.findUniqueOrThrow({ where: { id: project, archivedAt: null, trashedAt: null }, include: { workspace: true } });
+      const format = input.format ?? 'TELEGRAM_POST';
+      if (!p.formats.includes(format)) throw new ConflictException(`Select ${format} before generation`);
+      const includeLink = input.includeLink ?? false;
+      if (format !== 'TELEGRAM_POST' && includeLink) throw new BadRequestException('Links are supported only for Telegram posts');
+      const adaptation = await this.adaptation(tx, project, input.expectedRevision, format);
+      const current = await this.currentInputs(tx, project, input.inputMode, input.contentMode, format === 'TELEGRAM_POST' && includeLink);
       if (!current.briefRevisionId || current.inputMode !== input.inputMode || current.contentMode !== input.contentMode) throw new ConflictException('Save a matching Brief and source tuple before generation');
       await this.validateInputs(tx, project, current);
       const brief = await tx.briefRevision.findFirstOrThrow({ where: { id: current.briefRevisionId, projectId: project }, include: briefInclude });
       const basis = current.contentMode === 'FACTUAL' ? await this.facts.inspectBasisRevision(tx, project, current.basisRevisionId!) : null;
       const source = current.sourceArticleVersionId ? await tx.articleVersion.findFirstOrThrow({ where: { id: current.sourceArticleVersionId, projectId: project } }) : null;
       const profile = await tx.userProfile.findUniqueOrThrow({ where: { id: user } });
-      const manifest = telegramInputManifestSchema.parse({ schemaVersion: 'telegram-input-v1', adaptationRevision: adaptation.revision,
+      const manifest = telegramInputManifestSchema.parse({ schemaVersion: 'adaptation-input-v1', format, adaptationRevision: adaptation.revision,
         inputMode: current.inputMode, contentMode: current.contentMode, includeLink: current.includeLink, briefRevisionId: brief.id, briefHash: brief.sha256,
         basisRevisionId: basis?.id ?? null, basisHash: basis?.sha256 ?? null, sourceArticleVersionId: source?.id ?? null, sourceArticleHash: source?.sha256 ?? null,
         workspaceId: p.workspaceId, workspaceStyleRevision: p.workspace.styleRevision, contextSnapshotIds: brief.contextSnapshots.map(row => row.snapshotId).sort(),
         release, noticeVersion: EXTERNAL_PROCESSING_NOTICE.version, acceptedAt: profile.externalProcessingAcceptedAt?.toISOString() });
-      return this.jobs.create(tx, { projectId: project, userId: user, operation: 'TELEGRAM_GENERATION', contractVersion: 'telegram-v1', commandKey: input.commandKey,
+      return this.jobs.create(tx, { projectId: project, userId: user, operation: 'TELEGRAM_GENERATION', contractVersion: 'adaptation-v1', commandKey: input.commandKey,
         inputManifest: manifest, deadlineMs: TELEGRAM_GENERATION_DEADLINE_MS });
     });
   }
   async frozenContext(tx: Prisma.TransactionClient, project: string, manifestInput: TelegramInputManifest) {
     const manifest = telegramInputManifestSchema.parse(manifestInput);
-    const projectRow = await tx.project.findFirst({ where: { id: project, archivedAt: null }, select: { id: true, workspaceId: true, formats: true } });
+    const projectRow = await tx.project.findFirst({ where: { id: project, archivedAt: null, trashedAt: null }, select: { id: true, workspaceId: true, formats: true } });
     const brief = await tx.briefRevision.findFirst({ where: { id: manifest.briefRevisionId, projectId: project }, include: briefInclude });
-    if (!projectRow || !projectRow.formats.includes('TELEGRAM_POST') || projectRow.workspaceId !== manifest.workspaceId || !brief || canonicalBriefHash(brief) !== manifest.briefHash || brief.sha256 !== manifest.briefHash || brief.contentMode !== manifest.contentMode
+    if (!projectRow || !projectRow.formats.includes(manifest.format) || projectRow.workspaceId !== manifest.workspaceId || !brief || canonicalBriefHash(brief) !== manifest.briefHash || brief.sha256 !== manifest.briefHash || brief.contentMode !== manifest.contentMode
       || brief.workspaceId !== manifest.workspaceId
       || canonicalManifestHash(brief.contextSnapshots.map(row => row.snapshotId).sort()) !== canonicalManifestHash([...manifest.contextSnapshotIds].sort())) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     if (manifest.contentMode === 'FACTUAL') {
@@ -364,29 +389,31 @@ export class TelegramService {
       const inspection = await this.articles.inspectVersion(tx, project, source);
       if (inspection.blockingReasons.length) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     }
-    return { brief: json(brief), basis: manifest.basisRevisionId ? await this.facts.inspectBasisRevision(tx, project, manifest.basisRevisionId) : null,
+    return { format: manifest.format, brief: json(brief), basis: manifest.basisRevisionId ? await this.facts.inspectBasisRevision(tx, project, manifest.basisRevisionId) : null,
       sourceArticle: manifest.sourceArticleVersionId ? json(await tx.articleVersion.findFirstOrThrow({ where: { id: manifest.sourceArticleVersionId, projectId: project }, include: { claims: true } })) : null,
       style: json(await tx.workspaceStyleRevision.findUniqueOrThrow({ where: { workspaceId_revision: { workspaceId: manifest.workspaceId, revision: manifest.workspaceStyleRevision } } })) };
   }
   async commitGenerated(tx: Prisma.TransactionClient, job: Job, raw: unknown, executionId: string) {
     await this.lock(tx, job.requestedBy, job.projectId);
     const parsed = telegramContentSchema.safeParse(raw), m = telegramInputManifestSchema.safeParse(job.inputManifest);
-    if (!parsed.success || !m.success || job.operation !== 'TELEGRAM_GENERATION' || job.contractVersion !== 'telegram-v1') throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
+    if (!parsed.success || !m.success || job.operation !== 'TELEGRAM_GENERATION' || job.contractVersion !== 'adaptation-v1') throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     const frozen = m.data;
+    let content: TelegramContent;
+    try { content = validateFormatContent(frozen.format, parsed.data); } catch { throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED'); }
     await this.frozenContext(tx, job.projectId, frozen);
     const execution = await tx.aIExecution.findFirst({ where: { id: executionId, projectId: job.projectId, jobId: job.id } });
-    if (!execution || execution.contractVersion !== 'telegram-v1' || execution.workflowId !== frozen.release.workflowId || execution.releaseId !== frozen.release.releaseId
+    if (!execution || execution.contractVersion !== 'adaptation-v1' || execution.workflowId !== frozen.release.workflowId || execution.releaseId !== frozen.release.releaseId
       || execution.configDigest !== frozen.release.configDigest || execution.promptTemplateVersion !== frozen.release.promptTemplateVersion
       || execution.inputHash !== job.inputHash || canonicalManifestHash({ contractVersion: job.contractVersion, inputManifest: job.inputManifest }) !== job.inputHash
       || canonicalManifestHash(execution.inputManifest) !== canonicalManifestHash(job.inputManifest)) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
-    const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: job.projectId, format: 'TELEGRAM_POST' } } });
+    const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: job.projectId, format: frozen.format } } });
     if (!adaptation) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     const inputs: Inputs = { inputMode: frozen.inputMode, contentMode: frozen.contentMode, briefRevisionId: frozen.briefRevisionId, basisRevisionId: frozen.basisRevisionId,
       sourceArticleVersionId: frozen.sourceArticleVersionId, workspaceId: frozen.workspaceId, workspaceStyleRevision: frozen.workspaceStyleRevision, includeLink: frozen.includeLink };
-    const details = await this.evidenceDetail(tx, job.projectId, parsed.data, inputs);
+    const details = await this.evidenceDetail(tx, job.projectId, content, inputs);
     const brief = await tx.briefRevision.findFirstOrThrow({ where: { id: frozen.briefRevisionId, projectId: job.projectId }, include: briefInclude });
-    if (!parsed.data.text.trim() || details.issues.length || frozen.contentMode === 'FACTUAL' && brief.requiredClaims.some(row => !parsed.data.mappings.some(map => map.claimRevisionId === row.claimRevisionId))) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
-    const version = await this.append(tx, job.projectId, adaptation.id, job.requestedBy, parsed.data, inputs, frozen.adaptationRevision, job.id, executionId);
+    if (!content.text.trim() || frozen.format.includes('COVER') && (!content.cover?.text.trim() || !content.cover.instruction.trim()) || details.issues.length || frozen.contentMode === 'FACTUAL' && brief.requiredClaims.some(row => !content.mappings.some(map => map.claimRevisionId === row.claimRevisionId))) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
+    const version = await this.append(tx, job.projectId, adaptation.id, job.requestedBy, content, inputs, frozen.adaptationRevision, job.id, executionId);
     return { adaptationRevisionId: version.id };
   }
 }

@@ -20,6 +20,8 @@ model UserProfile {
   externalProcessingAcceptedAt DateTime? @db.Timestamptz(3)
   createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   sessions    AppSession[]
+  presences EditorPresence[]
+  requestedObjectDeletions PrivateObjectDeletion[] @relation("ObjectDeletionRequester")
   createdProjects Project[]
   memberships ProjectMember[]
   ownedWorkspaces Workspace[] @relation("WorkspaceOwner")
@@ -67,6 +69,10 @@ model UserProfile {
   adaptationReviewReceipts AdaptationRevision[] @relation("AdaptationReviewer")
   approvedOutlines OutlineRevision[] @relation("OutlineApprover")
   withdrawnOutlines OutlineRevision[] @relation("OutlineWithdrawer")
+  createdLanguageSuggestions LanguageSuggestion[] @relation("LanguageSuggestionCreator")
+  decidedLanguageSuggestions LanguageSuggestion[] @relation("LanguageSuggestionDecider")
+  createdScriptLanguageSuggestions ScriptLanguageSuggestion[] @relation("ScriptLanguageSuggestionCreator")
+  decidedScriptLanguageSuggestions ScriptLanguageSuggestion[] @relation("ScriptLanguageSuggestionDecider")
 
   @@schema("contextflow")
 }
@@ -79,6 +85,9 @@ model Workspace {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @default(now()) @db.Timestamptz(3)
   archivedAt DateTime? @db.Timestamptz(3)
+  trashedAt DateTime? @db.Timestamptz(3)
+  purgeAfter DateTime? @db.Timestamptz(3)
+  lifecycleRevision Int @default(1)
   styleRevision Int @default(1)
   members WorkspaceMember[]
   invites WorkspaceInvite[]
@@ -201,7 +210,10 @@ model Project {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @default(now()) @db.Timestamptz(3)
   archivedAt DateTime? @db.Timestamptz(3)
+  trashedAt DateTime? @db.Timestamptz(3)
+  purgeAfter DateTime? @db.Timestamptz(3)
   members ProjectMember[]
+  presences EditorPresence[]
   assets Asset[]
   materials Material[]
   jobs Job[]
@@ -222,6 +234,8 @@ model Project {
   googleDocAnnotationEvents GoogleDocAnnotationEvent[]
   googleDocSnapshotCandidates GoogleDocSnapshotCandidate[]
   adaptations Adaptation[]
+  languageSuggestions LanguageSuggestion[]
+  scriptLanguageSuggestions ScriptLanguageSuggestion[]
   exportRequests ExportRequest[]
   exportItems ExportItem[]
   exportArtifacts ExportArtifact[]
@@ -467,10 +481,48 @@ model AppSession {
   googleOAuthAttempts    GoogleOAuthAttempt[]
   googleDocSyncPreviews GoogleDocSyncPreview[] @relation("GoogleDocPreviewSession")
   googleDocSyncOperations GoogleDocSyncOperation[] @relation("GoogleDocOperationSession")
+  presences EditorPresence[]
 
   @@unique([id, userId])
   @@index([userId])
   @@index([expiresAt])
+  @@schema("contextflow")
+}
+
+model EditorPresence {
+  projectId String @db.Uuid
+  userId String @db.Uuid
+  sessionId String @db.Uuid
+  page String @db.VarChar(80)
+  clientId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  user UserProfile @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  session AppSession @relation(fields: [sessionId, userId], references: [id, userId], onDelete: Restrict, onUpdate: NoAction)
+  expiresAt DateTime @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  @@id([projectId, sessionId, page, clientId])
+  @@index([projectId, page, expiresAt])
+  @@index([userId, expiresAt])
+  @@schema("contextflow")
+}
+
+model PrivateObjectDeletion {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workspaceId String @db.Uuid
+  requestedBy String @db.Uuid
+  requester UserProfile @relation("ObjectDeletionRequester", fields: [requestedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  bucket String @db.VarChar(63)
+  objectKey String @db.VarChar(1024)
+  state String @default("PENDING") @db.VarChar(16)
+  attempts Int @default(0)
+  retryAfter DateTime @default(now()) @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+  errorCategory String? @db.VarChar(64)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([bucket, objectKey])
+  @@index([state, retryAfter, createdAt])
+  @@index([projectId, createdAt])
   @@schema("contextflow")
 }
 
@@ -1023,6 +1075,59 @@ enum EditorialOrigin {
   @@schema("contextflow")
 }
 
+enum LanguageSuggestionTargetType {
+  ARTICLE
+  ADAPTATION
+  @@schema("contextflow")
+}
+
+enum LanguageSuggestionStatus {
+  OPEN
+  ACCEPTED
+  REJECTED
+  @@schema("contextflow")
+}
+
+enum LanguageSuggestionLocator {
+  TITLE
+  BODY
+  COVER_TEXT
+  @@schema("contextflow")
+}
+
+enum LanguageSuggestionProvenance {
+  LOCAL_TYPOGRAPHY
+  @@schema("contextflow")
+}
+
+model LanguageSuggestion {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  targetType LanguageSuggestionTargetType
+  targetId String @db.Uuid
+  contentHash String @db.Char(64)
+  locator LanguageSuggestionLocator
+  locatorStart Int
+  locatorEnd Int
+  originalText String @db.VarChar(1000)
+  replacementText String @db.VarChar(1000)
+  finding String @db.VarChar(200)
+  provenance LanguageSuggestionProvenance
+  status LanguageSuggestionStatus @default(OPEN)
+  resultVersionId String? @db.Uuid
+  createdBy String @db.Uuid
+  creator UserProfile @relation("LanguageSuggestionCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  decidedBy String? @db.Uuid
+  decider UserProfile? @relation("LanguageSuggestionDecider", fields: [decidedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  decidedAt DateTime? @db.Timestamptz(3)
+  @@unique([projectId, id])
+  @@index([projectId, targetType, targetId, status])
+  @@index([projectId, targetType, targetId, contentHash])
+  @@schema("contextflow")
+}
+
 enum AdaptationInputMode {
   DIRECT
   ARTICLE_DERIVED
@@ -1467,9 +1572,111 @@ model AdaptationRevisionClaim {
  @@schema("contextflow")
 }
 
+// A script is an independently reviewed child of one channel adaptation.
+// Parent content is frozen by revision ID and hash on both mutable and sealed rows.
+model Script {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ format ProjectFormat
+ revision Int @default(0)
+ currentApprovedRevisionId String? @db.Uuid
+ @@unique([projectId,format])
+ @@unique([projectId,id])
+ @@schema("contextflow")
+}
+
+model ScriptDraft {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ scriptId String @unique @db.Uuid
+ counter Int @default(0)
+ parentAdaptationRevisionId String @db.Uuid
+ parentAdaptationRevisionHash String @db.Char(64)
+ parentAdaptationReviewCounter Int
+ baseRevisionId String? @db.Uuid
+ content Json
+ sha256 String @db.Char(64)
+ updatedBy String @db.Uuid
+ updatedAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([projectId,id])
+ @@schema("contextflow")
+}
+
+model ScriptRevision {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ scriptId String @db.Uuid
+ number Int
+ parentAdaptationRevisionId String @db.Uuid
+ parentAdaptationRevisionHash String @db.Char(64)
+ parentAdaptationReviewCounter Int
+ content Json
+ sha256 String @db.Char(64)
+ createdBy String @db.Uuid
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ approvedBy String? @db.Uuid
+ approvedAt DateTime? @db.Timestamptz(3)
+ acknowledgedUnmapped Boolean @default(false)
+ withdrawnBy String? @db.Uuid
+ withdrawnAt DateTime? @db.Timestamptz(3)
+ withdrawalReason String? @db.VarChar(2000)
+ claimsSealed Boolean @default(false)
+ reviewCounter Int @default(0)
+ origin EditorialOrigin
+ jobId String? @unique @db.Uuid
+ aiExecutionId String? @db.Uuid
+ exportItems ExportItem[] @relation("ExportScriptRevision")
+ languageSuggestions ScriptLanguageSuggestion[] @relation("ScriptLanguageSuggestionRevision")
+ @@unique([projectId,id])
+ @@unique([projectId,scriptId,id])
+ @@unique([scriptId,number])
+ @@schema("contextflow")
+}
+
+model ScriptLanguageSuggestion {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ sourceRevisionId String @db.Uuid
+ sourceRevision ScriptRevision @relation("ScriptLanguageSuggestionRevision",fields:[projectId,sourceRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ frameId String @db.Uuid
+ contentHash String @db.Char(64)
+ startOffset Int
+ endOffset Int
+ originalText String @db.VarChar(1000)
+ replacementText String @db.VarChar(1000)
+ finding String @db.VarChar(200)
+ status LanguageSuggestionStatus @default(OPEN)
+ createdBy String @db.Uuid
+ creator UserProfile @relation("ScriptLanguageSuggestionCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ decidedBy String? @db.Uuid
+ decider UserProfile? @relation("ScriptLanguageSuggestionDecider",fields:[decidedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ decidedAt DateTime? @db.Timestamptz(3)
+ @@unique([projectId,id])
+ @@schema("contextflow")
+}
+
+model ScriptRevisionClaim {
+ projectId String @db.Uuid
+ revisionId String @db.Uuid
+ frameId String @db.Uuid
+ mappingIndex Int
+ locator String @db.VarChar(240)
+ startOffset Int
+ endOffset Int
+ claimRevisionId String @db.Uuid
+ evidenceId String @db.Uuid
+ quote String @db.VarChar(10000)
+ linkedText String @db.Text
+ @@id([revisionId,frameId,mappingIndex])
+ @@schema("contextflow")
+}
+
 enum ExportFormat {
   TXT
   MARKDOWN
+  JSON
   ZIP
   @@schema("contextflow")
 }
@@ -1506,10 +1713,13 @@ model ExportItem {
   articleVersion ArticleVersion? @relation("ExportArticleVersion",fields:[projectId,articleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
   adaptationRevisionId String? @db.Uuid
   adaptationRevision AdaptationRevision? @relation("ExportAdaptationRevision",fields:[projectId,adaptationRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  scriptRevisionId String? @db.Uuid
+  scriptRevision ScriptRevision? @relation("ExportScriptRevision",fields:[projectId,scriptRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
   @@unique([projectId,id])
   @@unique([requestId,ordinal])
   @@unique([requestId,articleVersionId])
   @@unique([requestId,adaptationRevisionId])
+  @@unique([requestId,scriptRevisionId])
   @@schema("contextflow")
 }
 

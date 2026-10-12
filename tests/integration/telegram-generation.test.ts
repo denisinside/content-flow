@@ -3,10 +3,10 @@ import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ArticleService, DependencyHealthService, DurableJobService, DurableJobWorker, EditorialService, EXTERNAL_PROCESSING_NOTICE,
-  FactualBasisService, TelegramService, createTelegramJobHandler, loadRuntimeConfig, telegramWorkflowRelease,
+  FactualBasisService, ScriptService, TelegramService, createTelegramJobHandler, loadRuntimeConfig, telegramWorkflowRelease,
   type TelegramProviderInput } from '@contextflow/backend';
 
-const releaseDescriptor = JSON.parse(readFileSync(new URL('../../packages/backend/src/editorial/workflows/telegram-generation/release.json', import.meta.url), 'utf8')) as { configDigest: string };
+const releaseDescriptor = JSON.parse(readFileSync(new URL('../../packages/backend/src/editorial/workflows/adaptation-generation/release.json', import.meta.url), 'utf8')) as { configDigest: string };
 describe('Telegram frozen generation through the durable worker', () => {
   const config = loadRuntimeConfig(), health = new DependencyHealthService(config);
   const jobs = new DurableJobService(health.prisma, { noticeVersion: EXTERNAL_PROCESSING_NOTICE.version });
@@ -26,17 +26,17 @@ describe('Telegram frozen generation through the durable worker', () => {
       beforeSubmit: () => Promise<void>, recordRun: (id: string) => Promise<void>) {
       await beforeSubmit(); const id = randomUUID(); await recordRun(id); calls.push(id); sent.push(structuredClone(input));
       if (input.inputMode === 'ARTICLE_DERIVED' && holdDerived) { derivedStarted(); await derivedRelease; }
-      return { output: { schemaVersion: 'telegram-v1' as const, content: { text: 'Короткий допис для каналу.', mappings: [] } }, workflowRunId: id, model: 'synthetic' };
+      return { output: { schemaVersion: 'adaptation-v1' as const, format: input.format, content: { text: 'Короткий допис для каналу.', mappings: [] } }, workflowRunId: id, model: 'synthetic' };
     },
     async resume(_settings: unknown, runId: string) {
-      return { output: { schemaVersion: 'telegram-v1' as const, content: { text: 'Короткий допис для каналу.', mappings: [] } }, workflowRunId: runId, model: 'synthetic' };
+      return { output: { schemaVersion: 'adaptation-v1' as const, format: 'TELEGRAM_POST' as const, content: { text: 'Короткий допис для каналу.', mappings: [] } }, workflowRunId: runId, model: 'synthetic' };
     },
   };
   beforeAll(async () => {
     vi.stubEnv('DIFY_API_BASE_URL', 'https://dify.example.test/v1');
-    vi.stubEnv('DIFY_TELEGRAM_WORKFLOW_ID', randomUUID());
-    vi.stubEnv('DIFY_TELEGRAM_CONFIG_SHA256', releaseDescriptor.configDigest);
-    vi.stubEnv('DIFY_TELEGRAM_API_KEY', 'synthetic-telegram-key');
+    vi.stubEnv('DIFY_ADAPTATION_WORKFLOW_ID', randomUUID());
+    vi.stubEnv('DIFY_ADAPTATION_CONFIG_SHA256', releaseDescriptor.configDigest);
+    vi.stubEnv('DIFY_ADAPTATION_API_KEY', 'synthetic-telegram-key');
     expect((await health.check()).status).toBe('ready');
     await health.prisma.userProfile.create({ data: { id: owner, externalProcessingNoticeVersion: EXTERNAL_PROCESSING_NOTICE.version,
       externalProcessingAcceptedAt: new Date() } });
@@ -57,9 +57,9 @@ describe('Telegram frozen generation through the durable worker', () => {
     const version = checkpoint.article.versions[0]!;
     await articles.review(owner, derivedProject, version.id, 'approve', { expectedRevision: checkpoint.article.revision, acknowledgeUnmapped: true });
     worker = new DurableJobWorker(health.prisma, config.redisUrl, EXTERNAL_PROCESSING_NOTICE.version,
-      [createTelegramJobHandler({ prisma: health.prisma, telegram, factualBasis: facts, articles, provider,
-        env: { NODE_ENV: 'test', DIFY_API_BASE_URL: 'https://dify.example.test/v1', DIFY_TELEGRAM_WORKFLOW_ID: process.env['DIFY_TELEGRAM_WORKFLOW_ID'],
-          DIFY_TELEGRAM_CONFIG_SHA256: process.env['DIFY_TELEGRAM_CONFIG_SHA256'], DIFY_TELEGRAM_API_KEY: 'synthetic-telegram-key' } })],
+      [createTelegramJobHandler({ prisma: health.prisma, telegram, scripts: new ScriptService(health.prisma, telegram), factualBasis: facts, articles, provider,
+        env: { NODE_ENV: 'test', DIFY_API_BASE_URL: 'https://dify.example.test/v1', DIFY_ADAPTATION_WORKFLOW_ID: process.env['DIFY_ADAPTATION_WORKFLOW_ID'],
+          DIFY_ADAPTATION_CONFIG_SHA256: process.env['DIFY_ADAPTATION_CONFIG_SHA256'], DIFY_ADAPTATION_API_KEY: 'synthetic-telegram-key' } })],
       { queueName: 'cf-telegram-generation-test-' + randomUUID() });
     await worker.queue.waitUntilReady();
     setupCompleted = true;
@@ -103,7 +103,7 @@ describe('Telegram frozen generation through the durable worker', () => {
   });
   it('generates both modes from frozen inputs and preserves a derived candidate after a dependency changes in flight', async () => {
     const release = telegramWorkflowRelease({ NODE_ENV: 'test', DIFY_API_BASE_URL: 'https://dify.example.test/v1',
-      DIFY_TELEGRAM_WORKFLOW_ID: process.env['DIFY_TELEGRAM_WORKFLOW_ID'], DIFY_TELEGRAM_CONFIG_SHA256: process.env['DIFY_TELEGRAM_CONFIG_SHA256'] });
+      DIFY_ADAPTATION_WORKFLOW_ID: process.env['DIFY_ADAPTATION_WORKFLOW_ID'], DIFY_ADAPTATION_CONFIG_SHA256: process.env['DIFY_ADAPTATION_CONFIG_SHA256'] });
     for (const [project, inputMode] of [[directProject, 'DIRECT'], [derivedProject, 'ARTICLE_DERIVED']] as const) {
       await telegram.saveDraft(owner, project, { expectedRevision: 0, contentMode: 'CREATIVE', inputMode, includeLink: true,
         content: { text: 'Чернетка перед генерацією.', mappings: [] } });

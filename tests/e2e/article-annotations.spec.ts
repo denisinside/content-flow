@@ -31,6 +31,7 @@ async function fixture(page: Page) {
     if (path === `/api/v1/workspaces/${workspaceId}`) return json({ workspace });
     if (path === base) return json({ project: { id: projectId, workspaceId, topic: 'Тестова стаття', formats: ['ARTICLE'], revision: 1, createdAt: '2026-10-10T10:00:00Z', updatedAt: '2026-10-10T10:00:00Z', archivedAt: null } });
     if (path === `${base}/jobs`) return json({ jobs: [] });
+    if (path === `${base}/language-suggestions`) return json({ suggestions: [] });
     if (path === `${base}/article` && request.method() === 'GET') return json(state());
     if (path === `${base}/article/annotations` && request.method() === 'GET') return json({ threads });
     if (path === `${base}/article/annotations` && request.method() === 'POST') {
@@ -68,7 +69,7 @@ async function fixture(page: Page) {
   await page.goto(`/projects/${projectId}/article`);
   await expect(page.getByRole('heading', { name: 'Стаття', exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
-  return { threads, commands, createKeys, conflict: () => { conflictNext = true; }, unknownCreate: () => { unknownCreateNext = true; }, orphan: (id: string) => { const thread = threads.find(item => item.id === id); if (thread) thread.anchor = { status: 'UNRESOLVED', start: null, end: null }; } };
+  return { article, threads, commands, createKeys, conflict: () => { conflictNext = true; }, unknownCreate: () => { unknownCreateNext = true; }, orphan: (id: string) => { const thread = threads.find(item => item.id === id); if (thread) thread.anchor = { status: 'UNRESOLVED', start: null, end: null }; } };
 }
 
 async function openForSelectedText(page: Page) {
@@ -167,4 +168,33 @@ test('accepts a suggestion into a candidate and leaves manual article text uncha
   await expect(page.getByText('Виправлений текст.', { exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
   await expect(page.getByRole('button', { name: 'Застосувати до чернетки' })).toBeEnabled();
+});
+
+test('Article language acceptance opens its manual candidate without replacing the saved text', async ({ page }) => {
+  page.on('pageerror', error => { console.error(error.message); });
+  const context = await fixture(page);
+  const finding = { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', sourceRevisionId: versionId,
+    contentHash: sha256, locator: { field: 'BODY', start: 0, end: 5 }, originalText: 'Текст', replacementText: 'Матеріал',
+    finding: 'Синтетична мовна пропозиція', provenance: 'LOCAL_TYPOGRAPHY', status: 'OPEN', stale: false };
+  await page.route(`**${base}/language-suggestions**`, async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/accept')) {
+      expect(route.request().postDataJSON()).toMatchObject({ targetType: 'ARTICLE', sourceRevisionId: versionId, expectedRevision: 1 });
+      const source = context.article.versions[0]!;
+      context.article.versions.unshift({ ...source, id: 'language-candidate', number: 2,
+        content: { title: source.content.title, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Матеріал для коментаря.' }] }] } } });
+      context.article.revision++;
+      finding.status = 'ACCEPTED';
+      return route.fulfill({ json: { candidateVersionId: 'language-candidate' } });
+    }
+    return route.fulfill({ json: { suggestions: [finding] } });
+  });
+  await page.getByRole('button', { name: 'Перевірити мову' }).click();
+  await expect(page.getByText('Синтетична мовна пропозиція')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
+  await page.getByRole('button', { name: 'Створити версію з вибраними правками' }).click();
+  await expect(page.getByRole('button', { name: 'Застосувати до чернетки' })).toBeEnabled();
+  await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
+  expect(context.article.currentApprovedVersionId).toBeNull();
+  await page.screenshot({ path: '.local-checks/m41/article-language.png', fullPage: true });
 });

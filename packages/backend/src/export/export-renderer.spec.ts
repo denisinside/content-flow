@@ -110,6 +110,73 @@ describe('deterministic export renderer', () => {
     expect(() => renderExportFiles(manifest('TXT'), altered)).toThrow(/hash/i);
   });
 
+  it('exports both approved cover fields under distinct closed filenames', () => {
+    const body = { text: 'Текст публікації', mappings: [], cover: { text: 'Заголовок обкладинки', instruction: 'Світлий фон, без логотипів' } };
+    const rows = {
+      schemaVersion: 'export-manifest-v1', projectId: 'project-1', projectRevision: 8, formats: ['LINKEDIN_COVER', 'INSTAGRAM_COVER'],
+      format: 'ZIP', frozenAt: '2026-10-10T10:00:00.000Z', sources: [],
+      items: ['LINKEDIN_COVER', 'INSTAGRAM_COVER'].map((format, index) => ({ format, revisionId: `cover-${index}`, number: 1,
+        sha256: canonicalManifestHash(body), contentMode: 'FACTUAL', reviewCounter: 0, provenance: {} })),
+    } as unknown as ExportManifest;
+    const files = renderExportFiles(rows, new Map([
+      ['cover-0', { kind: 'LINKEDIN_COVER' as const, content: body }],
+      ['cover-1', { kind: 'INSTAGRAM_COVER' as const, content: body }],
+    ]));
+    expect(files.map(file => file.name)).toEqual([
+      'linkedin-cover.txt', 'instagram-cover.txt', 'linkedin-cover.md', 'instagram-cover.md', 'manifest.json', 'sources.json',
+    ]);
+    expect(files[0]!.bytes.toString('utf8')).toContain('Заголовок обкладинки\n\nЗавдання для дизайнера\nСвітлий фон, без логотипів');
+    expect(files[2]!.bytes.toString('utf8')).toContain('## Текст обкладинки\nЗаголовок обкладинки');
+    const malformed = { text: 'x', mappings: [] };
+    const missingCover = { ...rows, items: rows.items.map((item, index) => index === 0 ? { ...item, sha256: canonicalManifestHash(malformed) } : item) };
+    expect(() => renderExportFiles(missingCover, new Map([
+      ['cover-0', { kind: 'LINKEDIN_COVER' as const, content: malformed }],
+      ['cover-1', { kind: 'INSTAGRAM_COVER' as const, content: body }],
+    ]))).toThrow(/cover/i);
+  });
+
+  it('exports ordered script frames as JSON and readable Markdown beside captions in ZIP', () => {
+    const frames = { frames: [
+      { id: '11111111-1111-4111-8111-111111111111', purpose: 'Теза', text: 'Перша картка', visualHint: 'Великий заголовок', transition: 'З’являється поступово', mappings: [] },
+      { id: '22222222-2222-4222-8222-222222222222', purpose: 'Висновок', text: 'Друга картка', visualHint: 'Схема', transition: '', mappings: [] },
+    ] };
+    const caption = { text: 'Підпис каруселі', mappings: [] };
+    const sources = [{ materialLabel: 'Міське дослідження', snapshotId: 'snapshot-1', quote: 'Перевірене твердження',
+      usedBy: [{ revisionId: 'script-rev', role: 'SELECTED_SCRIPT' }], frameLocators: [{ frameId: '11111111-1111-4111-8111-111111111111', frameOrdinal: 1, startOffset: 0, endOffset: 12, quote: 'Перша картка' }] }];
+    const items = [
+      { format: 'LINKEDIN_CAROUSEL', revisionId: 'caption-rev', number: 2, sha256: canonicalManifestHash(caption), contentMode: 'FACTUAL', reviewCounter: 0, provenance: {} },
+      { format: 'LINKEDIN_CAROUSEL_SCRIPT', revisionId: 'script-rev', number: 1, sha256: canonicalManifestHash(frames), contentMode: 'FACTUAL', reviewCounter: 0,
+        provenance: { parentAdaptationRevisionId: 'caption-rev', parentAdaptationRevisionHash: canonicalManifestHash(caption), parentCaption: caption.text, usedSources: sources } },
+    ];
+    const makeManifest = (format: 'JSON' | 'MARKDOWN' | 'ZIP') => ({ schemaVersion: 'export-manifest-v1', projectId: 'project-1', projectRevision: 8,
+      formats: items.map(item => item.format), format, frozenAt: '2026-10-10T10:00:00.000Z', sources,
+      items: format === 'ZIP' ? items : [items[1]] }) as unknown as ExportManifest;
+    const contentMap = new Map([
+      ['caption-rev', { kind: 'LINKEDIN_CAROUSEL' as const, content: caption }],
+      ['script-rev', { kind: 'LINKEDIN_CAROUSEL_SCRIPT' as const, content: frames }],
+    ]);
+    const jsonFiles = renderExportFiles(makeManifest('JSON'), contentMap);
+    expect(jsonFiles.map(file => file.name)).toEqual(['linkedin-carousel-script.json']);
+    const json = JSON.parse(jsonFiles[0]!.bytes.toString('utf8')) as { frames: typeof frames.frames; provenance: { parentCaption: string }; sources: typeof sources };
+    expect(json.frames.map(frame => frame.text)).toEqual(['Перша картка', 'Друга картка']);
+    expect(json.provenance.parentCaption).toBe('Підпис каруселі');
+    expect(json.sources.map(source => source.materialLabel)).toEqual(['Міське дослідження']);
+
+    const markdownManifest = makeManifest('MARKDOWN');
+    const markdownFile = renderExportFiles(markdownManifest, contentMap)[0]!;
+    expect(markdownFile.bytes.toString('utf8')).toContain('## Використані джерела');
+    expect(markdownFile.bytes.toString('utf8')).toContain('кадр 1, символи 0–12');
+    const creativeManifest = { ...markdownManifest, items: markdownManifest.items.map(item => ({ ...item, contentMode: 'CREATIVE' as const })) };
+    expect(renderExportFiles(creativeManifest, contentMap)[0]!.bytes.toString('utf8')).toContain('[Авторський текст · без перевіреної фактичної основи]');
+
+    const zipFiles = renderExportFiles(makeManifest('ZIP'), contentMap);
+    expect(zipFiles.map(file => file.name)).toEqual([
+      'linkedin-carousel.txt', 'linkedin-carousel.md', 'linkedin-carousel-script.json', 'linkedin-carousel-script.md', 'manifest.json', 'sources.json',
+    ]);
+    expect(zipFiles[3]!.bytes.toString('utf8')).toContain('## Кадр 2 · Висновок\n\nДруга картка');
+    expect(new Set(zipFiles.map(file => file.name)).size).toBe(zipFiles.length);
+  });
+
   it('builds a stable UTF-8 STORE ZIP with CRCs, fixed timestamp and manifest/source lists', () => {
     const files = renderExportFiles(manifest('ZIP'), contents());
     expect(files.map(file => file.name)).toEqual(['article.txt', 'telegram.txt', 'article.md', 'telegram.md', 'manifest.json', 'sources.json']);

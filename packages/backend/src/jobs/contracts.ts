@@ -36,10 +36,12 @@ export function retryAllowed(job: Pick<Job, 'status' | 'attemptCount' | 'errorCa
 }
 export function jobView(job: Job & { attempts?: JobAttempt[] }) {
   const input = typeof job.inputManifest === 'object' && job.inputManifest !== null && !Array.isArray(job.inputManifest) ? job.inputManifest : {};
+  const format = job.operation === 'TELEGRAM_GENERATION' && ['TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'].includes(String(input['format']))
+    ? String(input['format']) : undefined;
   const inputSummary = Object.fromEntries(['materialId', 'label', 'sourceUrl', 'originalAssetId', 'originalFilename']
     .filter(key => typeof input[key] === 'string').map(key => [key, input[key]]));
   return {
-    id: job.id, projectId: job.projectId, operation: job.operation, status: job.status, progressStage: job.progressStage,
+    id: job.id, projectId: job.projectId, operation: job.operation, ...(format ? { format } : {}), status: job.status, progressStage: job.progressStage,
     attemptCount: job.attemptCount, maxAttempts: 3, nextAttemptAt: job.nextAttemptAt.toISOString(), deadlineAt: job.deadlineAt.toISOString(),
     cancelRequestedAt: job.cancelRequestedAt?.toISOString() ?? null, resultRefs: job.resultRefs,
     errorCategory: job.errorCategory, providerOutcome: job.providerOutcome, retryAllowed: retryAllowed(job), inputSummary,

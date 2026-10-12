@@ -72,8 +72,8 @@ export class GoogleDocSyncService {
 
   private async lockProject(tx: Prisma.TransactionClient, actor: GoogleSyncActor, projectId: string, write = false): Promise<void> {
     const rows = write
-      ? await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND m."userId"=${actor.userId}::uuid AND m."leftAt" IS NULL FOR UPDATE OF p FOR SHARE OF w,m`
-      : await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND m."userId"=${actor.userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
+      ? await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${actor.userId}::uuid AND m."leftAt" IS NULL FOR UPDATE OF p FOR SHARE OF w,m`
+      : await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${actor.userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
     if (!rows.length) throw new NotFoundException('Project not found');
   }
   private async lockManual(tx: Prisma.TransactionClient, actor: GoogleSyncActor, projectId: string, binding: BindingRow, connectionId: string, write = false): Promise<void> {
@@ -449,7 +449,7 @@ export class GoogleDocSyncService {
       JOIN contextflow."UserProfile" u ON u."id"=s."backgroundUserId"
       JOIN contextflow."GoogleDriveConnection" c ON c."id"=s."backgroundConnectionId" AND c."userId"=s."backgroundUserId"
       WHERE s."backgroundGrantedAt" IS NOT NULL AND s."nextPollAt"<=CURRENT_TIMESTAMP AND b."endedAt" IS NULL
-      AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND 'ARTICLE'=ANY(p."formats")
+      AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND 'ARTICLE'=ANY(p."formats")
       AND u."externalProcessingNoticeVersion"=${EXTERNAL_PROCESSING_NOTICE.version} AND u."externalProcessingAcceptedAt"=s."backgroundNoticeAcceptedAt"
       AND c."revokedAt" IS NULL AND c."encryptedTokens" IS NOT NULL AND (c."refreshExpiresAt" IS NULL OR c."refreshExpiresAt">CURRENT_TIMESTAMP)
       ORDER BY s."nextPollAt" FOR UPDATE OF s SKIP LOCKED LIMIT 20`);
@@ -471,7 +471,7 @@ export class GoogleDocSyncService {
             JOIN contextflow."WorkspaceMember" wm ON wm."workspaceId"=w."id" AND wm."userId"=s."backgroundUserId" AND wm."leftAt" IS NULL
             JOIN contextflow."UserProfile" u ON u."id"=s."backgroundUserId"
             JOIN contextflow."GoogleDriveConnection" c ON c."id"=s."backgroundConnectionId" AND c."userId"=s."backgroundUserId"
-            WHERE b."id"=s."bindingId" AND b."projectId"=s."projectId" AND b."endedAt" IS NULL AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+            WHERE b."id"=s."bindingId" AND b."projectId"=s."projectId" AND b."endedAt" IS NULL AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
             AND 'ARTICLE'=ANY(p."formats") AND u."externalProcessingNoticeVersion"=${EXTERNAL_PROCESSING_NOTICE.version}
             AND u."externalProcessingAcceptedAt"=s."backgroundNoticeAcceptedAt" AND c."revokedAt" IS NULL AND c."encryptedTokens" IS NOT NULL
             AND (c."refreshExpiresAt" IS NULL OR c."refreshExpiresAt">CURRENT_TIMESTAMP)) RETURNING s."bindingId"`;

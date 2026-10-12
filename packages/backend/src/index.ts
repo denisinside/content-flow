@@ -54,9 +54,18 @@ export { DifyArticleProvider, ArticleProviderError, articleWorkflowRelease, arti
 export type { ArticleProviderInput, ArticleWorkflowSettings } from './editorial/article-provider.js';
 export { createArticleJobHandler } from './editorial/article-jobs-handler.js';
 export { TelegramService } from './editorial/telegram.service.js';
+export { ScriptService } from './editorial/script.service.js';
+export { ScriptLanguageService } from './editorial/script-language.service.js';
+export { scriptContentSchema, scriptFrameSchema, scriptMappingSchema, scriptSaveDraftInput, scriptCheckpointInput, scriptReviewInput } from './editorial/script-contracts.js';
+export type { ScriptContent, ScriptFrame } from './editorial/script-contracts.js';
+export { scriptLanguageReviewInput, scriptLanguageAcceptInput } from './editorial/script-language.service.js';
+export { LanguageSuggestionService } from './editorial/language-suggestion.service.js';
+export { languageSuggestionTargetType, languageSuggestionLocator, reviewLanguageSuggestionsInput, listLanguageSuggestionsInput,
+  acceptLanguageSuggestionsInput, rejectLanguageSuggestionInput } from './editorial/language-suggestion-contracts.js';
+export type { ReviewLanguageSuggestionsInput, ListLanguageSuggestionsInput, AcceptLanguageSuggestionsInput } from './editorial/language-suggestion-contracts.js';
 export { telegramContentSchema, telegramOutputSchema, telegramInputManifestSchema, telegramWorkflowReleaseSchema,
-  saveTelegramDraftInput, checkpointTelegramInput, reviewTelegramInput, rereviewTelegramInput, generateTelegramInput } from './editorial/telegram-contracts.js';
-export type { TelegramContent, TelegramOutput, TelegramInputManifest, TelegramWorkflowRelease, SaveTelegramDraftInput, ReviewTelegramInput, GenerateTelegramInput } from './editorial/telegram-contracts.js';
+  adaptationFormatSchema, validateFormatContent, saveTelegramDraftInput, checkpointTelegramInput, reviewTelegramInput, rereviewTelegramInput, generateTelegramInput } from './editorial/telegram-contracts.js';
+export type { AdaptationFormat, TelegramContent, TelegramOutput, TelegramInputManifest, TelegramWorkflowRelease, SaveTelegramDraftInput, ReviewTelegramInput, GenerateTelegramInput } from './editorial/telegram-contracts.js';
 export { DifyTelegramProvider, TelegramProviderError, telegramWorkflowRelease, telegramWorkflowSettings, TELEGRAM_CONTRACT } from './editorial/telegram-provider.js';
 export type { TelegramProviderInput, TelegramWorkflowSettings } from './editorial/telegram-provider.js';
 export { createTelegramJobHandler } from './editorial/telegram-jobs-handler.js';
@@ -81,3 +90,4 @@ export * from './google-docs/google-doc-sync-contracts.js';
 export { GoogleDocSyncService } from './google-docs/google-doc-sync.service.js';
 export { createGoogleDocSyncHandler } from './google-docs/google-doc-sync-handler.js';
 export { GoogleDocSyncPoller } from './google-docs/google-doc-sync-poller.js';
+export { PrivateObjectCleanup, PrivateObjectCleanupPoller } from './lifecycle/private-object-cleanup.js';

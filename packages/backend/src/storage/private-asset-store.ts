@@ -166,11 +166,16 @@ export class PrivateAssetStore {
     } catch { throw new ServiceUnavailableException('Unable to read the private original'); }
   }
 
-  // Called only for this request's unreferenced staged object, or isolated TEST cleanup.
+  // Called for unreferenced staged objects, journaled purge objects or isolated TEST cleanup.
   async remove(bucket: string, objectKey: string): Promise<void> {
     this.validate(bucket, objectKey);
     try {
-      if (this.config.driver === 'filesystem') await unlink(await this.localPath(objectKey));
+      if (this.config.driver === 'filesystem') {
+        try { await unlink(await this.localPath(objectKey)); }
+        catch (error) {
+          if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+        }
+      }
       else {
         await this.requirePrivateBucket();
         await this.providerRequest(`object/${bucket}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' },

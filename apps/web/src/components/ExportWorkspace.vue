@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 
-type OutputFormat = 'ARTICLE' | 'TELEGRAM_POST'
-type PackageFormat = 'TXT' | 'MARKDOWN' | 'ZIP'
+type OutputFormat = 'ARTICLE' | 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT'
+type PackageFormat = 'TXT' | 'MARKDOWN' | 'JSON' | 'ZIP'
 type ExportStatus = 'REQUESTED' | 'BUILDING' | 'READY' | 'FAILED' | 'CANCELLED' | 'OBSOLETE'
 interface ReadinessItem {
   format: string
@@ -65,12 +65,15 @@ const selectedMatchesReadiness = computed(() => selected.value.length > 0 && sel
 }))
 const canBuild = computed(() => {
   if (props.archived || busy.value || !selectedMatchesReadiness.value) return false
-  return packageFormat.value === 'ZIP' ? selected.value.length >= 1 && selected.value.length <= 2 : selected.value.length === 1
+  if (packageFormat.value === 'ZIP') return selected.value.length >= 1 && selected.value.length <= 11
+  if (selected.value.length !== 1) return false
+  const script = selected.value[0]!.format.endsWith('_SCRIPT')
+  return packageFormat.value === 'JSON' ? script : packageFormat.value === 'TXT' ? !script : true
 })
 const readyCount = computed(() => state.value?.items.filter(item => item.ready).length ?? 0)
 
 function supported(item: ReadinessItem): item is ReadinessItem & { format: OutputFormat; revisionId: string; number: number; reviewCounter: number } {
-  return (item.format === 'ARTICLE' || item.format === 'TELEGRAM_POST') && !!item.revisionId && item.number !== null && item.reviewCounter !== null
+  return ['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT'].includes(item.format) && !!item.revisionId && item.number !== null && item.reviewCounter !== null
 }
 function isSelected(item: ReadinessItem) {
   return supported(item) && selected.value.some(row => row.format === item.format && row.revisionId === item.revisionId && row.reviewCounter === item.reviewCounter)
@@ -86,10 +89,13 @@ function toggle(item: ReadinessItem) {
   }
   pendingCommand = null
   if (selected.value.length > 1 && packageFormat.value !== 'ZIP') packageFormat.value = 'ZIP'
+  else if (selected.value.length === 1 && selected.value[0]!.format.endsWith('_SCRIPT') && packageFormat.value === 'TXT') packageFormat.value = 'MARKDOWN'
+  else if (packageFormat.value === 'JSON' && (selected.value.length !== 1 || !selected.value[0]!.format.endsWith('_SCRIPT'))) packageFormat.value = 'MARKDOWN'
 }
 function removeSelection(item: Selection) {
   selected.value = selected.value.filter(row => row.format !== item.format || row.revisionId !== item.revisionId || row.reviewCounter !== item.reviewCounter)
   pendingCommand = null
+  if (packageFormat.value === 'JSON' && (selected.value.length !== 1 || !selected.value[0]!.format.endsWith('_SCRIPT'))) packageFormat.value = 'MARKDOWN'
 }
 function reasonLabel(reason: string) {
   const value = reason.toLowerCase()
@@ -103,12 +109,15 @@ function reasonLabel(reason: string) {
 function formatLabel(format: string) {
   if (format === 'ARTICLE') return 'Стаття'
   if (format === 'TELEGRAM_POST') return 'Допис у Telegram'
-  if (format === 'LINKEDIN_TEXT') return 'Текст у LinkedIn'
+  if (format === 'LINKEDIN_TEXT') return 'Публікація у LinkedIn'
   if (format === 'LINKEDIN_COVER') return 'Обкладинка LinkedIn'
-  if (format === 'LINKEDIN_CAROUSEL') return 'Карусель LinkedIn'
   if (format === 'INSTAGRAM_COVER') return 'Обкладинка Instagram'
+  if (format === 'LINKEDIN_CAROUSEL') return 'Карусель LinkedIn'
   if (format === 'INSTAGRAM_CAROUSEL') return 'Карусель Instagram'
   if (format === 'INSTAGRAM_STORIES') return 'Історії Instagram'
+  if (format === 'LINKEDIN_CAROUSEL_SCRIPT') return 'Сценарій каруселі LinkedIn'
+  if (format === 'INSTAGRAM_CAROUSEL_SCRIPT') return 'Сценарій каруселі Instagram'
+  if (format === 'INSTAGRAM_STORIES_SCRIPT') return 'Сценарій історій Instagram'
   return 'Інший вибраний формат'
 }
 function statusLabel(status: ExportStatus) {
@@ -248,7 +257,7 @@ onBeforeUnmount(() => {
           Готовність і експорт
         </h1>
         <p class="export-lead">
-          Оберіть погоджені матеріали для файлу. Статтю включено лише тоді, коли ви її виберете.
+          Оберіть погоджені матеріали для файлу. Сценарії можна передати дизайнеру вже зараз; готові слайди з’являться після M5. Статтю включено лише тоді, коли ви її виберете.
         </p>
       </div>
     </header>
@@ -392,6 +401,15 @@ onBeforeUnmount(() => {
             type="radio"
             value="MARKDOWN"
           > Markdown</label>
+          <label :aria-disabled="selected.length !== 1 || !selected[0]?.format.endsWith('_SCRIPT')">
+            <input
+              v-model="packageFormat"
+              type="radio"
+              value="JSON"
+              :disabled="selected.length !== 1 || !selected[0]?.format.endsWith('_SCRIPT')"
+            >
+            JSON сценарію
+          </label>
           <label><input
             v-model="packageFormat"
             type="radio"
@@ -404,10 +422,22 @@ onBeforeUnmount(() => {
             TXT і Markdown містять один матеріал. Для кількох виберіть ZIP.
           </p>
           <p
-            v-if="packageFormat === 'ZIP' && selected.length > 2"
+            v-if="packageFormat === 'JSON' && selected.length === 1 && !selected[0]?.format.endsWith('_SCRIPT')"
+            class="export-muted"
+          >
+            JSON доступний для погодженого сценарію кадрів.
+          </p>
+          <p
+            v-if="packageFormat === 'TXT' && selected.some(item => item.format.endsWith('_SCRIPT'))"
+            class="export-muted"
+          >
+            Сценарії доступні як JSON, читабельний Markdown або пакет ZIP.
+          </p>
+          <p
+            v-if="packageFormat === 'ZIP' && selected.length > 11"
             class="export-reasons"
           >
-            ZIP наразі підтримує до двох вибраних матеріалів.
+            ZIP підтримує до одинадцяти вибраних матеріалів.
           </p>
         </fieldset>
         <Button

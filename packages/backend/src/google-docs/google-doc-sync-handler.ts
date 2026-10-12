@@ -54,7 +54,7 @@ export function createGoogleDocSyncHandler(deps: { prisma: PrismaClient; article
       JOIN contextflow."WorkspaceMember" wm ON wm."workspaceId"=w."id" JOIN contextflow."UserProfile" u ON u."id"=wm."userId"
       JOIN contextflow."GoogleDriveConnection" c ON c."id"=${m.connectionId}::uuid AND c."userId"=u."id"
       WHERE b."id"=${m.bindingId}::uuid AND b."projectId"=${job.projectId}::uuid AND b."endedAt" IS NULL
-      AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND wm."leftAt" IS NULL AND wm."userId"=${job.requestedBy}::uuid
+      AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND wm."leftAt" IS NULL AND wm."userId"=${job.requestedBy}::uuid
       AND 'ARTICLE'=ANY(p."formats") AND u."externalProcessingAcceptedAt"=${new Date(m.noticeAcceptedAt)}
       AND u."externalProcessingNoticeVersion"=${EXTERNAL_PROCESSING_NOTICE.version}
       AND c."revokedAt" IS NULL AND c."encryptedTokens" IS NOT NULL FOR SHARE OF b,p,w,wm,u,c`;

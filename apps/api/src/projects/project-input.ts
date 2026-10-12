@@ -7,6 +7,8 @@ export const projectIdInput = z.uuid();
 export const createProjectInput = z.object({ workspaceId: z.uuid(), topic, formats }).strict();
 export const updateProjectInput = z.object({ expectedRevision: z.number().int().positive().max(2_147_483_646), topic: topic.optional(), formats: formats.optional() })
   .strict().refine(value => value.topic !== undefined || value.formats !== undefined);
-export const listProjectsInput = z.object({ cursor: z.uuid().optional(), workspaceId: z.uuid().optional() }).strict();
+export const listProjectsInput = z.object({ cursor: z.uuid().optional(), workspaceId: z.uuid().optional(), state: z.enum(['ACTIVE', 'ARCHIVED', 'TRASHED']).optional() }).strict();
+export const projectLifecycleInput = z.object({ expectedRevision: z.number().int().positive().max(2_147_483_646) }).strict();
 export type CreateProjectInput = z.infer<typeof createProjectInput>;
 export type UpdateProjectInput = z.infer<typeof updateProjectInput>;
+export type ProjectLifecycleInput = z.infer<typeof projectLifecycleInput>;

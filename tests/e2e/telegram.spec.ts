@@ -67,9 +67,9 @@ async function fixture(page: Page, hasApprovedArticle = false, contentMode = 'FA
 
 test('channels-only direct Telegram saves, links exact wording, checkpoints, approves and re-reviews without changing first approval', async ({ page }) => {
   const context = await fixture(page);
-  const writing = page.getByRole('textbox', { name: 'Текст допису у Telegram' });
+  const writing = page.getByRole('textbox', { name: 'Текст публікації' });
   await expect(page.getByText(/працює без статті та структури/)).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Telegram' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: 'Канали' })).toHaveAttribute('aria-current', 'page');
   await writing.fill(evidence.wording);
   await writing.selectText();
   await page.getByRole('button', { name: 'Прив’язати виділення' }).click();
@@ -98,18 +98,18 @@ test('channels-only direct Telegram saves, links exact wording, checkpoints, app
 
 test('409 retains manuscript through reload and session-local recovery', async ({ page }) => {
   const context = await fixture(page); context.conflict();
-  const writing = page.getByRole('textbox', { name: 'Текст допису у Telegram' });
+  const writing = page.getByRole('textbox', { name: 'Текст публікації' });
   await writing.fill('Локальний текст, який треба зберегти.');
   await expect(page.locator('.telegram-error')).toContainText('Ваш текст збережено');
   await page.reload();
-  expect(await page.evaluate(() => sessionStorage.getItem('cf:telegram:editor:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'))).toContain('Локальний текст');
+  expect(await page.evaluate(() => sessionStorage.getItem('cf:channel:editor:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:TELEGRAM_POST'))).toContain('Локальний текст');
   await page.getByRole('button', { name: 'Відновити' }).click();
   await expect(writing).toHaveValue('Локальний текст, який треба зберегти.');
 });
 
 test('shortening linked wording saves bounded ranges and keeps the old quote for review', async ({ page }) => {
   const context = await fixture(page);
-  const writing = page.getByRole('textbox', { name: 'Текст допису у Telegram' });
+  const writing = page.getByRole('textbox', { name: 'Текст публікації' });
   await writing.fill(evidence.wording); await writing.selectText();
   await page.getByRole('button', { name: 'Прив’язати виділення' }).click();
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
@@ -122,19 +122,19 @@ test('shortening linked wording saves bounded ranges and keeps the old quote for
 
 test('ARTICLE_DERIVED becomes available only with a current approved article and saves its explicit route', async ({ page }) => {
   const context = await fixture(page, true);
-  const sourceSelect = page.getByLabel('Джерело допису');
+  const sourceSelect = page.getByLabel('Джерело матеріалу');
   await sourceSelect.selectOption('ARTICLE_DERIVED');
   await expect(page.getByText(/Джерело: Погоджена стаття/)).toBeVisible();
-  const writing = page.getByRole('textbox', { name: 'Текст допису у Telegram' });
+  const writing = page.getByRole('textbox', { name: 'Текст публікації' });
   await writing.fill('Редакція створила цей короткий допис на основі погодженої статті.');
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
   expect(context.actions.at(-1)?.body.inputMode).toBe('ARTICLE_DERIVED');
-  await expect(page.getByRole('button', { name: 'Запропонувати допис' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Запропонувати текст' })).toBeEnabled();
 });
 
 test('unmapped creative text needs an explicit revision-level acknowledgment before approval and re-review', async ({ page }) => {
   const context = await fixture(page, false, 'CREATIVE');
-  await page.getByRole('textbox', { name: 'Текст допису у Telegram' }).fill('Неперевірений творчий текст для погодження.');
+  await page.getByRole('textbox', { name: 'Текст публікації' }).fill('Неперевірений творчий текст для погодження.');
   await page.getByRole('button', { name: 'Зберегти версію' }).click();
   await page.getByRole('button', { name: 'Історія й походження' }).click();
   const acknowledgment = page.getByRole('checkbox', { name: /переглянув непов’язані твердження/ });
@@ -153,9 +153,9 @@ test('unmapped creative text needs an explicit revision-level acknowledgment bef
 
 test('logout clears Telegram session recovery before leaving the editor', async ({ page }) => {
   await fixture(page);
-  const writing = page.getByRole('textbox', { name: 'Текст допису у Telegram' });
+  const writing = page.getByRole('textbox', { name: 'Текст публікації' });
   await writing.fill('Приватна чернетка поточної сесії.');
-  const key = 'cf:telegram:editor:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const key = 'cf:channel:editor:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:TELEGRAM_POST';
   expect(await page.evaluate(recoveryKey => sessionStorage.getItem(recoveryKey), key)).toContain('Приватна чернетка');
   await page.locator('#account-title').click();
   await page.getByRole('button', { name: 'Вийти', exact: true }).click();

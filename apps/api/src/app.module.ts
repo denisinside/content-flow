@@ -10,9 +10,10 @@ import { ClaimsModule } from './claims/claims.module.js';
 import { EditorialModule } from './editorial/editorial.module.js';
 import { ExportModule } from './export/export.module.js';
 import { GoogleOAuthModule } from './google-docs/google-oauth.module.js';
+import { PresenceModule } from './presence/presence.module.js';
 
 @Module({
-  imports: [FoundationModule, AuthModule, WorkspacesModule, ProjectsModule, SourcesModule, JobsModule, ClaimsModule, EditorialModule, ExportModule, GoogleOAuthModule],
+  imports: [FoundationModule, AuthModule, WorkspacesModule, ProjectsModule, SourcesModule, JobsModule, ClaimsModule, EditorialModule, ExportModule, GoogleOAuthModule, PresenceModule],
   controllers: [HealthController],
 })
 export class AppModule {}

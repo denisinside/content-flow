@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, HttpCode, Inject, Param, Pa
 import { ApiBody, ApiCookieAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { WorkspaceInviteResultDto, WorkspaceResultDto, WorkspaceStyleResultDto, WorkspacesPageDto } from './workspace.dto.js';
-import { acceptInviteInput, createWorkspaceInput, inviteInput, listWorkspacesInput, transferInput, updateStyleInput, workspaceIdInput } from './workspace-input.js';
+import { acceptInviteInput, createWorkspaceInput, inviteInput, listWorkspacesInput, transferInput, updateStyleInput, workspaceIdInput, workspaceLifecycleInput } from './workspace-input.js';
 import { WorkspaceService } from './workspace.service.js';
 
 function id(value: string) {
@@ -78,15 +78,37 @@ export class WorkspacesController {
   @Post(':workspaceId/archive')
   @ApiOperation({ summary: 'Sole owner archives a Workspace without deleting history' })
   @ApiResponse({ status: 201, type: WorkspaceResultDto })
-  archive(@Req() request: AuthenticatedRequest, @Param('workspaceId') workspaceId: string) {
-    return this.workspaces.archive(request.sessionUser.id, id(workspaceId));
+  archive(@Req() request: AuthenticatedRequest, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+    return this.lifecycle(request, workspaceId, body, 'archive');
+  }
+
+  @Post(':workspaceId/trash')
+  @ApiOperation({ summary: 'Sole owner trashes a Workspace for recoverable retention' })
+  trash(@Req() request: AuthenticatedRequest, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+    return this.lifecycle(request, workspaceId, body, 'trash');
   }
 
   @Post(':workspaceId/restore')
   @ApiOperation({ summary: 'Owner restores an archived Workspace' })
   @ApiResponse({ status: 201, type: WorkspaceResultDto })
-  restore(@Req() request: AuthenticatedRequest, @Param('workspaceId') workspaceId: string) {
-    return this.workspaces.restore(request.sessionUser.id, id(workspaceId));
+  restore(@Req() request: AuthenticatedRequest, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+    return this.lifecycle(request, workspaceId, body, 'restore');
+  }
+
+  @Post(':workspaceId/purge')
+  @ApiOperation({ summary: 'Sole Workspace owner permanently purges its trash after 30 days' })
+  @ApiBody({ schema: { type: 'object', required: ['expectedRevision'], additionalProperties: false, properties: { expectedRevision: { type: 'integer', minimum: 1 } } } })
+  @ApiResponse({ status: 409, description: 'Retention has not elapsed, Workspace changed, or an external write needs reconciliation' })
+  purge(@Req() request: AuthenticatedRequest, @Param('workspaceId') workspaceId: string, @Body() body: unknown) {
+    const parsed = workspaceLifecycleInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('Invalid Workspace lifecycle input');
+    return this.workspaces.purge(request.sessionUser.id, id(workspaceId), parsed.data.expectedRevision);
+  }
+
+  private lifecycle(request: AuthenticatedRequest, workspaceId: string, body: unknown, action: 'archive' | 'trash' | 'restore') {
+    const parsed = workspaceLifecycleInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('Invalid Workspace lifecycle input');
+    return this.workspaces.lifecycle(request.sessionUser.id, id(workspaceId), action, parsed.data.expectedRevision);
   }
 
   @Get(':workspaceId/style')

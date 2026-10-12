@@ -10,9 +10,12 @@ export class WorkspaceDto {
   @ApiProperty({ type: String, maxLength: 120 }) name!: string;
   @ApiProperty({ type: String, format: 'uuid' }) ownerId!: string;
   @ApiProperty({ type: Number, minimum: 1 }) styleRevision!: number;
+  @ApiProperty({ type: Number, minimum: 1 }) lifecycleRevision!: number;
   @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string;
   @ApiProperty({ type: String, format: 'date-time' }) updatedAt!: string;
   @ApiProperty({ type: String, format: 'date-time', nullable: true }) archivedAt!: string | null;
+  @ApiProperty({ type: String, format: 'date-time', nullable: true }) trashedAt!: string | null;
+  @ApiProperty({ type: String, format: 'date-time', nullable: true }) purgeAfter!: string | null;
   @ApiProperty({ type: [WorkspaceMemberDto], required: false }) members?: WorkspaceMemberDto[];
 }
 export class WorkspaceResultDto {

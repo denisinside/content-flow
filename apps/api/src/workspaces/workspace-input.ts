@@ -8,6 +8,7 @@ export const listWorkspacesInput = z.object({ cursor: z.uuid().optional() }).str
 export const inviteInput = z.object({ email }).strict();
 export const acceptInviteInput = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
 export const transferInput = z.object({ userId: z.uuid() }).strict();
+export const workspaceLifecycleInput = z.object({ expectedRevision: z.number().int().positive().max(2_147_483_646) }).strict();
 
 const settingValue = z.union([z.string().max(500), z.boolean(), z.number().finite()]);
 const settings = z.record(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,79}$/), settingValue)

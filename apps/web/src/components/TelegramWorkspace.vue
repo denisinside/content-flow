@@ -4,22 +4,28 @@ import { Button } from '@/components/ui/button'
 
 type InputMode = 'DIRECT' | 'ARTICLE_DERIVED'
 type ContentMode = 'FACTUAL' | 'CREATIVE'
-interface Mapping { startOffset: number; endOffset: number; quote: string; claimRevisionId: string; evidenceId: string }
-interface Content { text: string; mappings: Mapping[] }
+type ChannelFormat = 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES'
+interface Mapping { startOffset: number; endOffset: number; quote: string; claimRevisionId: string; evidenceId: string; field?: 'text' | 'cover' }
+interface Content { text: string; mappings: Mapping[]; cover?: { text: string; instruction: string } }
 interface Inputs { inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; briefRevisionId: string; basisRevisionId: string | null; sourceArticleVersionId: string | null; workspaceId: string; workspaceStyleRevision: number }
 interface Draft extends Inputs { content: Content; baseRevisionId: string | null }
 interface RevisionClaim { evidenceId: string; claimRevisionId: string; quote: string; linkedText: string; evidence?: { quote: string; relation: string; invalidatedAt: string | null; snapshotId: string; snapshot: { material: { label: string } } }; claimRevision?: { wording: string } }
 interface Revision extends Inputs { id: string; number: number; content: Content; claims?: RevisionClaim[]; hasUnmapped: boolean; status: 'PROPOSED' | 'APPROVED' | 'WITHDRAWN'; origin: string; reviewCounter: number; approvedAt: string | null; approvedBy: string | null; withdrawnAt: string | null; withdrawalReason: string | null; reviewedBriefRevisionId: string | null; reviewedBasisRevisionId: string | null; reviewedSourceArticleVersionId: string | null; reviewedWorkspaceStyleRevision: number | null; reviewedBy: string | null; reviewedAt: string | null; acknowledgedUnmapped: boolean; staleReasons: string[]; blockingReasons: string[] }
 interface Evidence { claimRevisionId: string; evidenceId: string; wording: string; quote: string; snapshotId: string; materialTitle: string }
-interface Job { id: string; status: string; operation: string; retryAllowed: boolean; failureCode?: string | null; safeMessage?: string | null }
-interface State { adaptation: { id: string; revision: number; draft: Draft | null; currentApprovedRevisionId: string | null; revisions: Revision[] } | null; telegramSelected: boolean; brief: { id: string; revision: number; currentRevision: { id: string; contentMode: ContentMode } | null; history: unknown[] } | null; style: { revision: number }; prerequisites: { blockingReasons: string[]; missingBasis?: boolean; unverified?: boolean }; approvedArticle: { id: string; number: number; contentMode: ContentMode; title?: string; approvedAt?: string; inspection?: { eligible?: boolean; staleReasons?: string[]; blockingReasons: string[] } } | null; eligibleEvidence: Evidence[]; staleReasons: string[]; mappingIssues: { locator: string; reason: string }[]; hasUnmapped: boolean; blockingReasons: string[] }
-const props = defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; archived?: boolean }>()
-const emit = defineEmits<{ 'session-expired': [] }>()
-const base = `/api/v1/projects/${encodeURIComponent(props.projectId)}/telegram`
+interface Job { id: string; status: string; operation: string; format?: ChannelFormat; retryAllowed: boolean; failureCode?: string | null; safeMessage?: string | null }
+interface LanguageSuggestion { id: string; sourceRevisionId: string; locator: { start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean }
+interface RecoveredDraft { content: Content; inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; expectedRevision: number }
+interface State { adaptation: { id: string; revision: number; draft: Draft | null; currentApprovedRevisionId: string | null; revisions: Revision[] } | null; formatSelected?: boolean; telegramSelected?: boolean; brief: { id: string; revision: number; currentRevision: { id: string; contentMode: ContentMode } | null; history: unknown[] } | null; style: { revision: number }; prerequisites: { blockingReasons: string[]; missingBasis?: boolean; unverified?: boolean }; approvedArticle: { id: string; number: number; contentMode: ContentMode; title?: string; approvedAt?: string; inspection?: { eligible?: boolean; staleReasons?: string[]; blockingReasons: string[] } } | null; eligibleEvidence: Evidence[]; staleReasons: string[]; mappingIssues: { locator: string; reason: string }[]; hasUnmapped: boolean; blockingReasons: string[] }
+const props = withDefaults(defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; formats?: ChannelFormat[]; initialFormat?: ChannelFormat; archived?: boolean }>(), { formats: () => ['TELEGRAM_POST'], initialFormat: 'TELEGRAM_POST' })
+const emit = defineEmits<{ 'session-expired': []; 'format-change': [format: ChannelFormat]; 'caption-generated': [] }>()
+const base = computed(() => `/api/v1/projects/${encodeURIComponent(props.projectId)}/telegram?format=${encodeURIComponent(format.value)}`)
 const projectBase = `/api/v1/projects/${encodeURIComponent(props.projectId)}`
-const recoveryKey = `cf:telegram:${props.userId}:${props.projectId}`
+const recoveryKey = computed(() => `cf:channel:${props.userId}:${props.projectId}:${format.value}`)
 const state = ref<State | null>(null)
 const text = ref('')
+const coverText = ref('')
+const coverInstruction = ref('')
+const format = ref<ChannelFormat>(props.initialFormat)
 const inputMode = ref<InputMode>('DIRECT')
 const contentMode = ref<ContentMode>('CREATIVE')
 const includeLink = ref(false)
@@ -30,20 +36,28 @@ const busy = ref(false)
 const loading = ref(true)
 const error = ref('')
 const conflict = ref(false)
-const recovered = ref<{ content: Content; inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; expectedRevision: number } | null>(null)
+const recovered = ref<RecoveredDraft | null>(null)
 const historyOpen = ref(false)
 const reviewAcknowledgements = ref<Record<string, boolean>>({})
 const editor = ref<HTMLTextAreaElement | null>(null)
+const coverEditor = ref<HTMLTextAreaElement | null>(null)
 const selection = ref<{ start: number; end: number } | null>(null)
 const dirty = computed(() => baseline.value !== serialize())
-const readonly = computed(() => props.archived || !state.value?.telegramSelected)
+const readonly = computed(() => props.archived || !(state.value?.formatSelected ?? (format.value === 'TELEGRAM_POST' && state.value?.telegramSelected)))
+const isCover = computed(() => format.value === 'LINKEDIN_COVER' || format.value === 'INSTAGRAM_COVER')
+const textLimit = computed(() => format.value === 'TELEGRAM_POST' ? 4096 : 10000)
+const formatLabel = computed(() => ({ TELEGRAM_POST: 'Допис у Telegram', LINKEDIN_TEXT: 'Публікація у LinkedIn', LINKEDIN_COVER: 'Обкладинка LinkedIn', INSTAGRAM_COVER: 'Обкладинка Instagram', LINKEDIN_CAROUSEL: 'Карусель LinkedIn', INSTAGRAM_CAROUSEL: 'Карусель Instagram', INSTAGRAM_STORIES: 'Історії Instagram' })[format.value])
 const selectedArticle = computed(() => state.value?.approvedArticle)
 const articleSourceNeedsReview = computed(() => inputMode.value === 'ARTICLE_DERIVED' && !!selectedArticle.value && (selectedArticle.value.inspection?.eligible !== true || !!selectedArticle.value.inspection?.staleReasons?.length))
 const activeApproval = computed(() => state.value?.adaptation?.revisions.find(row => row.id === state.value?.adaptation?.currentApprovedRevisionId) ?? null)
-const localMappingIssues = computed(() => mappings.value.filter(item => text.value.slice(item.startOffset, item.endOffset) !== item.quote))
+const localMappingIssues = computed(() => mappings.value.filter(item => fieldText(item.field).slice(item.startOffset, item.endOffset) !== item.quote))
 const mappings = ref<Mapping[]>([])
 const jobs = ref<Job[]>([])
 const jobMessage = ref('')
+const languageSuggestions = ref<LanguageSuggestion[]>([])
+const selectedLanguageIds = ref<string[]>([])
+const languageMessage = ref('')
+const languageBusy = ref(false)
 const saveStatus = computed(() => saving.value ? 'Зберігаємо…' : conflict.value ? 'Потрібно узгодити зміни' : error.value && dirty.value ? 'Не збережено' : dirty.value ? 'Є незбережені зміни' : 'Збережено')
 let timer: ReturnType<typeof setTimeout> | undefined
 let pollTimer: ReturnType<typeof setTimeout> | undefined
@@ -51,17 +65,21 @@ let disposed = false
 let hydration = false
 let sessionEnded = false
 let inFlight: Promise<boolean> | null = null
-let commandKey: string | null = null
+const commandKeys = new Map<string, string>()
+let formatEpoch = 0
 let controller = new AbortController()
 const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
 
-function content(): Content { return { text: text.value, mappings: [...mappings.value].sort((a, b) => a.startOffset - b.startOffset) } }
+function content(): Content { return { text: text.value, mappings: [...mappings.value].sort((a, b) => a.startOffset - b.startOffset), ...(isCover.value ? { cover: { text: coverText.value, instruction: coverInstruction.value } } : {}) } }
+function fieldText(field?: 'text' | 'cover') { return field === 'cover' ? coverText.value : text.value }
 function serialize() { return JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }) }
-function retain() { if (sessionEnded || !props.userId || hydration || !dirty.value) return; try { sessionStorage.setItem(recoveryKey, JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value, expectedRevision: expectedRevision.value })) } catch { /* Live text remains available if session storage is full. */ } }
+function retain() { if (sessionEnded || !props.userId || hydration || !dirty.value) return; try { sessionStorage.setItem(recoveryKey.value, JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value, expectedRevision: expectedRevision.value })) } catch { /* Live text remains available if session storage is full. */ } }
 function changed() { if (hydration || disposed) return; retain(); clearTimeout(timer); if (!conflict.value && !recovered.value) timer = setTimeout(() => void save(), 700) }
 function populate(draft?: Draft | null) {
   hydration = true
   text.value = draft?.content.text ?? ''
+  coverText.value = draft?.content.cover?.text ?? ''
+  coverInstruction.value = draft?.content.cover?.instruction ?? ''
   mappings.value = draft?.content.mappings ?? []
   inputMode.value = draft?.inputMode ?? 'DIRECT'
   contentMode.value = draft?.contentMode ?? state.value?.brief?.currentRevision?.contentMode ?? 'CREATIVE'
@@ -71,40 +89,72 @@ function populate(draft?: Draft | null) {
   hydration = false
 }
 async function request(path = '', body?: unknown) {
-  const response = await fetch(`${base}${path}`, { credentials: 'same-origin', signal: controller.signal, method: body === undefined ? 'GET' : 'POST', ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify(body) }) })
+  const requestFormat = format.value, requestEpoch = formatEpoch
+  const url = path ? `${base.value.split('?')[0]}${path}` : base.value
+  const response = await fetch(url, { credentials: 'same-origin', signal: controller.signal, method: body === undefined ? 'GET' : 'POST', ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify({ format: format.value, ...body }) }) })
   if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
   if (!response.ok) {
-    if (response.status === 409) conflict.value = true
-    throw new Error(response.status === 409 ? 'Telegram або редакційні залежності змінилися. Ваш текст збережено в цьому вікні.' : response.status === 503 ? 'AI-генерація тимчасово недоступна. Ви можете продовжувати редагування.' : response.status === 400 ? 'Перевірте текст і посилання на факти.' : 'Не вдалося виконати дію. Ваш текст залишився в редакторі; повторіть спробу.')
+    if (response.status === 409 && requestEpoch === formatEpoch && requestFormat === format.value) conflict.value = true
+    throw new Error(response.status === 409 ? 'Матеріал або редакційні залежності змінилися. Ваш текст збережено в цьому вікні.' : response.status === 503 ? 'AI-генерація тимчасово недоступна. Ви можете продовжувати редагування.' : response.status === 400 ? 'Перевірте текст і посилання на факти.' : 'Не вдалося виконати дію. Ваш текст залишився в редакторі; повторіть спробу.')
   }
   return response.json()
 }
-async function load(reset = false) { state.value = await request() as State; if (reset) populate(state.value.adaptation?.draft); }
+async function load(reset = false) {
+  const requestedFormat = format.value, requestedEpoch = formatEpoch
+  const next = await request() as State
+  if (requestedEpoch !== formatEpoch || requestedFormat !== format.value || disposed) return
+  state.value = next
+  if (reset) populate(state.value.adaptation?.draft)
+}
 async function save(): Promise<boolean> {
   clearTimeout(timer)
   if (inFlight) { const ok = await inFlight; return ok && dirty.value ? save() : ok }
   if (!dirty.value) return true
   if (readonly.value || conflict.value || recovered.value) return false
-  const submitted = serialize(); saving.value = true; error.value = ''
+  const saveFormat = format.value, saveEpoch = formatEpoch, saveRecoveryKey = recoveryKey.value
+  const submitted = serialize(), submittedContent = content(), submittedInputMode = inputMode.value, submittedContentMode = contentMode.value, submittedIncludeLink = includeLink.value, submittedExpectedRevision = expectedRevision.value
+  saving.value = true; error.value = ''
   inFlight = (async () => {
     try {
-      state.value = await request('/draft', { expectedRevision: expectedRevision.value, content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }) as State
-      if (disposed) return false
+      const result = await request('/draft', { expectedRevision: submittedExpectedRevision, content: submittedContent, inputMode: submittedInputMode, contentMode: submittedContentMode, includeLink: submittedIncludeLink }) as State
+      if (disposed || saveEpoch !== formatEpoch || saveFormat !== format.value) {
+        const stored = sessionStorage.getItem(saveRecoveryKey)
+        if (stored) {
+          try {
+            const recoveredDraft = JSON.parse(stored) as RecoveredDraft
+            if (JSON.stringify({ content: recoveredDraft.content, inputMode: recoveredDraft.inputMode, contentMode: recoveredDraft.contentMode, includeLink: recoveredDraft.includeLink }) === submitted) sessionStorage.removeItem(saveRecoveryKey)
+          } catch { /* Keep an unreadable recovery record for manual recovery. */ }
+        }
+        return false
+      }
+      state.value = result
       expectedRevision.value = state.value.adaptation?.revision ?? expectedRevision.value
       baseline.value = submitted
-      if (!dirty.value) sessionStorage.removeItem(recoveryKey); else retain()
+      if (!dirty.value) sessionStorage.removeItem(recoveryKey.value); else retain()
       return true
-    } catch (cause) { if (!disposed) error.value = cause instanceof Error ? cause.message : 'Не вдалося зберегти.'; return false }
+    } catch (cause) {
+      if (!disposed && (saveEpoch !== formatEpoch || saveFormat !== format.value)) {
+        try { sessionStorage.setItem(saveRecoveryKey, JSON.stringify({ content: submittedContent, inputMode: submittedInputMode, contentMode: submittedContentMode, includeLink: submittedIncludeLink, expectedRevision: submittedExpectedRevision })) } catch { /* The old editor contents were already submitted; browser storage may be full. */ }
+      } else if (!disposed) error.value = cause instanceof Error ? cause.message : 'Не вдалося зберегти.'
+      return false
+    }
     finally { saving.value = false; inFlight = null }
   })()
   const ok = await inFlight
   return ok && dirty.value && !disposed ? save() : ok
 }
 async function command(path: string, extra: Record<string, unknown> = {}, replace = false) {
-  if (busy.value || readonly.value || !await save()) return
+  const commandFormat = format.value, commandEpoch = formatEpoch
+  if (busy.value || readonly.value || !await save() || commandEpoch !== formatEpoch || commandFormat !== format.value) return
   busy.value = true; error.value = ''
-  try { state.value = await request(path, { expectedRevision: expectedRevision.value, ...extra }) as State; expectedRevision.value = state.value.adaptation?.revision ?? expectedRevision.value; if (replace) populate(state.value.adaptation?.draft); else reviewAcknowledgements.value = {} }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
+  try {
+    const result = await request(path, { expectedRevision: expectedRevision.value, ...extra }) as State
+    if (commandEpoch !== formatEpoch || commandFormat !== format.value) return
+    state.value = result; expectedRevision.value = state.value.adaptation?.revision ?? expectedRevision.value
+    if (replace) populate(state.value.adaptation?.draft); else reviewAcknowledgements.value = {}
+    if (/\/(?:approve|withdraw|rereview)$/u.test(path)) emit('caption-generated')
+  }
+  catch (cause) { if (commandEpoch === formatEpoch && commandFormat === format.value) error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
   finally { busy.value = false }
 }
 async function checkpoint() { await command('/checkpoint') }
@@ -114,31 +164,100 @@ async function refreshInputs() {
 }
 async function generate() {
   if (busy.value || readonly.value || !await save()) return
-  commandKey ??= crypto.randomUUID(); busy.value = true; error.value = ''
+  const payload = { expectedRevision: expectedRevision.value, format: format.value, inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }
+  const identity = JSON.stringify(payload)
+  const commandKey = commandKeys.get(identity) ?? crypto.randomUUID()
+  commandKeys.set(identity, commandKey); busy.value = true; error.value = ''
+  const generationFormat = format.value, generationEpoch = formatEpoch
   try {
-    const result = await request('/generate', { expectedRevision: expectedRevision.value, commandKey, inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }) as { job: Job }
-    commandKey = null
+    const result = await request('/generate', { ...payload, commandKey }) as { job: Job }
+    commandKeys.delete(identity)
+    if (generationEpoch !== formatEpoch || generationFormat !== format.value) return
     jobs.value = [result.job, ...jobs.value.filter(job => job.id !== result.job.id)]
     jobMessage.value = 'Створюємо пропозицію. Чернетка залишиться доступною для редагування.'
     void pollJobs()
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося створити пропозицію.' }
+  } catch (cause) { if (generationEpoch === formatEpoch && generationFormat === format.value) error.value = cause instanceof Error ? cause.message : 'Не вдалося створити пропозицію.' }
   finally { busy.value = false }
 }
 async function pollJobs() {
   clearTimeout(pollTimer)
   if (disposed) return
+  const requestedFormat = format.value, requestedEpoch = formatEpoch
   try {
     const response = await fetch(`${projectBase}/jobs`, { credentials: 'same-origin', signal: controller.signal })
     if (response.status === 401) { emit('session-expired'); return }
-    if (response.ok) {
+    if (response.ok && requestedEpoch === formatEpoch && requestedFormat === format.value) {
       const result = await response.json() as { jobs: Job[] }
-      jobs.value = result.jobs.filter(job => job.operation === 'TELEGRAM_GENERATION')
+      jobs.value = result.jobs.filter(job => job.operation === 'TELEGRAM_GENERATION' && (job.format === format.value || (!job.format && format.value === 'TELEGRAM_POST')))
       const latest = jobs.value[0]
-      if (latest?.status === 'SUCCEEDED') { jobMessage.value = 'Пропозицію додано до історії. Вона не замінила ваш текст.'; await load() }
+      if (latest?.status === 'SUCCEEDED') { jobMessage.value = 'Пропозицію додано до історії. Вона не замінила ваш текст.'; await load(); emit('caption-generated') }
       else if (latest && ['FAILED', 'CANCELLED'].includes(latest.status)) jobMessage.value = latest.safeMessage || 'Не вдалося створити пропозицію. Чернетка збережена.'
     }
   } catch { /* The editor and its saved text remain usable during status polling errors. */ }
   if (!disposed) pollTimer = setTimeout(() => void pollJobs(), activeJob.value ? 2000 : 7000)
+}
+async function loadLanguageSuggestions() {
+  const sourceRevisionId = state.value?.adaptation?.draft?.baseRevisionId
+  const requestedFormat = format.value, requestedEpoch = formatEpoch
+  if (!sourceRevisionId) { languageSuggestions.value = []; return }
+  try {
+    const params = new URLSearchParams({ targetType: 'ADAPTATION', sourceRevisionId })
+    const response = await fetch(`${projectBase}/language-suggestions?${params}`, { credentials: 'same-origin', signal: controller.signal })
+    if (response.status === 401) { emit('session-expired'); return }
+    if (!response.ok) return
+    const suggestions = (await response.json() as { suggestions: LanguageSuggestion[] }).suggestions
+    if (requestedEpoch !== formatEpoch || requestedFormat !== format.value) return
+    languageSuggestions.value = suggestions
+    selectedLanguageIds.value = selectedLanguageIds.value.filter(id => languageSuggestions.value.some(item => item.id === id && item.status === 'OPEN' && !item.stale))
+  } catch { /* Language review is secondary; saved content remains available. */ }
+}
+function draftMatchesBase() {
+  const draft = state.value?.adaptation?.draft
+  if (!draft?.baseRevisionId) return false
+  const baseRevision = state.value?.adaptation?.revisions.find(item => item.id === draft.baseRevisionId)
+  return !!baseRevision && JSON.stringify(draft.content) === JSON.stringify(baseRevision.content)
+}
+async function reviewLanguage() {
+  if (languageBusy.value || readonly.value) return
+  const reviewFormat = format.value, reviewEpoch = formatEpoch
+  languageBusy.value = true; languageMessage.value = ''; error.value = ''
+  try {
+    if (!await save()) return
+    if (!draftMatchesBase()) await command('/checkpoint', {}, true)
+    const sourceRevisionId = state.value?.adaptation?.draft?.baseRevisionId
+    if (!sourceRevisionId || !draftMatchesBase()) throw new Error('Збережіть версію тексту перед мовною перевіркою.')
+    const response = await fetch(`${projectBase}/language-suggestions/review`, { credentials: 'same-origin', signal: controller.signal, method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify({ targetType: 'ADAPTATION', sourceRevisionId, expectedRevision: state.value?.adaptation?.revision }) })
+    if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
+    if (!response.ok) { if (response.status === 409) conflict.value = true; throw new Error(response.status === 409 ? 'Матеріал змінився. Оновіть його перед мовною перевіркою.' : 'Не вдалося перевірити мову матеріалу.') }
+    const suggestions = (await response.json() as { suggestions: LanguageSuggestion[] }).suggestions
+    if (reviewEpoch !== formatEpoch || reviewFormat !== format.value) return
+    languageSuggestions.value = suggestions
+    selectedLanguageIds.value = languageSuggestions.value.filter(item => item.status === 'OPEN' && !item.stale).map(item => item.id)
+    languageMessage.value = languageSuggestions.value.length ? 'Перегляньте пропозиції та виберіть, які застосувати.' : 'Мовних зауважень не знайдено.'
+  } catch (cause) { if (reviewEpoch === formatEpoch && reviewFormat === format.value) languageMessage.value = cause instanceof Error ? cause.message : 'Не вдалося перевірити мову матеріалу.' }
+  finally { languageBusy.value = false }
+}
+async function mutateLanguage(path: string, body: unknown) {
+  if (languageBusy.value || readonly.value || dirty.value || !state.value?.adaptation) return
+  const mutationFormat = format.value, mutationEpoch = formatEpoch
+  languageBusy.value = true; languageMessage.value = ''
+  try {
+    const response = await fetch(`${projectBase}/language-suggestions${path}`, { credentials: 'same-origin', signal: controller.signal, method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify(body) })
+    if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
+    if (!response.ok) { if (response.status === 409) conflict.value = true; throw new Error(response.status === 409 ? 'Матеріал змінився. Оновіть його перед застосуванням пропозицій.' : 'Не вдалося оновити мовні пропозиції.') }
+    if (mutationEpoch !== formatEpoch || mutationFormat !== format.value) return
+    if (path === '/accept') { await load(true); languageMessage.value = 'Вибрані правки застосовано до чернетки. Перевірте текст і збережіть нову версію.'; selectedLanguageIds.value = [] }
+    else await loadLanguageSuggestions()
+  } catch (cause) { if (mutationEpoch === formatEpoch && mutationFormat === format.value) languageMessage.value = cause instanceof Error ? cause.message : 'Не вдалося оновити мовні пропозиції.' }
+  finally { languageBusy.value = false }
+}
+function acceptLanguage() {
+  const first = languageSuggestions.value.find(item => selectedLanguageIds.value.includes(item.id) && item.status === 'OPEN' && !item.stale)
+  if (!first || !selectedLanguageIds.value.length || dirty.value) return
+  void mutateLanguage('/accept', { targetType: 'ADAPTATION', sourceRevisionId: first.sourceRevisionId, expectedRevision: state.value?.adaptation?.revision, suggestionIds: [...selectedLanguageIds.value] })
+}
+function rejectLanguage(item: LanguageSuggestion) {
+  void mutateLanguage(`/${encodeURIComponent(item.id)}/reject`, { expectedRevision: state.value?.adaptation?.revision })
 }
 async function jobAction(job: Job, action: 'retry' | 'cancel') {
   try {
@@ -152,33 +271,44 @@ function chooseSelection() {
   const el = editor.value
   if (el && el.selectionEnd > el.selectionStart) selection.value = { start: el.selectionStart, end: el.selectionEnd }
 }
+const activeMappingField = ref<'text' | 'cover'>('text')
+function chooseCoverSelection() {
+  activeMappingField.value = 'cover'
+  const el = coverEditor.value
+  if (el && el.selectionEnd > el.selectionStart) selection.value = { start: el.selectionStart, end: el.selectionEnd }
+}
+function chooseBodySelection() { activeMappingField.value = 'text'; chooseSelection() }
 function linkEvidence(item: Evidence) {
   const range = selection.value
   if (!range || range.end <= range.start) { error.value = 'Виділіть точне формулювання в дописі, до якого прив’язати факт.'; return }
-  const quote = text.value.slice(range.start, range.end)
-  const next: Mapping = { startOffset: range.start, endOffset: range.end, quote, claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId }
-  mappings.value = [...mappings.value.filter(row => row.endOffset <= range.start || row.startOffset >= range.end), next].sort((a, b) => a.startOffset - b.startOffset)
+  const quote = fieldText(activeMappingField.value).slice(range.start, range.end)
+  const next: Mapping = { startOffset: range.start, endOffset: range.end, quote, claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId, ...(activeMappingField.value === 'cover' ? { field: 'cover' } : {}) }
+  mappings.value = [...mappings.value.filter(row => (row.field ?? 'text') !== activeMappingField.value || row.endOffset <= range.start || row.startOffset >= range.end), next].sort((a, b) => a.startOffset - b.startOffset)
   error.value = ''; changed()
 }
 function removeMapping(mapping: Mapping) { mappings.value = mappings.value.filter(row => row !== mapping); changed() }
 function editText(event: Event) {
-  updateText((event.target as HTMLTextAreaElement).value)
+  activeMappingField.value = 'text'; updateText((event.target as HTMLTextAreaElement).value, 'text')
 }
-function updateText(next: string) {
-  const previous = text.value
+function editCoverText(event: Event) { activeMappingField.value = 'cover'; updateText((event.target as HTMLTextAreaElement).value, 'cover') }
+function updateText(next: string, field: 'text' | 'cover' = 'text') {
+  const previous = field === 'cover' ? coverText.value : text.value
   let start = 0, oldEnd = previous.length, newEnd = next.length
   while (start < oldEnd && start < newEnd && previous[start] === next[start]) start++
   while (oldEnd > start && newEnd > start && previous[oldEnd - 1] === next[newEnd - 1]) { oldEnd--; newEnd-- }
   const delta = next.length - previous.length
   const adjusted = mappings.value.map(row => {
+    if ((row.field ?? 'text') !== field) return row
     if (row.endOffset <= start) return row
     if (row.startOffset >= oldEnd) return { ...row, startOffset: row.startOffset + delta, endOffset: row.endOffset + delta }
     return { ...row, startOffset: Math.min(row.startOffset, start), endOffset: row.endOffset > oldEnd ? row.endOffset + delta : newEnd }
   }).filter(row => row.endOffset > row.startOffset)
   // A replacement spanning several citations has no unique surviving range.
   // Remove only overlapping links; retained quotes require explicit relinking.
-  mappings.value = adjusted.filter((row, index) => !adjusted.some((other, otherIndex) => otherIndex !== index && row.startOffset < other.endOffset && other.startOffset < row.endOffset))
-  text.value = next; selection.value = null; changed()
+  const untouched = mappings.value.filter(row => (row.field ?? 'text') !== field)
+  mappings.value = [...untouched, ...adjusted.filter(row => (row.field ?? 'text') === field).filter((row, index, rows) => !rows.some((other, otherIndex) => otherIndex !== index && row.startOffset < other.endOffset && other.startOffset < row.endOffset))]
+  if (field === 'cover') coverText.value = next; else text.value = next
+  selection.value = null; changed()
 }
 function insertPlaceholder() {
   const el = editor.value
@@ -198,27 +328,50 @@ function formatDate(value?: string | null) { return value ? new Intl.DateTimeFor
 function restoreLocal() {
   const item = recovered.value
   if (!item) return
-  hydration = true; text.value = item.content.text; mappings.value = item.content.mappings; inputMode.value = item.inputMode; contentMode.value = item.contentMode; includeLink.value = item.includeLink
+  hydration = true; text.value = item.content.text; coverText.value = item.content.cover?.text ?? ''; coverInstruction.value = item.content.cover?.instruction ?? ''; mappings.value = item.content.mappings; inputMode.value = item.inputMode; contentMode.value = item.contentMode; includeLink.value = item.includeLink
   recovered.value = null; expectedRevision.value = item.expectedRevision; hydration = false; conflict.value = expectedRevision.value !== (state.value?.adaptation?.revision ?? 0); baseline.value = ''; retain(); if (!conflict.value) void save()
 }
-function discardLocal() { recovered.value = null; sessionStorage.removeItem(recoveryKey) }
+function discardLocal() { recovered.value = null; sessionStorage.removeItem(recoveryKey.value) }
 async function reconcile(useLocal: boolean) {
-  try { await load(!useLocal); expectedRevision.value = state.value?.adaptation?.revision ?? 0; conflict.value = false; error.value = ''; recovered.value = null; if (useLocal) { baseline.value = ''; await save() } else sessionStorage.removeItem(recoveryKey) }
+  try { await load(!useLocal); expectedRevision.value = state.value?.adaptation?.revision ?? 0; conflict.value = false; error.value = ''; recovered.value = null; if (useLocal) { baseline.value = ''; await save() } else sessionStorage.removeItem(recoveryKey.value) }
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося оновити.' }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { retain(); event.preventDefault(); event.returnValue = '' } }
-function endSession() { sessionEnded = true; disposed = true; controller.abort(); clearTimeout(timer); clearTimeout(pollTimer); hydration = true; text.value = ''; mappings.value = []; recovered.value = null; state.value = null; jobs.value = []; sessionStorage.removeItem(recoveryKey) }
-watch([text, inputMode, contentMode, includeLink], changed)
+function endSession() { sessionEnded = true; disposed = true; controller.abort(); clearTimeout(timer); clearTimeout(pollTimer); hydration = true; text.value = ''; coverText.value = ''; coverInstruction.value = ''; mappings.value = []; recovered.value = null; state.value = null; jobs.value = []; sessionStorage.removeItem(recoveryKey.value) }
+function titleFor(formatValue: ChannelFormat) { return ({ TELEGRAM_POST: 'допис у Telegram', LINKEDIN_TEXT: 'публікацію у LinkedIn', LINKEDIN_COVER: 'обкладинку LinkedIn', INSTAGRAM_COVER: 'обкладинку Instagram', LINKEDIN_CAROUSEL: 'карусель LinkedIn', INSTAGRAM_CAROUSEL: 'карусель Instagram', INSTAGRAM_STORIES: 'історії Instagram' })[formatValue] }
+async function switchFormat(event: Event) {
+  const next = (event.target as HTMLSelectElement).value as ChannelFormat
+  if (busy.value || languageBusy.value) { (event.target as HTMLSelectElement).value = format.value; return }
+  if (next === format.value || !props.formats.includes(next)) return
+  if (!await save()) { (event.target as HTMLSelectElement).value = format.value; return }
+  emit('format-change', next)
+}
+watch(() => props.initialFormat, async (next) => {
+  if (next === format.value) return
+  if (dirty.value) retain()
+  clearTimeout(timer)
+  format.value = next; formatEpoch++
+  state.value = null; jobs.value = []; jobMessage.value = ''; error.value = ''; conflict.value = false; recovered.value = null; languageSuggestions.value = []; selectedLanguageIds.value = []; languageMessage.value = ''
+  loading.value = true
+  const requestedEpoch = formatEpoch
+  try {
+    await load(true)
+    const stored = sessionStorage.getItem(recoveryKey.value)
+    if (stored) { const value = JSON.parse(stored) as RecoveredDraft; if (JSON.stringify({ content: value.content, inputMode: value.inputMode, contentMode: value.contentMode, includeLink: value.includeLink }) !== baseline.value) recovered.value = value; else sessionStorage.removeItem(recoveryKey.value) }
+  } catch (cause) { if (requestedEpoch === formatEpoch) error.value = cause instanceof Error ? cause.message : `Не вдалося відкрити ${titleFor(format.value)}.` }
+  finally { if (requestedEpoch === formatEpoch) { loading.value = false; if (!disposed) void loadLanguageSuggestions() } }
+})
+watch([text, coverText, coverInstruction, inputMode, contentMode, includeLink], changed)
 watch(() => props.userId, () => { controller.abort(); endSession() })
 onMounted(async () => {
   window.addEventListener('beforeunload', beforeUnload)
   window.addEventListener('cf:article-session-ended', endSession)
   try {
     await load(true)
-    const stored = sessionStorage.getItem(recoveryKey)
-    if (stored) { const value = JSON.parse(stored) as NonNullable<typeof recovered.value>; if (JSON.stringify({ content: value.content, inputMode: value.inputMode, contentMode: value.contentMode, includeLink: value.includeLink }) !== baseline.value) recovered.value = value; else sessionStorage.removeItem(recoveryKey) }
+    const stored = sessionStorage.getItem(recoveryKey.value)
+    if (stored) { const value = JSON.parse(stored) as RecoveredDraft; if (JSON.stringify({ content: value.content, inputMode: value.inputMode, contentMode: value.contentMode, includeLink: value.includeLink }) !== baseline.value) recovered.value = value; else sessionStorage.removeItem(recoveryKey.value) }
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити Telegram.' }
-  finally { loading.value = false; if (!disposed) void pollJobs() }
+  finally { loading.value = false; if (!disposed) { void pollJobs(); void loadLanguageSuggestions() } }
 })
 onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('cf:article-session-ended', endSession); if (!disposed) { retain(); disposed = true } controller.abort(); clearTimeout(timer); clearTimeout(pollTimer) })
 </script>
@@ -231,7 +384,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           {{ projectTopic }}
         </p>
         <h1 id="telegram-title">
-          Допис у Telegram
+          {{ formatLabel }}
         </h1>
       </div>
       <Button
@@ -249,7 +402,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
       class="telegram-state"
       role="status"
     >
-      Відкриваємо Telegram…
+      Відкриваємо редактор каналів…
     </p>
     <section
       v-else-if="error && !state"
@@ -269,7 +422,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         v-if="readonly"
         class="telegram-notice"
       >
-        {{ props.archived ? 'Архівований проєкт доступний лише для перегляду.' : 'Допис у Telegram не вибрано серед форматів цього проєкту.' }}
+        {{ props.archived ? 'Архівований проєкт доступний лише для перегляду.' : `${formatLabel} не вибрано серед форматів цього проєкту.` }}
       </p>
       <div
         v-if="state.staleReasons.length"
@@ -330,7 +483,20 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
       </div>
 
       <div class="telegram-controls">
-        <label class="telegram-select">Джерело допису
+        <label class="telegram-select">Формат
+          <select
+            :value="format"
+            :disabled="busy || saving || props.formats.length < 2"
+            @change="switchFormat"
+          >
+            <option
+              v-for="choice in props.formats"
+              :key="choice"
+              :value="choice"
+            >{{ ({ TELEGRAM_POST: 'Допис у Telegram', LINKEDIN_TEXT: 'Публікація у LinkedIn', LINKEDIN_COVER: 'Обкладинка LinkedIn', INSTAGRAM_COVER: 'Обкладинка Instagram', LINKEDIN_CAROUSEL: 'Карусель LinkedIn', INSTAGRAM_CAROUSEL: 'Карусель Instagram', INSTAGRAM_STORIES: 'Історії Instagram' } as Record<ChannelFormat, string>)[choice] }}</option>
+          </select>
+        </label>
+        <label class="telegram-select">Джерело матеріалу
           <select
             v-model="inputMode"
             :disabled="readonly || busy"
@@ -351,7 +517,10 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             <option value="CREATIVE">Авторський · без перевіреної основи</option>
           </select>
         </label>
-        <label class="telegram-link-toggle"><input
+        <label
+          v-if="format === 'TELEGRAM_POST'"
+          class="telegram-link-toggle"
+        ><input
           v-model="includeLink"
           type="checkbox"
           :disabled="readonly || busy"
@@ -425,29 +594,67 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
       <div class="telegram-layout">
         <section
           class="telegram-paper"
-          aria-label="Редактор допису"
+          aria-label="Редактор матеріалу"
         >
           <div class="telegram-paper-heading">
-            <p>Текст допису</p><span>{{ text.length }} / 4096</span>
+            <p>Текст публікації</p><span>{{ text.length }} / {{ textLimit }}</span>
           </div>
           <label
             class="sr-only"
             for="telegram-manuscript"
-          >Текст допису у Telegram</label>
+          >Текст публікації</label>
           <textarea
             id="telegram-manuscript"
             ref="editor"
             :value="text"
             class="telegram-manuscript"
-            maxlength="4096"
+            :maxlength="textLimit"
             rows="12"
-            :readonly="readonly || busy"
+            :readonly="readonly || busy || languageBusy"
             aria-describedby="telegram-save-state"
-            @select="chooseSelection"
+            @select="chooseBodySelection"
             @input="editText"
-            @keyup="chooseSelection"
-            @mouseup="chooseSelection"
+            @keyup="chooseBodySelection"
+            @mouseup="chooseBodySelection"
           />
+          <template v-if="isCover">
+            <label
+              class="telegram-paper-heading cover-field-label"
+              for="cover-copy"
+            >Текст на обкладинці · {{ coverText.length }} / 200</label>
+            <textarea
+              id="cover-copy"
+              ref="coverEditor"
+              :value="coverText"
+              class="telegram-manuscript cover-manuscript"
+              maxlength="200"
+              rows="4"
+              :readonly="readonly || busy || languageBusy"
+              @select="chooseCoverSelection"
+              @input="editCoverText"
+              @keyup="chooseCoverSelection"
+              @mouseup="chooseCoverSelection"
+            />
+            <label
+              class="telegram-paper-heading cover-field-label"
+              for="cover-instruction"
+            >Завдання для обкладинки · {{ coverInstruction.length }} / 2000</label>
+            <textarea
+              id="cover-instruction"
+              v-model="coverInstruction"
+              class="telegram-instruction"
+              maxlength="2000"
+              rows="3"
+              :readonly="readonly || busy || languageBusy"
+              placeholder="Що має передати обкладинка? Опишіть задум словами."
+            />
+            <p
+              v-if="!coverText.trim() || !coverInstruction.trim()"
+              class="telegram-source-note"
+            >
+              Щоб погодити або експортувати обкладинку, заповніть її текст і завдання.
+            </p>
+          </template>
           <p
             id="telegram-save-state"
             class="telegram-save-state"
@@ -458,6 +665,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           </p>
           <div class="telegram-actions">
             <Button
+              v-if="format === 'TELEGRAM_POST'"
               class="workspace-button"
               variant="outline"
               :disabled="readonly || busy || conflict || !!recovered"
@@ -471,22 +679,96 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
               :disabled="readonly || busy || activeJob || conflict || !!recovered || state.brief?.currentRevision?.contentMode !== contentMode || (contentMode === 'FACTUAL' && !!state.prerequisites?.blockingReasons?.length) || (inputMode === 'ARTICLE_DERIVED' && (!selectedArticle || articleSourceNeedsReview || !!selectedArticle.inspection?.blockingReasons.length))"
               @click="generate"
             >
-              Запропонувати допис
+              Запропонувати текст
             </Button>
             <Button
               class="workspace-button workspace-button-primary"
-              :disabled="readonly || busy || conflict || !!recovered || !text.trim() || text.length > 4096"
+              :disabled="readonly || busy || conflict || !!recovered || !text.trim() || text.length > textLimit || coverText.length > 200 || coverInstruction.length > 2000"
               @click="checkpoint"
             >
               Зберегти версію
             </Button>
           </div>
+          <section
+            class="telegram-language"
+            aria-labelledby="language-heading"
+          >
+            <div class="telegram-paper-heading">
+              <h2 id="language-heading">
+                Мова й пунктуація
+              </h2>
+              <Button
+                class="workspace-button"
+                variant="outline"
+                :disabled="readonly || busy || saving || languageBusy || conflict || !!recovered"
+                @click="reviewLanguage"
+              >
+                {{ languageBusy ? 'Перевіряємо…' : 'Перевірити мову' }}
+              </Button>
+            </div>
+            <p
+              v-if="languageMessage"
+              role="status"
+            >
+              {{ languageMessage }}
+            </p>
+            <article
+              v-for="suggestion in languageSuggestions"
+              :key="suggestion.id"
+              class="telegram-language-item"
+            >
+              <p class="telegram-language-finding">
+                {{ suggestion.finding }}
+              </p>
+              <p class="telegram-language-change">
+                <del>{{ suggestion.originalText }}</del> → <ins>{{ suggestion.replacementText }}</ins>
+              </p>
+              <p
+                v-if="suggestion.stale"
+                class="telegram-stale"
+              >
+                Ця пропозиція стосується старішої версії.
+              </p>
+              <label
+                v-else-if="suggestion.status === 'OPEN'"
+                class="telegram-language-select"
+              ><input
+                v-model="selectedLanguageIds"
+                type="checkbox"
+                :value="suggestion.id"
+                :disabled="readonly || languageBusy || dirty"
+              > Застосувати цю правку</label>
+              <p
+                v-else
+                class="telegram-language-status"
+              >
+                {{ suggestion.status === 'ACCEPTED' ? 'Застосовано' : 'Відхилено' }}
+              </p>
+              <Button
+                v-if="suggestion.status === 'OPEN' && !suggestion.stale"
+                class="workspace-button"
+                variant="ghost"
+                :disabled="readonly || languageBusy || dirty"
+                @click="rejectLanguage(suggestion)"
+              >
+                Відхилити
+              </Button>
+            </article>
+            <Button
+              v-if="selectedLanguageIds.length"
+              class="workspace-button workspace-button-primary"
+              :disabled="readonly || languageBusy || dirty"
+              @click="acceptLanguage"
+            >
+              Застосувати вибрані правки
+            </Button>
+          </section>
           <div
             v-if="localMappingIssues.length || state.mappingIssues.length"
             class="telegram-mapping-warning"
             role="status"
           >
-            Є посилання на твердження, що не відповідають поточному тексту. Видаліть їх або виділіть точні слова й прив’яжіть знову.
+            Є посилання на твердження, що не відповідають поточному тексту або тексту обкладинки. Видаліть їх або виділіть точні слова й прив’яжіть знову.
           </div>
           <div
             v-if="mappings.length"
@@ -599,6 +881,14 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           <blockquote class="telegram-history-text">
             {{ revision.content.text }}
           </blockquote>
+          <template v-if="revision.content.cover">
+            <p class="telegram-history-text">
+              <strong>Текст обкладинки:</strong> {{ revision.content.cover.text }}
+            </p>
+            <p class="telegram-history-instruction">
+              <strong>Завдання:</strong> {{ revision.content.cover.instruction || 'Не вказано' }}
+            </p>
+          </template>
           <details>
             <summary>Початкові входи й квитанція перегляду</summary>
             <dl class="telegram-inputs">
@@ -690,12 +980,25 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 .telegram-paper { min-width: 0; }
 .telegram-paper-heading { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; margin-bottom: 10px; }
 .telegram-paper-heading p { margin: 0; font-size: 14px; font-weight: 600; }
+.telegram-paper-heading h2 { margin: 0; font: 550 21px/1.3 SourceSerif, Georgia, serif; }
 .telegram-paper-heading span, .telegram-save-state { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .telegram-manuscript { box-sizing: border-box; display: block; width: 100%; min-height: 320px; resize: vertical; padding: 24px clamp(20px, 4vw, 48px); border: 1px solid var(--rule); border-radius: 0; background: var(--paper); color: var(--ink); font: 400 20px/1.65 SourceSerif, Georgia, serif; overflow-wrap: anywhere; }
 .telegram-manuscript::selection { color: #20262b; background: #edece7; }
+.cover-field-label { margin-top: 24px; }
+.cover-manuscript { min-height: 140px; }
+.telegram-instruction { box-sizing: border-box; width: 100%; min-height: 108px; resize: vertical; padding: 12px 14px; border: 1px solid var(--field-rule); border-radius: 0; background: var(--paper); color: var(--ink); font: 400 15px/1.55 Onest, sans-serif; }
+.telegram-instruction:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
 .telegram-manuscript:focus-visible, .telegram-select select:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
 .telegram-save-state { min-height: 18px; margin: 8px 0; }
 .telegram-actions, .telegram-history-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.telegram-language { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.telegram-language > p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.telegram-language-item { padding: 12px 0; border-top: 1px solid var(--rule); }
+.telegram-language-finding, .telegram-language-status { margin: 0 0 6px; color: var(--muted); font-size: 13px; }
+.telegram-language-change { margin: 0 0 8px; overflow-wrap: anywhere; font: 17px/1.5 SourceSerif, Georgia, serif; }
+.telegram-language-change del { color: var(--review, #945000); }
+.telegram-language-change ins { color: var(--approved, #32664b); text-decoration-thickness: 1px; }
+.telegram-language-select { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
 .telegram-review-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 13px; }
 .telegram-review-controls p { margin: 0; color: var(--approved, #32664b); }
 .telegram-evidence { min-width: 0; }

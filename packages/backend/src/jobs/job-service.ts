@@ -35,7 +35,7 @@ export class DurableJobService {
       JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
       JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = w."id"
       JOIN contextflow."UserProfile" u ON u."id" = m."userId"
-      WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+      WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
       AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL
       AND (NOT ${requiresExternalProcessing} OR (u."externalProcessingNoticeVersion" = ${this.options.noticeVersion} AND u."externalProcessingAcceptedAt" IS NOT NULL))
       FOR SHARE OF p, w, m, u`;
@@ -68,7 +68,7 @@ export class DurableJobService {
     return tx.job.findUnique({ where: { id } });
   }
   private async readable(userId: string, projectId: string): Promise<void> {
-    if (!await this.prisma.project.findFirst({ where: { id: projectId, workspace: { members: { some: { userId, leftAt: null } } } }, select: { id: true } })) {
+    if (!await this.prisma.project.findFirst({ where: { id: projectId, trashedAt: null, workspace: { trashedAt: null, members: { some: { userId, leftAt: null } } } }, select: { id: true } })) {
       throw new NotFoundException('Project not found');
     }
   }
@@ -88,8 +88,9 @@ export class DurableJobService {
       const job = await this.lock(tx, id);
       if (!job || job.projectId !== projectId) throw new NotFoundException('Job not found');
       const membership = await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
+        JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
         JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = p."workspaceId"
-        WHERE p."id" = ${projectId}::uuid AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p, m`;
+        WHERE p."id" = ${projectId}::uuid AND p."trashedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p, w, m`;
       if (!membership.length) throw new NotFoundException('Project not found');
       if (['SUCCEEDED', 'FAILED', 'CANCELLED', 'OUTCOME_UNKNOWN'].includes(job.status)) return job;
       const now = new Date();

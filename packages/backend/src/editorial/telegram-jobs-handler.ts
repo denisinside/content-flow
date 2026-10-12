@@ -8,6 +8,7 @@ import type { FactualBasisService } from '../claims/factual-basis.service.js';
 import type { ArticleService } from './article.service.js';
 import { articleContentSchema, articleDocumentDetails } from './article-contracts.js';
 import type { TelegramService } from './telegram.service.js';
+import type { ScriptService } from './script.service.js';
 import { telegramInputManifestSchema, telegramOutputSchema, type TelegramInputManifest } from './telegram-contracts.js';
 import { DifyTelegramProvider, TelegramProviderError, telegramWorkflowSettings, sha256,
   type TelegramProviderInput, type TelegramWorkflowSettings } from './telegram-provider.js';
@@ -25,7 +26,10 @@ function fail(error: unknown): never {
 }
 function manifestFor(job: JobContext['job']): TelegramInputManifest {
   const parsed = telegramInputManifestSchema.safeParse(job.inputManifest);
-  if (job.operation !== 'TELEGRAM_GENERATION' || job.contractVersion !== 'telegram-v1' || !parsed.success
+  if (job.operation === 'TELEGRAM_GENERATION' && job.contractVersion === 'telegram-v1') {
+    throw new JobFailure('CONFIG_CHANGED', 'NOT_SUBMITTED');
+  }
+  if (job.operation !== 'TELEGRAM_GENERATION' || job.contractVersion !== 'adaptation-v1' || !parsed.success
     || job.inputHash !== canonicalManifestHash({ contractVersion: job.contractVersion, inputManifest: job.inputManifest })) {
     throw new JobFailure('INPUT_INTEGRITY', 'NOT_SUBMITTED');
   }
@@ -86,7 +90,7 @@ async function frozenContext(tx: Prisma.TransactionClient, projectId: string, ma
     // failures remain blocking here.
     if (inspection.blockingReasons.length) throw new JobFailure('ARTICLE_BLOCKED', 'NOT_SUBMITTED');
   }
-  const input: TelegramProviderInput = { schemaVersion: 'telegram-context-v1', inputMode: manifest.inputMode,
+  const input: TelegramProviderInput = { schemaVersion: 'channel-context-v1', format: manifest.format, inputMode: manifest.inputMode,
     contentMode: manifest.contentMode, includeLink: manifest.includeLink,
     brief: { topic: brief.topic, audience: brief.audience, centralMessage: brief.centralMessage, category: brief.category,
       tone: brief.tone, targetLength: brief.targetLength, cta: brief.cta, exclusions: brief.exclusions, notes: brief.notes,
@@ -97,7 +101,7 @@ async function frozenContext(tx: Prisma.TransactionClient, projectId: string, ma
   return input;
 }
 
-export function createTelegramJobHandler(deps: { prisma: PrismaClient; telegram: TelegramService; factualBasis: FactualBasisService;
+export function createTelegramJobHandler(deps: { prisma: PrismaClient; telegram: TelegramService; scripts: ScriptService; factualBasis: FactualBasisService;
   articles: ArticleService; provider?: Provider; env?: Record<string, string | undefined> }): JobHandler {
   const provider = deps.provider ?? new DifyTelegramProvider(), env = deps.env ?? process.env;
   async function call(context: JobContext, runId?: string): Promise<Result> {
@@ -142,7 +146,9 @@ export function createTelegramJobHandler(deps: { prisma: PrismaClient; telegram:
           model: z.string().max(200).nullable() }).strict().parse(raw);
         const manifest = manifestFor(job);
         await frozenContext(tx, job.projectId, manifest, deps.telegram, deps.factualBasis, deps.articles);
+        if (result.output.format !== manifest.format) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
         const refs = await deps.telegram.commitGenerated(tx, job, result.output.content, result.executionId);
+        if (result.output.script) await deps.scripts.commitGenerated(tx, job, refs.adaptationRevisionId, result.output.script, result.executionId);
         const updated = await tx.aIExecution.updateMany({ where: { id: result.executionId, jobId: job.id, projectId: job.projectId, status: 'RUNNING' },
           data: { status: 'SUCCEEDED', providerRunId: result.providerRunId, model: result.model, finishedAt: new Date(), errorCategory: null } });
         if (updated.count !== 1) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');

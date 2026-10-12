@@ -1,12 +1,15 @@
 import { Module } from '@nestjs/common';
-import { ExportService, createExportJobHandler, ArticleService, TelegramService, createTelegramJobHandler, createArticleJobHandler, createClaimJobHandler, createOutlineJobHandler, createImportJobHandlers, DependencyHealthService, DurableJobService, DurableJobWorker, EditorialService, EXTERNAL_PROCESSING_NOTICE, FactualBasisService, FoundationModule, loadRuntimeConfig, PrivateAssetStore } from '@contextflow/backend';
+import { ExportService, createExportJobHandler, ArticleService, ScriptService, TelegramService, createTelegramJobHandler, createArticleJobHandler, createClaimJobHandler, createOutlineJobHandler, createImportJobHandlers, DependencyHealthService, DurableJobService, DurableJobWorker, EditorialService, EXTERNAL_PROCESSING_NOTICE, FactualBasisService, FoundationModule, loadRuntimeConfig, PrivateAssetStore } from '@contextflow/backend';
 import { HealthController } from './health/health.controller.js';
 import { GoogleDocSyncService, GoogleDocSyncPoller, GoogleSyncCredentials, loadGoogleOAuthRuntime, createGoogleDocSyncHandler } from '@contextflow/backend';
+import { PrivateObjectCleanup, PrivateObjectCleanupPoller } from '@contextflow/backend';
 
 @Module({
   imports: [FoundationModule],
   controllers: [HealthController],
   providers: [PrivateAssetStore,
+    { provide: PrivateObjectCleanupPoller, inject: [DependencyHealthService, PrivateAssetStore], useFactory: (health: DependencyHealthService, assets: PrivateAssetStore) =>
+      new PrivateObjectCleanupPoller(new PrivateObjectCleanup(health.prisma, assets)) },
     { provide: GoogleDocSyncService, inject: [DependencyHealthService], useFactory: (health: DependencyHealthService) => {
       const jobs = new DurableJobService(health.prisma, { noticeVersion: EXTERNAL_PROCESSING_NOTICE.version });
       const facts = new FactualBasisService(health.prisma, jobs);
@@ -20,6 +23,7 @@ import { GoogleDocSyncService, GoogleDocSyncPoller, GoogleSyncCredentials, loadG
       const editorial = new EditorialService(health.prisma, jobs, facts);
       const article = new ArticleService(health.prisma, jobs, facts);
       const telegram = new TelegramService(health.prisma, jobs, facts, article);
+      const scripts = new ScriptService(health.prisma, telegram);
       return new DurableJobWorker(health.prisma,
       loadRuntimeConfig().redisUrl, EXTERNAL_PROCESSING_NOTICE.version, [
         ...createImportJobHandlers({ prisma: health.prisma, assets }),
@@ -27,7 +31,7 @@ import { GoogleDocSyncService, GoogleDocSyncPoller, GoogleSyncCredentials, loadG
           new DurableJobService(health.prisma, { noticeVersion: EXTERNAL_PROCESSING_NOTICE.version })) }),
         createOutlineJobHandler({ prisma: health.prisma, editorial, factualBasis: facts }),
         createArticleJobHandler({ prisma: health.prisma, editorial: article, factualBasis: facts }),
-        createTelegramJobHandler({ prisma: health.prisma, telegram, articles: article, factualBasis: facts }),
+        createTelegramJobHandler({ prisma: health.prisma, telegram, scripts, articles: article, factualBasis: facts }),
         createExportJobHandler(new ExportService(health.prisma, jobs, article, telegram, assets)),
         createGoogleDocSyncHandler({ prisma: health.prisma, articles: article, sync, credentials: new GoogleSyncCredentials(health.prisma, loadGoogleOAuthRuntime()) }),
       ]);

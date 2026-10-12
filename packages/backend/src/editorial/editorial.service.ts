@@ -32,11 +32,11 @@ export class EditorialService {
   private async lock(tx: Prisma.TransactionClient, userId: string, projectId: string, write = true) {
     const rows = write ? await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
       JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id"
-      WHERE p."id"=${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL AND m."userId"=${userId}::uuid AND m."leftAt" IS NULL
+      WHERE p."id"=${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${userId}::uuid AND m."leftAt" IS NULL
       FOR UPDATE OF p FOR SHARE OF w,m`
       : await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
       JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id"
-      WHERE p."id"=${projectId}::uuid AND m."userId"=${userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
+      WHERE p."id"=${projectId}::uuid AND p."trashedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
     if (!rows.length) throw new NotFoundException('Project not found');
   }
   private command<T>(user: string, project: string, callback: (tx: Prisma.TransactionClient) => Promise<T>, write = true) {
@@ -73,7 +73,7 @@ export class EditorialService {
       const { expectedRevision: _expected, requiredClaimRevisionIds: requiredInput, ...fields } = input;
       void _expected;
       const requiredClaimRevisionIds = [...requiredInput].sort();
-      const content = { ...fields, tone: input.tone ?? style.tone };
+      const content = { ...fields, tone: input.tone?.trim() ? input.tone : style.tone };
       const capturedStyle = { workspaceId: project.workspaceId, workspaceStyleRevision: style.revision, style };
       const contextSnapshots = contexts.map(row => ({ snapshotId: row.currentSnapshotId!, capturedPurpose: row.purpose })).sort((a, b) => a.snapshotId.localeCompare(b.snapshotId));
       const id = randomUUID();

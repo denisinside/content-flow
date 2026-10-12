@@ -9,10 +9,14 @@ import { Textarea } from '@/components/ui/textarea'
 import SourceWorkspace from './SourceWorkspace.vue'
 import FactsWorkspace from './FactsWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
+import EditorPresence from './EditorPresence.vue'
+import ProjectLifecycle from './ProjectLifecycle.vue'
 const ArticleWorkspace = defineAsyncComponent(() => import('./ArticleWorkspace.vue'))
 const TelegramWorkspace = defineAsyncComponent(() => import('./TelegramWorkspace.vue'))
+const ScriptWorkspace = defineAsyncComponent(() => import('./ScriptWorkspace.vue'))
 const ExportWorkspace = defineAsyncComponent(() => import('./ExportWorkspace.vue'))
 
+type ChannelFormat = 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'TELEGRAM_POST'
 type ProjectFormat =
   | 'ARTICLE'
   | 'LINKEDIN_TEXT'
@@ -32,6 +36,9 @@ interface Project {
   createdAt: string
   updatedAt: string
   archivedAt: string | null
+  trashedAt: string | null
+  purgeAfter: string | null
+  canPurge: boolean
 }
 
 interface Props {
@@ -55,9 +62,13 @@ const formats: { id: ProjectFormat; label: string }[] = [
 ]
 
 const pathname = ref(window.location.pathname)
+const search = ref(window.location.search)
 const projects = ref<Project[]>([])
+const listState = ref<'ACTIVE' | 'ARCHIVED' | 'TRASHED'>('ACTIVE')
+const lifecycleNotice = ref('')
 const nextCursor = ref<string | null>(null)
 const currentProject = ref<Project | null>(null)
+const scriptRefreshEpoch = ref(0)
 const historicalArticle = ref(false)
 const listLoading = ref(true)
 const detailLoading = ref(false)
@@ -73,14 +84,34 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|telegram|export))?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|channels|telegram|export))?\/?$/i)?.[1] ?? null)
 const isArticle = computed(() => /\/article\/?$/i.test(pathname.value))
-const isTelegram = computed(() => /\/telegram\/?$/i.test(pathname.value))
+const isChannels = computed(() => /\/(?:channels|telegram)\/?$/i.test(pathname.value))
+const channelFormats = computed(() => (currentProject.value?.formats.filter((format): format is ChannelFormat => ['LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'TELEGRAM_POST'].includes(format)) ?? []))
+const selectedChannelFormat = computed<ChannelFormat>(() => {
+  const requested = new URLSearchParams(search.value).get('format')
+  if (!requested && /\/telegram\/?$/i.test(pathname.value) && channelFormats.value.includes('TELEGRAM_POST')) return 'TELEGRAM_POST'
+  return channelFormats.value.includes(requested as ChannelFormat) ? requested as ChannelFormat : channelFormats.value[0] ?? 'TELEGRAM_POST'
+})
+const selectedScriptFormat = computed(() => ['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'].includes(selectedChannelFormat.value) ? selectedChannelFormat.value as 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' : null)
 const isExport = computed(() => /\/export\/?$/i.test(pathname.value))
 const isDetail = computed(() => page.value !== null)
+const isTrashed = computed(() => Boolean(currentProject.value?.trashedAt))
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
 const isBrief = computed(() => /\/brief\/?$/i.test(pathname.value))
 const isFacts = computed(() => /\/facts\/?$/i.test(pathname.value))
+const presencePage = computed(() => {
+  if (!currentProject.value || isTrashed.value || currentProject.value.archivedAt) return null
+  if (isArticle.value) return 'article'
+  if (isBrief.value) return 'brief'
+  if (isSources.value || isFacts.value || isExport.value) return null
+  if (isChannels.value) {
+    return selectedChannelFormat.value === 'TELEGRAM_POST'
+      ? 'telegram'
+      : selectedChannelFormat.value.toLowerCase().replaceAll('_', '-')
+  }
+  return 'outline'
+})
 const canSave = computed(() => topic.value.trim().length > 0 && topic.value.trim().length <= 500 && selectedFormats.value.length > 0 && selectedFormats.value.length <= formats.length)
 const hasChanges = computed(() => {
   if (!currentProject.value) return false
@@ -102,7 +133,7 @@ function formatUpdatedAt(value: string) {
 }
 
 function routeTo(path: string, push = true) {
-  if (path === pathname.value && push) return
+  if (`${pathname.value}${search.value}` === path && push) return
   if (saving.value) {
     requestController?.abort()
     requestVersion += 1
@@ -114,6 +145,7 @@ function routeTo(path: string, push = true) {
   if (push) window.history.pushState({}, '', path)
   else window.history.replaceState({}, '', path)
   pathname.value = window.location.pathname
+  search.value = window.location.search
   if (isDetail.value) {
     if (currentProject.value?.id !== page.value) void loadProject(page.value as string)
   } else {
@@ -122,8 +154,34 @@ function routeTo(path: string, push = true) {
   }
 }
 
+function chooseListState(value: 'ACTIVE' | 'ARCHIVED' | 'TRASHED') {
+  if (listState.value === value) return
+  if (formOpen.value && !window.confirm('У формі є незбережені зміни. Перейти до іншого списку та закрити її?')) return
+  formOpen.value = false
+  editing.value = false
+  clearForm()
+  listState.value = value
+  void loadProjects()
+}
+
+function onProjectLifecycleChanged(result: { action: 'archive' | 'trash' | 'restore' | 'purge'; state?: 'ACTIVE' | 'ARCHIVED' | 'TRASHED'; cleanupPending?: boolean }) {
+  const { action } = result
+  lifecycleNotice.value = action === 'purge'
+    ? result.cleanupPending ? 'Проєкт видалено; очищення приватних файлів триває.' : 'Проєкт видалено остаточно.'
+    : ''
+  if (result.state) listState.value = result.state
+  else if (action === 'archive') listState.value = 'ARCHIVED'
+  else if (action === 'trash' || action === 'purge') listState.value = 'TRASHED'
+  else if (action === 'restore') listState.value = 'ACTIVE'
+  if (isDetail.value) {
+    routeTo('/projects')
+  } else {
+    void loadProjects()
+  }
+}
+
 function onPopState() {
-  if (window.location.pathname === '/settings' || window.location.pathname === pathname.value) return
+  if (window.location.pathname === '/settings' || (window.location.pathname === pathname.value && window.location.search === search.value)) return
   requestController?.abort()
   requestVersion += 1
   saving.value = false
@@ -131,6 +189,7 @@ function onPopState() {
   clearForm()
   conflict.value = false
   pathname.value = window.location.pathname
+  search.value = window.location.search
   if (isDetail.value) void loadProject(page.value as string)
   else {
     currentProject.value = null
@@ -176,7 +235,7 @@ async function loadProjects(cursor?: string) {
     listError.value = ''
   }
   try {
-    const query = new URLSearchParams({ workspaceId: props.workspaceId })
+    const query = new URLSearchParams({ workspaceId: props.workspaceId, state: listState.value })
     if (cursor) query.set('cursor', cursor)
     const response = await fetch(`/api/v1/projects?${query.toString()}`, {
       credentials: 'same-origin',
@@ -369,6 +428,7 @@ onBeforeUnmount(() => {
           </p>
         </div>
         <Button
+          v-if="listState === 'ACTIVE'"
           class="workspace-button workspace-button-primary"
           :disabled="saving || listLoading"
           @click="openCreateForm"
@@ -377,8 +437,43 @@ onBeforeUnmount(() => {
         </Button>
       </div>
 
+      <nav
+        class="project-state-filter"
+        aria-label="Стан проєктів"
+      >
+        <button
+          type="button"
+          :aria-current="listState === 'ACTIVE' ? 'page' : undefined"
+          @click="chooseListState('ACTIVE')"
+        >
+          Активні
+        </button>
+        <button
+          type="button"
+          :aria-current="listState === 'ARCHIVED' ? 'page' : undefined"
+          @click="chooseListState('ARCHIVED')"
+        >
+          Архів
+        </button>
+        <button
+          type="button"
+          :aria-current="listState === 'TRASHED' ? 'page' : undefined"
+          @click="chooseListState('TRASHED')"
+        >
+          Кошик
+        </button>
+      </nav>
+      <p
+        v-if="lifecycleNotice"
+        class="lifecycle-notice"
+        role="status"
+        aria-live="polite"
+      >
+        {{ lifecycleNotice }}
+      </p>
+
       <form
-        v-if="formOpen"
+        v-if="formOpen && listState === 'ACTIVE'"
         class="project-form"
         @submit.prevent="submitProject"
       >
@@ -501,10 +596,11 @@ onBeforeUnmount(() => {
       >
         <Empty>
           <EmptyHeader>
-            <EmptyTitle>Проєктів поки немає</EmptyTitle>
-            <EmptyDescription>Створіть перший проєкт, щоб зібрати роботу навколо однієї теми.</EmptyDescription>
+            <EmptyTitle>{{ listState === 'TRASHED' ? 'У кошику поки порожньо' : listState === 'ARCHIVED' ? 'Архів порожній' : 'Проєктів поки немає' }}</EmptyTitle>
+            <EmptyDescription>{{ listState === 'ACTIVE' ? 'Створіть перший проєкт, щоб зібрати роботу навколо однієї теми.' : 'Тут з’являться проєкти після зміни їхнього стану.' }}</EmptyDescription>
           </EmptyHeader>
           <Button
+            v-if="listState === 'ACTIVE'"
             class="workspace-button workspace-button-primary"
             @click="openCreateForm"
           >
@@ -526,19 +622,36 @@ onBeforeUnmount(() => {
         >
           <div class="project-row-copy">
             <a
+              v-if="listState !== 'TRASHED'"
               class="project-link"
               :href="`/projects/${project.id}`"
               @click.prevent="routeTo(`/projects/${project.id}`)"
             >
               {{ project.topic }}
             </a>
+            <span
+              v-else
+              class="project-link"
+            >{{ project.topic }}</span>
             <p class="project-formats">
               {{ project.formats.map(labelFor).join(' · ') }}
             </p>
             <p class="project-updated">
-              {{ project.archivedAt ? 'Архівований' : 'Новий' }} · Оновлено {{ formatUpdatedAt(project.updatedAt) }}
+              {{ project.trashedAt ? `У кошику · видалення доступне після ${formatUpdatedAt(project.purgeAfter ?? '')}` : project.archivedAt ? 'Архівований' : 'Активний' }} · Оновлено {{ formatUpdatedAt(project.updatedAt) }}
             </p>
           </div>
+          <ProjectLifecycle
+            :project-id="project.id"
+            :revision="project.revision"
+            :archived-at="project.archivedAt"
+            :trashed-at="project.trashedAt"
+            :purge-after="project.purgeAfter"
+            :can-purge="project.canPurge"
+            :csrf-token="csrfToken"
+            compact
+            @changed="onProjectLifecycleChanged"
+            @session-expired="emit('session-expired')"
+          />
         </article>
         <div
           v-if="nextCursor"
@@ -558,7 +671,7 @@ onBeforeUnmount(() => {
     <section
       v-else
       id="workspace-task"
-      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isTelegram ? 'telegram-title' : isExport ? 'export-title' : 'project-detail-title') : undefined"
+      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isChannels ? 'telegram-title' : isExport ? 'export-title' : 'project-detail-title') : undefined"
       class="workspace-content project-detail"
       tabindex="-1"
     >
@@ -577,20 +690,20 @@ onBeforeUnmount(() => {
         </Button>
 
         <a
-          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isTelegram || isExport)"
+          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isChannels || isExport)"
           class="project-navigation-title"
           :href="`/projects/${currentProject.id}`"
           @click.prevent="routeTo(`/projects/${currentProject.id}`)"
         >{{ currentProject.topic }}</a>
 
         <nav
-          v-if="currentProject && !detailLoading && !detailError"
+          v-if="currentProject && !isTrashed && !detailLoading && !detailError"
           class="editorial-navigation"
           aria-label="Робота над проєктом"
         >
           <a
             :href="`/projects/${currentProject.id}`"
-            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isTelegram && !isExport ? 'page' : undefined"
+            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isChannels && !isExport ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}`)"
           >Огляд</a>
           <a
@@ -615,11 +728,11 @@ onBeforeUnmount(() => {
             @click.prevent="routeTo(`/projects/${currentProject.id}/article`)"
           >Стаття</a>
           <a
-            v-if="currentProject.formats.includes('TELEGRAM_POST')"
-            :href="`/projects/${currentProject.id}/telegram`"
-            :aria-current="isTelegram ? 'page' : undefined"
-            @click.prevent="routeTo(`/projects/${currentProject.id}/telegram`)"
-          >Telegram</a>
+            v-if="channelFormats.length"
+            :href="`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`"
+            :aria-current="isChannels ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`)"
+          >Канали</a>
           <a
             :href="`/projects/${currentProject.id}/export`"
             :aria-current="isExport ? 'page' : undefined"
@@ -627,6 +740,15 @@ onBeforeUnmount(() => {
           >Експорт</a>
         </nav>
       </aside>
+
+      <EditorPresence
+        v-if="currentProject && presencePage"
+        :key="`${currentProject.id}:${presencePage}`"
+        :project-id="currentProject.id"
+        :csrf-token="csrfToken"
+        :page="presencePage"
+        @session-expired="emit('session-expired')"
+      />
 
       <div
         v-if="detailLoading"
@@ -660,7 +782,33 @@ onBeforeUnmount(() => {
       </Alert>
 
       <template v-else-if="currentProject">
-        <template v-if="isArticle">
+        <section
+          v-if="isTrashed"
+          class="project-trashed-state"
+          aria-labelledby="project-trashed-title"
+        >
+          <p class="editorial-project-context">
+            Кошик
+          </p>
+          <h1 id="project-trashed-title">
+            {{ currentProject.topic }}
+          </h1>
+          <p class="project-detail-copy">
+            Проєкт і пов’язана історія доступні для відновлення до остаточного видалення. Власнику воно стане доступне після {{ formatUpdatedAt(currentProject.purgeAfter ?? '') }}. Редагування та експорт призупинені.
+          </p>
+          <ProjectLifecycle
+            :project-id="currentProject.id"
+            :revision="currentProject.revision"
+            :archived-at="currentProject.archivedAt"
+            :trashed-at="currentProject.trashedAt"
+            :purge-after="currentProject.purgeAfter"
+            :can-purge="currentProject.canPurge"
+            :csrf-token="csrfToken"
+            @changed="onProjectLifecycleChanged"
+            @session-expired="emit('session-expired')"
+          />
+        </section>
+        <template v-else-if="isArticle">
           <ArticleWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
@@ -670,13 +818,27 @@ onBeforeUnmount(() => {
             :archived="Boolean(currentProject.archivedAt)"
             @session-expired="emit('session-expired')"
           />
-        </template><template v-else-if="isTelegram">
+        </template><template v-else-if="isChannels">
           <TelegramWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
             :project-topic="currentProject.topic"
             :csrf-token="csrfToken"
             :user-id="userId"
+            :formats="channelFormats"
+            :initial-format="selectedChannelFormat"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+            @format-change="routeTo(`/projects/${currentProject.id}/channels?format=${$event}`)"
+            @caption-generated="scriptRefreshEpoch++"
+          />
+          <ScriptWorkspace
+            v-if="selectedScriptFormat"
+            :key="`${currentProject.id}:${selectedChannelFormat}:${scriptRefreshEpoch}`"
+            :project-id="currentProject.id"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :format="selectedScriptFormat"
             :archived="Boolean(currentProject.archivedAt)"
             @session-expired="emit('session-expired')"
           />
@@ -732,7 +894,7 @@ onBeforeUnmount(() => {
               </h1>
             </div>
             <Button
-              v-if="!currentProject.archivedAt"
+              v-if="!currentProject.archivedAt && !isTrashed"
               class="workspace-button workspace-button-secondary"
               variant="outline"
               :disabled="saving"
@@ -741,6 +903,17 @@ onBeforeUnmount(() => {
               Редагувати проєкт
             </Button>
           </div>
+          <ProjectLifecycle
+            :project-id="currentProject.id"
+            :revision="currentProject.revision"
+            :archived-at="currentProject.archivedAt"
+            :trashed-at="currentProject.trashedAt"
+            :purge-after="currentProject.purgeAfter"
+            :can-purge="currentProject.canPurge"
+            :csrf-token="csrfToken"
+            @changed="onProjectLifecycleChanged"
+            @session-expired="emit('session-expired')"
+          />
 
           <form
             v-if="formOpen && editing"
@@ -912,21 +1085,21 @@ onBeforeUnmount(() => {
               </Button>
             </div>
             <div
-              v-if="currentProject.formats.includes('TELEGRAM_POST')"
+              v-if="channelFormats.length"
               class="project-sources-entry"
             >
               <div>
-                <h2>Telegram</h2>
+                <h2>Канали</h2>
                 <p class="project-detail-copy">
-                  Створюйте самостійний допис або адаптуйте погоджену статтю. Стаття не обов’язкова.
+                  Підготовка каналів: {{ channelFormats.map(labelFor).join(' · ') }}. Для кожного формату є окремі чернетка, погодження й історія.
                 </p>
               </div>
               <Button
                 class="workspace-button workspace-button-secondary"
                 variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/telegram`)"
+                @click="routeTo(`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`)"
               >
-                Відкрити Telegram
+                Відкрити канали
               </Button>
             </div>
             <div class="project-sources-entry">
@@ -976,6 +1149,14 @@ onBeforeUnmount(() => {
 <style scoped>
 .project-detail { width: 100%; display: block; }
 .project-detail > * { min-width: 0; }
+.project-state-filter { display: flex; gap: 24px; margin: 4px 0 20px; border-bottom: 1px solid var(--rule); }
+.project-state-filter button { min-height: 44px; padding: 8px 0; border: 0; border-bottom: 1px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.project-state-filter button[aria-current='page'] { border-bottom-color: var(--ink); color: var(--ink); }
+.project-state-filter button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.lifecycle-notice { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+.project-trashed-state { max-width: 760px; padding: 18px 0 40px; }
+.project-trashed-state h1 { max-width: 24ch; margin: 0; font-family: var(--serif); font-size: 39px; font-weight: 550; line-height: 1.2; overflow-wrap: anywhere; }
+.project-trashed-state > .project-detail-copy { max-width: 65ch; margin: 18px 0 0; color: var(--muted); line-height: 1.6; }
 .project-navigation { display: flex; align-items: center; gap: 28px; min-height: 58px; margin: 0 0 36px; border-bottom: 1px solid var(--rule); }
 .project-navigation > .workspace-back { padding-inline: 0; justify-content: flex-start; margin: 0; flex-shrink: 0; font-size: 13px; }
 .project-navigation-title { color: var(--muted); font-size: 13px; text-decoration: none; overflow-wrap: anywhere; max-width: 46ch; }
@@ -990,6 +1171,7 @@ onBeforeUnmount(() => {
   .editorial-navigation { width: 100%; margin: 0; gap: 26px; }
 }
 @media (max-width: 760px) {
+  .project-trashed-state h1 { font-size: 32px; }
   .project-navigation { margin-bottom: 28px; }
   .project-navigation-title { flex: 1; font-size: 12px; }
   .editorial-navigation { overflow-x: auto; scrollbar-width: thin; gap: 24px; }

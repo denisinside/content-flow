@@ -103,8 +103,8 @@ export class SourceService {
   ) {}
 
   private async assertReadable(userId: string, projectId: string): Promise<void> {
-    const project = await this.health.prisma.project.findFirst({ where: { id: projectId,
-      workspace: { members: { some: { userId, leftAt: null } } } }, select: { id: true } });
+    const project = await this.health.prisma.project.findFirst({ where: { id: projectId, trashedAt: null,
+      workspace: { trashedAt: null, members: { some: { userId, leftAt: null } } } }, select: { id: true } });
     if (!project) throw new NotFoundException('Project not found');
   }
 
@@ -112,7 +112,7 @@ export class SourceService {
     const access = await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
       JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
       JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = w."id"
-      WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+      WHERE p."id" = ${projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
       AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p, w, m`;
     if (!access.length) throw new NotFoundException('Project not found');
   }
@@ -396,7 +396,7 @@ export class SourceService {
 
   async download(userId: string, projectId: string, assetId: string) {
     const asset = await this.health.prisma.asset.findFirst({ where: { id: assetId, projectId, state: 'AVAILABLE',
-      project: { workspace: { members: { some: { userId, leftAt: null } } } },
+      project: { archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null, members: { some: { userId, leftAt: null } } } },
       OR: [{ sourceSnapshots: { some: { projectId, originalAssetId: assetId } } }, { originalMaterials: { some: { projectId, originalAssetId: assetId } } }] },
       select: { id: true, projectId: true, bucket: true, objectKey: true, mediaType: true, bytes: true, sha256: true,
         originalMaterials: { where: { projectId, originalAssetId: assetId }, take: 1, select: { originalFilename: true } },
@@ -406,7 +406,7 @@ export class SourceService {
     if (BigInt(bytes.byteLength) !== asset.bytes) throw new InternalServerErrorException('Stored source file failed integrity checks');
     const stillAuthorized = await this.health.prisma.asset.findFirst({ where: { id: assetId, projectId, state: 'AVAILABLE',
       OR: [{ sourceSnapshots: { some: { projectId, originalAssetId: assetId } } }, { originalMaterials: { some: { projectId, originalAssetId: assetId } } }],
-      project: { workspace: { members: { some: { userId, leftAt: null } } } } }, select: { id: true } });
+      project: { archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null, members: { some: { userId, leftAt: null } } } } }, select: { id: true } });
     if (!stillAuthorized) throw new NotFoundException('Source file not found');
     return { assetId: asset.id, bytes, mediaType: asset.mediaType, filename: asset.originalMaterials[0]?.originalFilename ?? asset.sourceSnapshots[0]?.originalFilename ?? 'source.txt' };
   }
@@ -414,7 +414,7 @@ export class SourceService {
   async assertAssetReadable(userId: string, projectId: string, assetId: string): Promise<void> {
     const asset = await this.health.prisma.asset.findFirst({ where: { id: assetId, projectId, state: 'AVAILABLE',
       OR: [{ sourceSnapshots: { some: { projectId, originalAssetId: assetId } } }, { originalMaterials: { some: { projectId, originalAssetId: assetId } } }],
-      project: { workspace: { members: { some: { userId, leftAt: null } } } } }, select: { id: true } });
+      project: { archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null, members: { some: { userId, leftAt: null } } } } }, select: { id: true } });
     if (!asset) throw new NotFoundException('Source file not found');
   }
 }

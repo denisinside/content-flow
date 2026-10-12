@@ -6,15 +6,26 @@ import { JobFailure, retryAllowed } from '../jobs/contracts.js';
 import { PrivateAssetStore } from '../storage/private-asset-store.js';
 import type { ArticleService } from '../editorial/article.service.js';
 import type { TelegramService } from '../editorial/telegram.service.js';
+import { ScriptService } from '../editorial/script.service.js';
+import { scriptContentSchema } from '../editorial/script-contracts.js';
 import { articleContentSchema } from '../editorial/article-contracts.js';
-import { telegramContentSchema } from '../editorial/telegram-contracts.js';
+import { telegramContentSchema, type AdaptationFormat } from '../editorial/telegram-contracts.js';
 import { ZodError } from 'zod';
 import { createExportInput, exportJobManifestSchema, exportManifestSchema, type CreateExportInput, type ExportManifest } from './export-contracts.js';
-import { renderExportFiles, zipExportFiles } from './export-renderer.js';
+import { renderExportFiles, zipExportFiles, type ExportContentKind } from './export-renderer.js';
 
 const EXPORT_CONTRACT = 'export-v1';
-const supportedFormats = new Set(['ARTICLE', 'TELEGRAM_POST']);
-const itemOrder = (format: string) => format === 'ARTICLE' ? 0 : format === 'TELEGRAM_POST' ? 1 : 2;
+const scriptParentFormat = (format: string) => format.endsWith('_SCRIPT') ? format.slice(0, -7) : null;
+const scriptTarget = (format: string) => `${format}_SCRIPT`;
+const carouselFormats = new Set(['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES']);
+const supportedFormats = new Set(['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', ...carouselFormats,
+  'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT']);
+const itemOrder = (format: string) => ({ ARTICLE: 0, TELEGRAM_POST: 1, LINKEDIN_TEXT: 2, LINKEDIN_COVER: 3, INSTAGRAM_COVER: 4,
+  LINKEDIN_CAROUSEL: 5, INSTAGRAM_CAROUSEL: 6, INSTAGRAM_STORIES: 7, LINKEDIN_CAROUSEL_SCRIPT: 8, INSTAGRAM_CAROUSEL_SCRIPT: 9, INSTAGRAM_STORIES_SCRIPT: 10 }[format] ?? 11);
+const formatTitle = (format: string) => ({ ARTICLE: 'Стаття', TELEGRAM_POST: 'Дописи Telegram', LINKEDIN_TEXT: 'Текст LinkedIn',
+  LINKEDIN_COVER: 'Обкладинка LinkedIn', INSTAGRAM_COVER: 'Обкладинка Instagram', LINKEDIN_CAROUSEL: 'Карусель LinkedIn',
+  INSTAGRAM_CAROUSEL: 'Карусель Instagram', INSTAGRAM_STORIES: 'Історії Instagram', LINKEDIN_CAROUSEL_SCRIPT: 'Сценарій каруселі LinkedIn',
+  INSTAGRAM_CAROUSEL_SCRIPT: 'Сценарій каруселі Instagram', INSTAGRAM_STORIES_SCRIPT: 'Сценарій історій Instagram' }[format] ?? format);
 function json<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -30,24 +41,26 @@ function iso(value: Date | null | undefined): string | null { return value?.toIS
 function titleOf(format: string, value: unknown): string {
   if (format === 'ARTICLE') { const parsed = articleContentSchema.safeParse(value); return parsed.success ? parsed.data.title : 'Стаття'; }
   if (format === 'TELEGRAM_POST') { const parsed = telegramContentSchema.safeParse(value); return parsed.success ? parsed.data.text.slice(0, 120) || 'Дописи Telegram' : 'Дописи Telegram'; }
-  return format;
+  if (value && typeof value === 'object' && 'text' in value && typeof value.text === 'string') return value.text.slice(0, 120) || format;
+  return formatTitle(format);
 }
 
 type FrozenStage = { assetId: string; bucket: string; objectKey: string; sha256: string; byteSize: number; contentType: string; filename: string };
 /** Private, immutable exports over explicitly selected approved revisions. */
 export class ExportService {
+  private readonly scripts: ScriptService;
   constructor(readonly prisma: PrismaClient, private readonly jobs: DurableJobService, private readonly articles: ArticleService,
-    private readonly telegram: TelegramService, private readonly assets: PrivateAssetStore) {}
+    private readonly telegram: TelegramService, private readonly assets: PrivateAssetStore) { this.scripts = new ScriptService(prisma, telegram); }
 
   private async lock(tx: Prisma.TransactionClient, user: string, project: string, write = true): Promise<void> {
     const access = write
       ? await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
         JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id"
-        WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+        WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
         AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR UPDATE OF p FOR SHARE OF w,m`
       : await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
         JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id"
-        WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+        WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
         AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
     if (!access.length) throw new NotFoundException('Project not found');
   }
@@ -161,14 +174,14 @@ export class ExportService {
       effectiveDependencies: effective };
   }
 
-  private async telegramProvenance(tx: Prisma.TransactionClient, project: string, version: AdaptationRevision) {
+  private async adaptationProvenance(tx: Prisma.TransactionClient, project: string, version: AdaptationRevision, format: Exclude<CreateExportInput['items'][number]['format'], 'ARTICLE'>) {
     const [brief, basis, originalStyle, originalSourceArticle] = await Promise.all([
       tx.briefRevision.findFirst({ where: { projectId: project, id: version.briefRevisionId }, select: { id: true, sha256: true } }),
       version.basisRevisionId ? tx.factualBasisRevision.findFirst({ where: { projectId: project, id: version.basisRevisionId }, select: { id: true, sha256: true } }) : null,
       tx.workspaceStyleRevision.findUnique({ where: { workspaceId_revision: { workspaceId: version.workspaceId, revision: version.workspaceStyleRevision } }, select: { workspaceId: true, revision: true, brandbook: true, tone: true, settings: true, createdAt: true } }),
       version.inputMode === 'ARTICLE_DERIVED' && version.sourceArticleVersionId ? tx.articleVersion.findFirst({ where: { projectId: project, id: version.sourceArticleVersionId } }) : null,
     ]);
-    if (!brief || !originalStyle || version.basisRevisionId && !basis || version.inputMode === 'ARTICLE_DERIVED' && !originalSourceArticle) throw new ConflictException('An immutable Telegram dependency is missing');
+    if (!brief || !originalStyle || version.basisRevisionId && !basis || version.inputMode === 'ARTICLE_DERIVED' && !originalSourceArticle) throw new ConflictException('An immutable adaptation dependency is missing');
     const reviewed = version.reviewCounter > 0;
     const effectiveBriefId = reviewed ? version.reviewedBriefRevisionId : version.briefRevisionId;
     const effectiveBasisId = reviewed ? version.reviewedBasisRevisionId : version.basisRevisionId;
@@ -176,14 +189,14 @@ export class ExportService {
     const effectiveSourceId = reviewed ? version.reviewedSourceArticleVersionId : version.sourceArticleVersionId;
     const effectiveSourceArticle = version.inputMode === 'ARTICLE_DERIVED' && effectiveSourceId
       ? await tx.articleVersion.findFirst({ where: { projectId: project, id: effectiveSourceId } }) : null;
-    if (version.inputMode === 'ARTICLE_DERIVED' && !effectiveSourceArticle) throw new ConflictException('An effective Telegram article dependency is missing');
+    if (version.inputMode === 'ARTICLE_DERIVED' && !effectiveSourceArticle) throw new ConflictException('An effective adaptation article dependency is missing');
     const [effective, effectiveSourceArticleDetails, originalSourceArticleDetails] = await Promise.all([
       this.dependencySnapshot(tx, project, { briefRevisionId: effectiveBriefId, basisRevisionId: effectiveBasisId, outlineRevisionId: null,
         workspaceId: version.workspaceId, workspaceStyleRevision: effectiveStyleRevision }),
       effectiveSourceArticle ? this.articleProvenance(tx, project, effectiveSourceArticle) : null,
       originalSourceArticle ? this.articleProvenance(tx, project, originalSourceArticle) : null,
     ]);
-    return { kind: 'TELEGRAM_POST', revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: version.contentMode,
+    return { kind: format, revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: version.contentMode,
       inputMode: version.inputMode, includeLink: version.includeLink,
       approval: { actorId: version.approvedBy, approvedAt: iso(version.approvedAt), withdrawnBy: version.withdrawnBy, withdrawnAt: iso(version.withdrawnAt) },
       reviewCounter: version.reviewCounter, originalInputs: { briefRevisionId: version.briefRevisionId, briefSha256: brief.sha256,
@@ -197,7 +210,58 @@ export class ExportService {
       effectiveDependencies: { ...effective, sourceArticle: effectiveSourceArticleDetails } };
   }
 
-  private async selectedItem(tx: Prisma.TransactionClient, project: string, format: 'ARTICLE' | 'TELEGRAM_POST', revisionId: string, reviewCounter: number) {
+  private async selectedItem(tx: Prisma.TransactionClient, project: string, format: CreateExportInput['items'][number]['format'], revisionId: string, reviewCounter: number) {
+    const parentFormat = scriptParentFormat(format);
+    if (parentFormat) {
+      if (!carouselFormats.has(parentFormat)) throw new BadRequestException('Unsupported script export target');
+      const script = await tx.script.findUnique({ where: { projectId_format: { projectId: project, format: parentFormat as 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' } } });
+      const version = await tx.scriptRevision.findFirst({ where: { projectId: project, id: revisionId, ...(script ? { scriptId: script.id } : {}) } });
+      if (!script || !version || script.currentApprovedRevisionId !== version.id || version.reviewCounter !== reviewCounter || !version.approvedAt || version.withdrawnAt) {
+        throw new ConflictException(`Select the current approved ${format} revision with its latest review counter`);
+      }
+      const content = scriptContentSchema.parse(version.content);
+      const inspection = await this.scripts.inspectRevision(tx, project, version);
+      if (!inspection.eligible) throw new ConflictException(`${format} output needs review: ${[...inspection.staleReasons, ...inspection.blockingReasons].join(', ')}`);
+      const parent = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: project, format: parentFormat as 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' } } });
+      const caption = await tx.adaptationRevision.findFirst({ where: { projectId: project, id: version.parentAdaptationRevisionId,
+        ...(parent ? { adaptationId: parent.id } : {}), claimsSealed: true }, include: { claims: true } });
+      if (!parent || !caption || parent.currentApprovedRevisionId !== caption.id || caption.sha256 !== version.parentAdaptationRevisionHash
+        || caption.reviewCounter !== version.parentAdaptationReviewCounter || !caption.approvedAt || caption.withdrawnAt) throw new ConflictException(`${format} parent caption is no longer current and approved`);
+      const provenance = await this.adaptationProvenance(tx, project, caption, parentFormat as Exclude<CreateExportInput['items'][number]['format'], 'ARTICLE'>);
+      const parentCaption = telegramContentSchema.parse(caption.content).text;
+      const frameEdges = content.frames.flatMap((frame, frameIndex) => frame.mappings.map(mapping => ({
+        claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId,
+        locator: { frameId: frame.id, frameOrdinal: frameIndex + 1, startOffset: mapping.startOffset, endOffset: mapping.endOffset, quote: mapping.quote },
+      })));
+      const frameLocators = new Map<string, Array<{ frameId: string; frameOrdinal: number; startOffset: number; endOffset: number; quote: string }>>();
+      for (const edge of frameEdges) {
+        const key = `${edge.claimRevisionId}:${edge.evidenceId}`;
+        frameLocators.set(key, [...(frameLocators.get(key) ?? []), edge.locator]);
+      }
+      const ownSources = await this.evidenceSources(tx, project, frameEdges, version.id, `SELECTED_${format}`);
+      const scriptSources = ownSources.map(source => ({ ...source, frameLocators: frameLocators.get(`${String(source.claimRevisionId)}:${String(source.evidenceId)}`) ?? [] }));
+      const captionSources = await this.evidenceSources(tx, project, caption.claims, version.id, 'PARENT_CAPTION');
+      const originalSource = caption.inputMode === 'ARTICLE_DERIVED' && caption.sourceArticleVersionId
+        ? await tx.articleVersion.findFirst({ where: { projectId: project, id: caption.sourceArticleVersionId }, include: { claims: true } }) : null;
+      const effectiveSourceId = caption.reviewCounter > 0 ? caption.reviewedSourceArticleVersionId : caption.sourceArticleVersionId;
+      const effectiveSource = caption.inputMode === 'ARTICLE_DERIVED' && effectiveSourceId
+        ? await tx.articleVersion.findFirst({ where: { projectId: project, id: effectiveSourceId }, include: { claims: true } }) : null;
+      if (caption.inputMode === 'ARTICLE_DERIVED' && (!originalSource || !effectiveSource)) throw new ConflictException(`${format} source article lineage is missing`);
+      const parentSources = [
+        ...(originalSource ? await this.evidenceSources(tx, project, originalSource.claims, version.id, `ORIGINAL_SOURCE_ARTICLE_FOR_${parentFormat}`) : []),
+        ...(effectiveSource && effectiveSource.id !== originalSource?.id
+          ? await this.evidenceSources(tx, project, effectiveSource.claims, version.id, `REVIEWED_SOURCE_ARTICLE_FOR_${parentFormat}`) : []),
+      ];
+      const sources = [...scriptSources, ...captionSources, ...parentSources];
+      const usedSources = await this.allSources([sources]);
+      return { format, title: formatTitle(format), revisionId: version.id, number: version.number, reviewCounter: version.reviewCounter,
+        contentMode: caption.contentMode, sha256: version.sha256,
+        manifest: { format, revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: caption.contentMode,
+          reviewCounter: version.reviewCounter, provenance: { kind: 'SCRIPT', scriptId: script.id, parentAdaptationFormat: parentFormat,
+            parentAdaptationRevisionId: caption.id, parentAdaptationRevisionHash: caption.sha256,
+            parentAdaptationReviewCounter: version.parentAdaptationReviewCounter, parentCaption, parentProvenance: provenance, usedSources } },
+        sources, content: version.content, inspection };
+    }
     if (format === 'ARTICLE') {
       const article = await tx.article.findUnique({ where: { projectId: project } });
       const version = await tx.articleVersion.findFirst({ where: { projectId: project, id: revisionId, ...(article ? { articleId: article.id } : {}) }, include: { claims: true } });
@@ -213,24 +277,26 @@ export class ExportService {
         manifest: { format, revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: version.contentMode,
           reviewCounter: version.reviewCounter, provenance }, sources, content: version.content, inspection };
     }
-    const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: project, format: 'TELEGRAM_POST' } } });
+    const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: project, format: format as AdaptationFormat } } });
     const version = await tx.adaptationRevision.findFirst({ where: { projectId: project, id: revisionId, ...(adaptation ? { adaptationId: adaptation.id } : {}) }, include: { claims: true } });
     if (!adaptation || !version || adaptation.currentApprovedRevisionId !== version.id || version.reviewCounter !== reviewCounter || !version.approvedAt || version.withdrawnAt) {
-      throw new ConflictException('Select the current approved Telegram revision with its latest review counter');
+      throw new ConflictException(`Select the current approved ${format} revision with its latest review counter`);
     }
     const inspection = await this.telegram.inspectRevision(tx, project, version);
-    if (!inspection.eligible) throw new ConflictException(`Telegram output needs review: ${[...inspection.staleReasons, ...inspection.blockingReasons].join(', ')}`);
-    const provenance = await this.telegramProvenance(tx, project, version);
-    const ownSources = await this.evidenceSources(tx, project, version.claims, version.id, 'SELECTED_TELEGRAM');
+    if (!inspection.eligible) throw new ConflictException(`${format} output needs review: ${[...inspection.staleReasons, ...inspection.blockingReasons].join(', ')}`);
+    const provenance = await this.adaptationProvenance(tx, project, version, format);
+    const ownSources = await this.evidenceSources(tx, project, version.claims, version.id, `SELECTED_${format}`);
     const originalSource = version.inputMode === 'ARTICLE_DERIVED' && version.sourceArticleVersionId
       ? await tx.articleVersion.findFirst({ where: { projectId: project, id: version.sourceArticleVersionId }, include: { claims: true } }) : null;
     const effectiveSourceId = version.reviewCounter > 0 ? version.reviewedSourceArticleVersionId : version.sourceArticleVersionId;
     const effectiveSource = version.inputMode === 'ARTICLE_DERIVED' && effectiveSourceId
       ? await tx.articleVersion.findFirst({ where: { projectId: project, id: effectiveSourceId }, include: { claims: true } }) : null;
-    if (version.inputMode === 'ARTICLE_DERIVED' && (!originalSource || !effectiveSource)) throw new ConflictException('Telegram source article lineage is missing');
+    if (version.inputMode === 'ARTICLE_DERIVED' && (!originalSource || !effectiveSource)) throw new ConflictException(`${format} source article lineage is missing`);
     const parentSources = [
-      ...(originalSource ? await this.evidenceSources(tx, project, originalSource.claims, version.id, 'ORIGINAL_SOURCE_ARTICLE') : []),
-      ...(effectiveSource && effectiveSource.id !== originalSource?.id ? await this.evidenceSources(tx, project, effectiveSource.claims, version.id, 'REVIEWED_SOURCE_ARTICLE') : []),
+      ...(originalSource ? await this.evidenceSources(tx, project, originalSource.claims, version.id,
+        format === 'TELEGRAM_POST' ? 'ORIGINAL_SOURCE_ARTICLE' : `ORIGINAL_SOURCE_ARTICLE_FOR_${format}`) : []),
+      ...(effectiveSource && effectiveSource.id !== originalSource?.id ? await this.evidenceSources(tx, project, effectiveSource.claims, version.id,
+        format === 'TELEGRAM_POST' ? 'REVIEWED_SOURCE_ARTICLE' : `REVIEWED_SOURCE_ARTICLE_FOR_${format}`) : []),
     ];
     const sources = [...ownSources, ...parentSources];
     return { format, title: titleOf(format, version.content), revisionId: version.id, number: version.number,
@@ -241,7 +307,8 @@ export class ExportService {
 
   private async readinessItems(tx: Prisma.TransactionClient, projectId: string, formats: string[]) {
     const items: Array<{ format: string; title: string; revisionId: string | null; number: number | null; reviewCounter: number | null; contentMode: string | null; ready: boolean; reasons: string[] }> = [];
-    for (const format of [...formats].sort((a, b) => itemOrder(a) - itemOrder(b) || a.localeCompare(b))) {
+    const requested = [...formats, ...formats.filter(format => carouselFormats.has(format)).map(scriptTarget)];
+    for (const format of [...new Set(requested)].sort((a, b) => itemOrder(a) - itemOrder(b) || a.localeCompare(b))) {
       if (!supportedFormats.has(format)) {
         items.push({ format, title: format, revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['FORMAT_NOT_IMPLEMENTED'] });
         continue;
@@ -256,9 +323,21 @@ export class ExportService {
           contentMode: version.contentMode, ready: inspection.eligible, reasons });
         continue;
       }
-      const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId, format: 'TELEGRAM_POST' } }, include: { currentApprovedRevision: { include: { claims: true } } } });
+      const parentFormat = scriptParentFormat(format);
+      if (parentFormat) {
+        const script = await tx.script.findUnique({ where: { projectId_format: { projectId, format: parentFormat as 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' } } });
+        const version = script?.currentApprovedRevisionId ? await tx.scriptRevision.findFirst({ where: { projectId, id: script.currentApprovedRevisionId, scriptId: script.id } }) : null;
+        if (!version) { items.push({ format, title: formatTitle(format), revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['APPROVAL_REQUIRED'] }); continue; }
+        const inspection = await this.scripts.inspectRevision(tx, projectId, version);
+        const reasons = [...new Set([...(version.approvedAt ? [] : ['APPROVAL_REQUIRED']), ...inspection.staleReasons, ...inspection.blockingReasons])];
+        const parent = await tx.adaptationRevision.findFirst({ where: { projectId, id: version.parentAdaptationRevisionId }, select: { contentMode: true } });
+        items.push({ format, title: formatTitle(format), revisionId: version.id, number: version.number, reviewCounter: version.reviewCounter,
+          contentMode: parent?.contentMode ?? null, ready: inspection.eligible, reasons });
+        continue;
+      }
+      const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId, format: format as Exclude<CreateExportInput['items'][number]['format'], 'ARTICLE'|'LINKEDIN_CAROUSEL_SCRIPT'|'INSTAGRAM_CAROUSEL_SCRIPT'|'INSTAGRAM_STORIES_SCRIPT'> } }, include: { currentApprovedRevision: { include: { claims: true } } } });
       const version = adaptation?.currentApprovedRevision;
-      if (!version) { items.push({ format, title: 'Дописи Telegram', revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['APPROVAL_REQUIRED'] }); continue; }
+      if (!version) { items.push({ format, title: formatTitle(format), revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['APPROVAL_REQUIRED'] }); continue; }
       const inspection = await this.telegram.inspectRevision(tx, projectId, version);
       const reasons = [...new Set([...(version.approvedAt ? [] : ['APPROVAL_REQUIRED']), ...inspection.staleReasons, ...inspection.blockingReasons])];
       items.push({ format, title: titleOf(format, version.content), revisionId: version.id, number: version.number, reviewCounter: version.reviewCounter,
@@ -308,7 +387,7 @@ export class ExportService {
       }
       const project = await tx.project.findUniqueOrThrow({ where: { id: projectId }, select: { revision: true, formats: true } });
       if (project.revision !== input.expectedProjectRevision) throw new ConflictException('Project changed; review the current export selection');
-      if (input.items.some(item => !project.formats.includes(item.format))) throw new ConflictException('Export selection contains an unselected project format');
+      if (input.items.some(item => { const parent = scriptParentFormat(item.format); return !project.formats.includes((parent ?? item.format) as typeof project.formats[number]); })) throw new ConflictException('Export selection contains an unselected project format');
 
       const items = [];
       for (const selected of [...input.items].sort((a, b) => itemOrder(a.format) - itemOrder(b.format))) {
@@ -329,7 +408,8 @@ export class ExportService {
         format: input.format, manifest: json(manifest) as Prisma.InputJsonObject, manifestHash } });
       await tx.exportItem.createMany({ data: items.map((item, ordinal) => ({ id: randomUUID(), projectId, requestId: request.id, ordinal,
         articleVersionId: item.format === 'ARTICLE' ? item.revisionId : null,
-        adaptationRevisionId: item.format === 'TELEGRAM_POST' ? item.revisionId : null })) });
+        adaptationRevisionId: item.format !== 'ARTICLE' && !item.format.endsWith('_SCRIPT') ? item.revisionId : null,
+        scriptRevisionId: item.format.endsWith('_SCRIPT') ? item.revisionId : null })) });
       await tx.exportRequest.update({ where: { id: request.id }, data: { itemsSealed: true } });
       return { exportId: request.id, jobId: job.id };
     }, true);
@@ -343,6 +423,11 @@ export class ExportService {
       const usage = { revisionId: String(source.usedByRevisionId), role: String(source.originRole) };
       if (existing) {
         if (!existing.usedBy.some(row => row.revisionId === usage.revisionId && row.role === usage.role)) existing.usedBy.push(usage);
+        if (Array.isArray(source.frameLocators)) {
+          const current = Array.isArray(existing.frameLocators) ? existing.frameLocators as Array<Record<string, unknown>> : [];
+          const incoming = source.frameLocators as Array<Record<string, unknown>>;
+          existing.frameLocators = [...current, ...incoming.filter(locator => !current.some(row => canonicalManifestHash(row) === canonicalManifestHash(locator)))];
+        }
       } else {
         const details = { ...source };
         delete details.usedByRevisionId;
@@ -363,8 +448,8 @@ export class ExportService {
     const parsed = exportManifestSchema.safeParse(manifestInput);
     if (!parsed.success || parsed.data.projectId !== projectId || canonicalManifestHash(parsed.data) !== expectedHash) return false;
     const manifest = parsed.data;
-    const project = await tx.project.findFirst({ where: { id: projectId, archivedAt: null, formats: { hasEvery: manifest.items.map(item => item.format) } }, select: { id: true } });
-    if (!project) return false;
+    const project = await tx.project.findFirst({ where: { id: projectId, archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null } }, select: { id: true, formats: true } });
+    if (!project || !manifest.items.every(item => project.formats.includes((scriptParentFormat(item.format) ?? item.format) as typeof project.formats[number]))) return false;
     const items = [];
     for (const frozen of manifest.items) {
       let current: Awaited<ReturnType<ExportService['selectedItem']>>;
@@ -394,8 +479,9 @@ export class ExportService {
     const refsMatch = request.items.every((item, index) => {
       const target = manifest.items[index];
       return !!target && item.ordinal === index && item.projectId === job.projectId
-        && (target.format === 'ARTICLE' ? item.articleVersionId === target.revisionId && item.adaptationRevisionId === null
-          : item.adaptationRevisionId === target.revisionId && item.articleVersionId === null);
+        && (target.format === 'ARTICLE' ? item.articleVersionId === target.revisionId && item.adaptationRevisionId === null && item.scriptRevisionId === null
+          : target.format.endsWith('_SCRIPT') ? item.scriptRevisionId === target.revisionId && item.articleVersionId === null && item.adaptationRevisionId === null
+            : item.adaptationRevisionId === target.revisionId && item.articleVersionId === null && item.scriptRevisionId === null);
     });
     if (!refsMatch) throw new JobFailure('INPUT_INTEGRITY', 'NOT_SUBMITTED');
     if (!await this.manifestMatches(tx, job.projectId, manifest, request.manifestHash)) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
@@ -404,16 +490,20 @@ export class ExportService {
 
   async build(job: Job, signal?: AbortSignal): Promise<FrozenStage> {
     const { manifest } = await this.prisma.$transaction(tx => this.frozenRequest(tx, job), { maxWait: 5_000, timeout: 30_000 });
-    const contents = new Map<string, { kind: 'ARTICLE' | 'TELEGRAM_POST'; content: unknown }>();
+    const contents = new Map<string, { kind: ExportContentKind; content: unknown }>();
     for (const item of manifest.items) {
       if (item.format === 'ARTICLE') {
         const version = await this.prisma.articleVersion.findFirst({ where: { id: item.revisionId, projectId: job.projectId }, select: { content: true, sha256: true } });
         if (!version || version.sha256 !== item.sha256 || canonicalManifestHash(version.content) !== item.sha256) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
         contents.set(item.revisionId, { kind: 'ARTICLE', content: version.content });
+      } else if (item.format.endsWith('_SCRIPT')) {
+        const version = await this.prisma.scriptRevision.findFirst({ where: { id: item.revisionId, projectId: job.projectId }, select: { content: true, sha256: true } });
+        if (!version || version.sha256 !== item.sha256 || canonicalManifestHash(version.content) !== item.sha256) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
+        contents.set(item.revisionId, { kind: item.format as ExportContentKind, content: version.content });
       } else {
         const version = await this.prisma.adaptationRevision.findFirst({ where: { id: item.revisionId, projectId: job.projectId }, select: { content: true, sha256: true } });
         if (!version || version.sha256 !== item.sha256 || canonicalManifestHash(version.content) !== item.sha256) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
-        contents.set(item.revisionId, { kind: 'TELEGRAM_POST', content: version.content });
+        contents.set(item.revisionId, { kind: item.format as Exclude<ExportContentKind, 'ARTICLE'>, content: version.content });
       }
     }
     const rendered = renderExportFiles(manifest, contents);
@@ -465,7 +555,7 @@ export class ExportService {
   private async authorizedRequest(userId: string, projectId: string, requestId: string) {
     return this.command(userId, projectId, async tx => {
       const request = await tx.exportRequest.findFirst({ where: { id: requestId, projectId,
-        project: { archivedAt: null, workspace: { archivedAt: null, members: { some: { userId, leftAt: null } } } },
+        project: { archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null, members: { some: { userId, leftAt: null } } } },
         artifact: { isNot: null }, job: { status: 'SUCCEEDED' } }, include: { artifact: { include: { asset: true } }, job: true } });
       if (!request?.artifact || request.artifact.asset.state !== 'AVAILABLE' || request.artifact.asset.purpose !== 'EXPORT'
         || request.artifact.asset.projectId !== projectId || request.artifact.projectId !== projectId || !request.itemsSealed) throw new NotFoundException('Export not found');

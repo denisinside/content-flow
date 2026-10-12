@@ -4,7 +4,7 @@ import { ProjectFormat } from '@contextflow/backend';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { ProjectService } from './project.service.js';
 import { ProjectResultDto, ProjectsPageDto, AssetMetadataResultDto } from './project.dto.js';
-import { createProjectInput, listProjectsInput, projectIdInput, updateProjectInput } from './project-input.js';
+import { createProjectInput, listProjectsInput, projectIdInput, projectLifecycleInput, updateProjectInput } from './project-input.js';
 
 const formatsSchema = { type: 'array' as const, minItems: 1, maxItems: Object.keys(ProjectFormat).length, uniqueItems: true, items: { type: 'string' as const, enum: Object.values(ProjectFormat) } };
 function id(value: string): string {
@@ -30,7 +30,7 @@ export class ProjectsController {
   async list(@Req() request: AuthenticatedRequest, @Query() query: unknown) {
     const parsed = listProjectsInput.safeParse(query);
     if (!parsed.success) throw new BadRequestException('Invalid project query');
-    return this.projects.list(request.sessionUser.id, parsed.data.cursor, parsed.data.workspaceId);
+    return this.projects.list(request.sessionUser.id, parsed.data.cursor, parsed.data.workspaceId, parsed.data.state);
   }
 
   @Post()
@@ -61,6 +61,34 @@ export class ProjectsController {
     const parsed = updateProjectInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Invalid project input');
     return this.projects.update(request.sessionUser.id, id(projectId), parsed.data);
+  }
+
+  @Post(':projectId/archive')
+  @ApiOperation({ summary: 'Change Project lifecycle with expected revision; trash is recoverable for 30 days' })
+  @ApiBody({ schema: { type: 'object', required: ['expectedRevision'], additionalProperties: false, properties: { expectedRevision: { type: 'integer', minimum: 1 } } } })
+  @ApiResponse({ status: 409, description: 'Concurrent lifecycle change' })
+  archive(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) { return this.lifecycle(request, projectId, body, 'archive'); }
+
+  @Post(':projectId/trash')
+  trash(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) { return this.lifecycle(request, projectId, body, 'trash'); }
+
+  @Post(':projectId/restore')
+  restore(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) { return this.lifecycle(request, projectId, body, 'restore'); }
+
+  @Post(':projectId/purge')
+  @ApiOperation({ summary: 'Workspace owner permanently purges an eligible trashed Project after 30 days' })
+  @ApiBody({ schema: { type: 'object', required: ['expectedRevision'], additionalProperties: false, properties: { expectedRevision: { type: 'integer', minimum: 1 } } } })
+  @ApiResponse({ status: 409, description: 'Retention has not elapsed, graph changed, or an external write needs reconciliation' })
+  purge(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) {
+    const parsed = projectLifecycleInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('Invalid Project lifecycle input');
+    return this.projects.purge(request.sessionUser.id, id(projectId), parsed.data.expectedRevision);
+  }
+
+  private lifecycle(request: AuthenticatedRequest, projectId: string, body: unknown, action: 'archive' | 'trash' | 'restore') {
+    const parsed = projectLifecycleInput.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('Invalid Project lifecycle input');
+    return this.projects.lifecycle(request.sessionUser.id, id(projectId), action, parsed.data.expectedRevision);
   }
 
   @Get(':projectId/assets/:assetId')

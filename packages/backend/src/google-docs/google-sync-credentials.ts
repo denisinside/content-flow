@@ -179,7 +179,7 @@ export class GoogleSyncCredentials {
       SELECT p."id" FROM contextflow."Project" p
       JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
       JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = w."id"
-      WHERE p."id" = ${context.projectId}::uuid AND p."archivedAt" IS NULL AND w."archivedAt" IS NULL
+      WHERE p."id" = ${context.projectId}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL
         AND 'ARTICLE' = ANY(p."formats") AND m."userId" = ${context.userId}::uuid AND m."leftAt" IS NULL
       FOR SHARE OF p, w, m`;
     if (!projects.length) return 'missing';
