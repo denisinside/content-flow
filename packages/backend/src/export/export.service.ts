@@ -10,22 +10,33 @@ import { ScriptService } from '../editorial/script.service.js';
 import { scriptContentSchema } from '../editorial/script-contracts.js';
 import { articleContentSchema } from '../editorial/article-contracts.js';
 import { telegramContentSchema, type AdaptationFormat } from '../editorial/telegram-contracts.js';
+import { compositionSchema, imageRefs } from '@contextflow/visuals';
+import type { VisualService } from '../visuals/visual.service.js';
 import { ZodError } from 'zod';
-import { createExportInput, exportJobManifestSchema, exportManifestSchema, type CreateExportInput, type ExportManifest } from './export-contracts.js';
-import { renderExportFiles, zipExportFiles, type ExportContentKind } from './export-renderer.js';
+import { createExportInput, exportJobManifestSchema, exportManifestSchema, visualExportReceiptSchema, type CreateExportInput, type ExportManifest } from './export-contracts.js';
+import { renderExportFiles, renderVisualExportFiles, zipExportFiles, type ExportContentKind, type ExportVisual } from './export-renderer.js';
 
 const EXPORT_CONTRACT = 'export-v1';
 const scriptParentFormat = (format: string) => format.endsWith('_SCRIPT') ? format.slice(0, -7) : null;
 const scriptTarget = (format: string) => `${format}_SCRIPT`;
 const carouselFormats = new Set(['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES']);
+const visualFormats = new Set(['LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL', 'LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL', 'INSTAGRAM_STORIES_VISUAL']);
+const visualParent = (format: string) => format.endsWith('_VISUAL') ? format.slice(0, -7) : null;
+type VisualBaseFormat = 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES';
+const projectOutputFormat = (format: string) => visualParent(format) ?? scriptParentFormat(format) ?? format;
 const supportedFormats = new Set(['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', ...carouselFormats,
-  'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT']);
+  'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT', ...visualFormats]);
 const itemOrder = (format: string) => ({ ARTICLE: 0, TELEGRAM_POST: 1, LINKEDIN_TEXT: 2, LINKEDIN_COVER: 3, INSTAGRAM_COVER: 4,
-  LINKEDIN_CAROUSEL: 5, INSTAGRAM_CAROUSEL: 6, INSTAGRAM_STORIES: 7, LINKEDIN_CAROUSEL_SCRIPT: 8, INSTAGRAM_CAROUSEL_SCRIPT: 9, INSTAGRAM_STORIES_SCRIPT: 10 }[format] ?? 11);
+  LINKEDIN_CAROUSEL: 5, INSTAGRAM_CAROUSEL: 6, INSTAGRAM_STORIES: 7, LINKEDIN_CAROUSEL_SCRIPT: 8, INSTAGRAM_CAROUSEL_SCRIPT: 9,
+  INSTAGRAM_STORIES_SCRIPT: 10, LINKEDIN_COVER_VISUAL: 11, INSTAGRAM_COVER_VISUAL: 12, LINKEDIN_CAROUSEL_VISUAL: 13,
+  INSTAGRAM_CAROUSEL_VISUAL: 14, INSTAGRAM_STORIES_VISUAL: 15 }[format] ?? 16);
 const formatTitle = (format: string) => ({ ARTICLE: 'Стаття', TELEGRAM_POST: 'Дописи Telegram', LINKEDIN_TEXT: 'Текст LinkedIn',
   LINKEDIN_COVER: 'Обкладинка LinkedIn', INSTAGRAM_COVER: 'Обкладинка Instagram', LINKEDIN_CAROUSEL: 'Карусель LinkedIn',
   INSTAGRAM_CAROUSEL: 'Карусель Instagram', INSTAGRAM_STORIES: 'Історії Instagram', LINKEDIN_CAROUSEL_SCRIPT: 'Сценарій каруселі LinkedIn',
-  INSTAGRAM_CAROUSEL_SCRIPT: 'Сценарій каруселі Instagram', INSTAGRAM_STORIES_SCRIPT: 'Сценарій історій Instagram' }[format] ?? format);
+  INSTAGRAM_CAROUSEL_SCRIPT: 'Сценарій каруселі Instagram', INSTAGRAM_STORIES_SCRIPT: 'Сценарій історій Instagram',
+  LINKEDIN_COVER_VISUAL: 'Візуальна обкладинка LinkedIn', INSTAGRAM_COVER_VISUAL: 'Візуальна обкладинка Instagram',
+  LINKEDIN_CAROUSEL_VISUAL: 'Візуальна карусель LinkedIn', INSTAGRAM_CAROUSEL_VISUAL: 'Візуальна карусель Instagram',
+  INSTAGRAM_STORIES_VISUAL: 'Візуальні історії Instagram' }[format] ?? format);
 function json<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -36,6 +47,11 @@ function comparisonValue(value: unknown): unknown {
     .filter(([key]) => key !== 'materialLabel' && key !== 'sourceUrl').map(([key, entry]) => [key, comparisonValue(entry)]));
   return value;
 }
+function withoutUsedSourceLists(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutUsedSourceLists);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => key !== 'usedSources').map(([key, item]) => [key, withoutUsedSourceLists(item)]));
+}
 function comparisonHash(value: unknown): string { return canonicalManifestHash(comparisonValue(value)); }
 function iso(value: Date | null | undefined): string | null { return value?.toISOString() ?? null; }
 function titleOf(format: string, value: unknown): string {
@@ -45,12 +61,20 @@ function titleOf(format: string, value: unknown): string {
   return formatTitle(format);
 }
 
-type FrozenStage = { assetId: string; bucket: string; objectKey: string; sha256: string; byteSize: number; contentType: string; filename: string };
+type FrozenStage = { assetId: string; bucket: string; objectKey: string; sha256: string; byteSize: number; contentType: string; filename: string;
+  projectId: string; workspaceId: string; requestedBy: string };
+type SelectedExportItem = { format: CreateExportInput['items'][number]['format']; title: string; revisionId: string; number: number; reviewCounter: number;
+  contentMode: 'FACTUAL' | 'CREATIVE'; sha256: string; manifest: unknown; sources: Array<Record<string, unknown>>; content: unknown;
+  inspection: { eligible: boolean; staleReasons: string[]; blockingReasons: string[] } };
 /** Private, immutable exports over explicitly selected approved revisions. */
 export class ExportService {
   private readonly scripts: ScriptService;
+  private readonly visuals: VisualService | undefined;
   constructor(readonly prisma: PrismaClient, private readonly jobs: DurableJobService, private readonly articles: ArticleService,
-    private readonly telegram: TelegramService, private readonly assets: PrivateAssetStore) { this.scripts = new ScriptService(prisma, telegram); }
+    private readonly telegram: TelegramService, private readonly assets: PrivateAssetStore, visuals?: VisualService) {
+    this.scripts = new ScriptService(prisma, telegram);
+    this.visuals = visuals;
+  }
 
   private async lock(tx: Prisma.TransactionClient, user: string, project: string, write = true): Promise<void> {
     const access = write
@@ -210,7 +234,71 @@ export class ExportService {
       effectiveDependencies: { ...effective, sourceArticle: effectiveSourceArticleDetails } };
   }
 
-  private async selectedItem(tx: Prisma.TransactionClient, project: string, format: CreateExportInput['items'][number]['format'], revisionId: string, reviewCounter: number) {
+  private async selectedVisual(tx: Prisma.TransactionClient, project: string, format: CreateExportInput['items'][number]['format'], revisionId: string, reviewCounter: number): Promise<SelectedExportItem> {
+    if (!this.visuals || !visualFormats.has(format)) throw new ConflictException('Visual export is unavailable');
+    const parentFormat = visualParent(format)!;
+    const composition = await tx.visualComposition.findUnique({ where: { projectId_format: { projectId: project, format: parentFormat as VisualBaseFormat } } });
+    const revision = composition ? await tx.visualCompositionRevision.findFirst({ where: { projectId: project, compositionId: composition.id, id: revisionId },
+      include: { previews: { orderBy: { createdAt: 'asc' }, include: { asset: true } } } }) : null;
+    if (!composition || !revision || composition.currentApprovedRevisionId !== revision.id || !revision.approvedAt || revision.withdrawnAt
+      || revision.reviewCounter !== reviewCounter) throw new ConflictException(`Select the current approved ${format} revision with its latest review counter`);
+    if (composition.format !== parentFormat) throw new ConflictException('Visual revision format does not match the selected export target');
+    const inspection = await this.visuals.inspectRevision(tx, project, revision);
+    if (!inspection.eligible || !inspection.approved) throw new ConflictException(`${format} visual needs review: ${[...inspection.staleReasons, ...inspection.blockingReasons].join(', ')}`);
+    const parsed = compositionSchema.safeParse(revision.content);
+    if (!parsed.success || canonicalManifestHash(revision.content) !== revision.sha256) throw new ConflictException('Visual composition integrity check failed');
+    const content = parsed.data;
+    const workspace = await tx.project.findUniqueOrThrow({ where: { id: project }, select: { workspaceId: true } });
+    const refs = imageRefs(content);
+    const resourceManifest = revision.resourceManifest as Array<{ ref: { type: 'project' | 'workspace'; id: string; sha256: string }; mediaType: string }>;
+    if (!Array.isArray(resourceManifest) || canonicalManifestHash(resourceManifest) !== canonicalManifestHash([...new Map(refs.map(ref => [`${ref.type}:${ref.id}`, ref])).values()].map(ref => ({ ref, mediaType:
+      resourceManifest.find(row => row?.ref?.type === ref.type && row.ref.id === ref.id)?.mediaType ?? '' })))) throw new ConflictException('Visual resource manifest failed integrity checks');
+    for (const entry of resourceManifest) {
+      if (!entry || !entry.ref || !['project', 'workspace'].includes(entry.ref.type) || !/^[a-f0-9-]{36}$/i.test(entry.ref.id)
+        || !/^[a-f0-9]{64}$/.test(entry.ref.sha256)) throw new ConflictException('Visual resource manifest is invalid');
+      const asset = entry.ref.type === 'project'
+        ? await tx.asset.findFirst({ where: { projectId: project, id: entry.ref.id, state: 'AVAILABLE' }, select: { bucket: true, objectKey: true, sha256: true, mediaType: true } })
+        : await tx.workspaceVisualAsset.findFirst({ where: { workspaceId: workspace.workspaceId, id: entry.ref.id }, select: { bucket: true, objectKey: true, sha256: true, mediaType: true } });
+      if (!asset || asset.sha256 !== entry.ref.sha256 || asset.mediaType !== entry.mediaType || !['image/png', 'image/jpeg'].includes(asset.mediaType)) {
+        throw new ConflictException('A frozen visual resource is unavailable or changed');
+      }
+    }
+    const frameReceipts = [];
+    for (const [index, frame] of content.frames.entries()) {
+      const preview = revision.previews.find(row => row.frameId === frame.id);
+      if (!preview || preview.asset.projectId !== project || preview.asset.state !== 'AVAILABLE' || preview.asset.mediaType !== 'image/png'
+        || preview.rendererVersion !== revision.previews[0]?.rendererVersion || canonicalManifestHash(preview.fontHashes) !== canonicalManifestHash(revision.previews[0]?.fontHashes)) {
+        throw new ConflictException('Every approved visual frame needs its exact canonical preview');
+      }
+      const fontHashes = record(preview.fontHashes);
+      if (!fontHashes || Object.values(fontHashes).some(value => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) {
+        throw new ConflictException('Approved visual font receipt is invalid');
+      }
+      frameReceipts.push({ frameId: frame.id, ordinal: index + 1, width: content.width, height: content.height, previewAssetId: preview.assetId,
+        sha256: preview.asset.sha256, rendererVersion: preview.rendererVersion, fontHashes });
+    }
+    if (revision.previews.length !== content.frames.length) throw new ConflictException('Approved visual contains an unexpected preview frame');
+    const parentTarget = revision.parentKind === 'ADAPTATION' ? parentFormat : `${parentFormat}_SCRIPT`;
+    const parent = await this.selectedItem(tx, project, parentTarget as CreateExportInput['items'][number]['format'], revision.parentRevisionId, revision.parentReviewCounter);
+    const visual = visualExportReceiptSchema.parse({ compositionHash: revision.sha256, width: content.width, height: content.height,
+      templateIds: [...new Set(content.frames.map(frame => frame.templateId))], resourceManifest, rendererVersion: revision.rendererVersion,
+      frames: frameReceipts });
+    const usedEvidence = new Set(content.frames.flatMap(frame => frame.layers.flatMap(layer => layer.type === 'text'
+      ? layer.mappings.map(mapping => `${mapping.claimRevisionId}:${mapping.evidenceId}`) : [])));
+    const parentSources = parent.sources.filter(source => usedEvidence.has(`${String(source.claimRevisionId)}:${String(source.evidenceId)}`));
+    const parentProvenance = { parentKind: revision.parentKind, parentRevisionId: revision.parentRevisionId, parentRevisionHash: revision.parentRevisionHash,
+      parentReviewCounter: revision.parentReviewCounter, selectedParent: withoutUsedSourceLists(parent.manifest) };
+    const sources = parentSources.map(source => ({ ...source, usedByRevisionId: revision.id,
+      originRole: `VISUAL_PARENT_${revision.parentKind}` }));
+    return { format, title: formatTitle(format), revisionId: revision.id, number: revision.number, reviewCounter: revision.reviewCounter,
+      contentMode: parent.contentMode, sha256: revision.sha256, manifest: { format, revisionId: revision.id, number: revision.number, sha256: revision.sha256,
+        contentMode: parent.contentMode, reviewCounter: revision.reviewCounter, provenance: { kind: 'VISUAL', compositionId: composition.id,
+          approval: { actorId: revision.approvedBy, approvedAt: iso(revision.approvedAt), withdrawnBy: revision.withdrawnBy, withdrawnAt: iso(revision.withdrawnAt) },
+          parent: parentProvenance }, visual }, sources, content: content, inspection };
+  }
+
+  private async selectedItem(tx: Prisma.TransactionClient, project: string, format: CreateExportInput['items'][number]['format'], revisionId: string, reviewCounter: number): Promise<SelectedExportItem> {
+    if (format.endsWith('_VISUAL')) return this.selectedVisual(tx, project, format, revisionId, reviewCounter);
     const parentFormat = scriptParentFormat(format);
     if (parentFormat) {
       if (!carouselFormats.has(parentFormat)) throw new BadRequestException('Unsupported script export target');
@@ -307,7 +395,8 @@ export class ExportService {
 
   private async readinessItems(tx: Prisma.TransactionClient, projectId: string, formats: string[]) {
     const items: Array<{ format: string; title: string; revisionId: string | null; number: number | null; reviewCounter: number | null; contentMode: string | null; ready: boolean; reasons: string[] }> = [];
-    const requested = [...formats, ...formats.filter(format => carouselFormats.has(format)).map(scriptTarget)];
+    const requested = [...formats, ...formats.filter(format => carouselFormats.has(format)).map(scriptTarget),
+      ...formats.filter(format => visualFormats.has(`${format}_VISUAL`)).map(format => `${format}_VISUAL`)];
     for (const format of [...new Set(requested)].sort((a, b) => itemOrder(a) - itemOrder(b) || a.localeCompare(b))) {
       if (!supportedFormats.has(format)) {
         items.push({ format, title: format, revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['FORMAT_NOT_IMPLEMENTED'] });
@@ -335,7 +424,27 @@ export class ExportService {
           contentMode: parent?.contentMode ?? null, ready: inspection.eligible, reasons });
         continue;
       }
-      const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId, format: format as Exclude<CreateExportInput['items'][number]['format'], 'ARTICLE'|'LINKEDIN_CAROUSEL_SCRIPT'|'INSTAGRAM_CAROUSEL_SCRIPT'|'INSTAGRAM_STORIES_SCRIPT'> } }, include: { currentApprovedRevision: { include: { claims: true } } } });
+      if (visualFormats.has(format)) {
+        const base = visualParent(format) as VisualBaseFormat;
+        const composition = await tx.visualComposition.findUnique({ where: { projectId_format: { projectId, format: base } } });
+        const version = composition?.currentApprovedRevisionId
+          ? await tx.visualCompositionRevision.findFirst({ where: { id: composition.currentApprovedRevisionId, projectId }, include: { previews: { include: { asset: true } } } }) : null;
+        if (!composition || !version) {
+          items.push({ format, title: formatTitle(format), revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['APPROVAL_REQUIRED'] });
+          continue;
+        }
+        const inspection = this.visuals ? await this.visuals.inspectRevision(tx, projectId, version) : { eligible: false, approved: false, staleReasons: [], blockingReasons: ['VISUAL_SERVICE_UNAVAILABLE'] };
+        const parentKindMatches = base.endsWith('COVER') ? version.parentKind === 'ADAPTATION' : version.parentKind === 'SCRIPT';
+        const parent = parentKindMatches ? await this.selectedItem(tx, projectId,
+          version.parentKind === 'SCRIPT' ? `${base}_SCRIPT` as CreateExportInput['items'][number]['format'] : base,
+          version.parentRevisionId, version.parentReviewCounter).catch(() => null) : null;
+        const reasons = [...new Set([...(inspection.approved ? [] : ['APPROVAL_REQUIRED']), ...inspection.staleReasons, ...inspection.blockingReasons,
+          ...(parent ? [] : ['PARENT_UNAVAILABLE'])])];
+        items.push({ format, title: formatTitle(format), revisionId: version.id, number: version.number, reviewCounter: version.reviewCounter,
+          contentMode: parent?.contentMode ?? null, ready: !!parent && inspection.approved && inspection.eligible && !reasons.length, reasons });
+        continue;
+      }
+      const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId, format: format as Exclude<CreateExportInput['items'][number]['format'], 'ARTICLE'|'LINKEDIN_CAROUSEL_SCRIPT'|'INSTAGRAM_CAROUSEL_SCRIPT'|'INSTAGRAM_STORIES_SCRIPT'|'LINKEDIN_COVER_VISUAL'|'INSTAGRAM_COVER_VISUAL'|'LINKEDIN_CAROUSEL_VISUAL'|'INSTAGRAM_CAROUSEL_VISUAL'|'INSTAGRAM_STORIES_VISUAL'> } }, include: { currentApprovedRevision: { include: { claims: true } } } });
       const version = adaptation?.currentApprovedRevision;
       if (!version) { items.push({ format, title: formatTitle(format), revisionId: null, number: null, reviewCounter: null, contentMode: null, ready: false, reasons: ['APPROVAL_REQUIRED'] }); continue; }
       const inspection = await this.telegram.inspectRevision(tx, projectId, version);
@@ -387,7 +496,7 @@ export class ExportService {
       }
       const project = await tx.project.findUniqueOrThrow({ where: { id: projectId }, select: { revision: true, formats: true } });
       if (project.revision !== input.expectedProjectRevision) throw new ConflictException('Project changed; review the current export selection');
-      if (input.items.some(item => { const parent = scriptParentFormat(item.format); return !project.formats.includes((parent ?? item.format) as typeof project.formats[number]); })) throw new ConflictException('Export selection contains an unselected project format');
+      if (input.items.some(item => !project.formats.includes(projectOutputFormat(item.format) as typeof project.formats[number]))) throw new ConflictException('Export selection contains an unselected project format');
 
       const items = [];
       for (const selected of [...input.items].sort((a, b) => itemOrder(a.format) - itemOrder(b.format))) {
@@ -408,8 +517,9 @@ export class ExportService {
         format: input.format, manifest: json(manifest) as Prisma.InputJsonObject, manifestHash } });
       await tx.exportItem.createMany({ data: items.map((item, ordinal) => ({ id: randomUUID(), projectId, requestId: request.id, ordinal,
         articleVersionId: item.format === 'ARTICLE' ? item.revisionId : null,
-        adaptationRevisionId: item.format !== 'ARTICLE' && !item.format.endsWith('_SCRIPT') ? item.revisionId : null,
-        scriptRevisionId: item.format.endsWith('_SCRIPT') ? item.revisionId : null })) });
+        adaptationRevisionId: item.format !== 'ARTICLE' && !item.format.endsWith('_SCRIPT') && !item.format.endsWith('_VISUAL') ? item.revisionId : null,
+        scriptRevisionId: item.format.endsWith('_SCRIPT') ? item.revisionId : null,
+        visualRevisionId: item.format.endsWith('_VISUAL') ? item.revisionId : null })) });
       await tx.exportRequest.update({ where: { id: request.id }, data: { itemsSealed: true } });
       return { exportId: request.id, jobId: job.id };
     }, true);
@@ -449,7 +559,7 @@ export class ExportService {
     if (!parsed.success || parsed.data.projectId !== projectId || canonicalManifestHash(parsed.data) !== expectedHash) return false;
     const manifest = parsed.data;
     const project = await tx.project.findFirst({ where: { id: projectId, archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null } }, select: { id: true, formats: true } });
-    if (!project || !manifest.items.every(item => project.formats.includes((scriptParentFormat(item.format) ?? item.format) as typeof project.formats[number]))) return false;
+    if (!project || !manifest.items.every(item => project.formats.includes(projectOutputFormat(item.format) as typeof project.formats[number]))) return false;
     const items = [];
     for (const frozen of manifest.items) {
       let current: Awaited<ReturnType<ExportService['selectedItem']>>;
@@ -480,19 +590,62 @@ export class ExportService {
       const target = manifest.items[index];
       return !!target && item.ordinal === index && item.projectId === job.projectId
         && (target.format === 'ARTICLE' ? item.articleVersionId === target.revisionId && item.adaptationRevisionId === null && item.scriptRevisionId === null
-          : target.format.endsWith('_SCRIPT') ? item.scriptRevisionId === target.revisionId && item.articleVersionId === null && item.adaptationRevisionId === null
-            : item.adaptationRevisionId === target.revisionId && item.articleVersionId === null && item.scriptRevisionId === null);
+          : target.format.endsWith('_VISUAL') ? item.visualRevisionId === target.revisionId && item.articleVersionId === null && item.adaptationRevisionId === null && item.scriptRevisionId === null
+          : target.format.endsWith('_SCRIPT') ? item.scriptRevisionId === target.revisionId && item.articleVersionId === null && item.adaptationRevisionId === null && item.visualRevisionId === null
+            : item.adaptationRevisionId === target.revisionId && item.articleVersionId === null && item.scriptRevisionId === null && item.visualRevisionId === null);
     });
     if (!refsMatch) throw new JobFailure('INPUT_INTEGRITY', 'NOT_SUBMITTED');
     if (!await this.manifestMatches(tx, job.projectId, manifest, request.manifestHash)) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
     return { request, manifest };
   }
 
+  /** Reads immutable visual blobs outside database transactions and verifies each frozen receipt. */
+  private async readVisualAssets(project: string, manifest: ExportManifest): Promise<Map<string, ExportVisual>> {
+    const result = new Map<string, ExportVisual>();
+    const visualItems = manifest.items.filter(row => row.format.endsWith('_VISUAL'));
+    if (!visualItems.length) return result;
+    const projectRow = await this.prisma.project.findFirst({ where: { id: project, archivedAt: null, trashedAt: null, workspace: { archivedAt: null, trashedAt: null } }, select: { workspaceId: true } });
+    if (!projectRow) throw new NotFoundException('Project not found');
+    for (const item of visualItems) {
+      const receipt = item.visual;
+      if (!receipt) throw new ConflictException('Visual export receipt is missing');
+      for (const raw of receipt.resourceManifest) {
+        const row = record(raw), ref = row ? record(row['ref']) : null;
+        if (!row || !ref || (ref['type'] !== 'project' && ref['type'] !== 'workspace') || typeof ref['id'] !== 'string'
+          || typeof ref['sha256'] !== 'string' || typeof row['mediaType'] !== 'string') throw new ConflictException('Visual resource receipt is invalid');
+        const asset = ref['type'] === 'project'
+          ? await this.prisma.asset.findFirst({ where: { projectId: project, id: ref['id'], state: 'AVAILABLE' }, select: { bucket: true, objectKey: true, sha256: true, mediaType: true } })
+          : await this.prisma.workspaceVisualAsset.findFirst({ where: { workspaceId: projectRow.workspaceId, id: ref['id'] }, select: { bucket: true, objectKey: true, sha256: true, mediaType: true } });
+        if (!asset || asset.sha256 !== ref['sha256'] || asset.mediaType !== row['mediaType']) throw new ConflictException('Frozen visual resource changed or is unavailable');
+        await this.assets.read(asset.bucket, asset.objectKey, asset.sha256);
+      }
+      const frames = [];
+      for (const frozen of receipt.frames) {
+        const preview = await this.prisma.visualPreview.findFirst({ where: { projectId: project, revisionId: item.revisionId, frameId: frozen.frameId }, include: { asset: true } });
+        if (!preview || preview.assetId !== frozen.previewAssetId || preview.asset.projectId !== project || preview.asset.state !== 'AVAILABLE'
+          || preview.asset.mediaType !== 'image/png' || preview.asset.sha256 !== frozen.sha256 || preview.rendererVersion !== frozen.rendererVersion
+          || canonicalManifestHash(preview.fontHashes) !== canonicalManifestHash(frozen.fontHashes)
+          || Array.isArray(preview.overflow) && preview.overflow.length > 0) throw new ConflictException('Frozen visual preview receipt changed or is unavailable');
+        const bytes = await this.assets.read(preview.asset.bucket, preview.asset.objectKey, preview.asset.sha256);
+        if (bytes.length < 24 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+          || bytes.toString('ascii', 12, 16) !== 'IHDR' || bytes.readUInt32BE(16) !== frozen.width || bytes.readUInt32BE(20) !== frozen.height) {
+          throw new ConflictException('Frozen visual preview bytes failed validation');
+        }
+        frames.push({ frameId: frozen.frameId, ordinal: frozen.ordinal, bytes });
+      }
+      result.set(item.revisionId, { frames });
+    }
+    return result;
+  }
+
   async build(job: Job, signal?: AbortSignal): Promise<FrozenStage> {
     const { manifest } = await this.prisma.$transaction(tx => this.frozenRequest(tx, job), { maxWait: 5_000, timeout: 30_000 });
     const contents = new Map<string, { kind: ExportContentKind; content: unknown }>();
+    const visualAssets = await this.readVisualAssets(job.projectId, manifest);
     for (const item of manifest.items) {
-      if (item.format === 'ARTICLE') {
+      if (item.format.endsWith('_VISUAL')) {
+        continue;
+      } else if (item.format === 'ARTICLE') {
         const version = await this.prisma.articleVersion.findFirst({ where: { id: item.revisionId, projectId: job.projectId }, select: { content: true, sha256: true } });
         if (!version || version.sha256 !== item.sha256 || canonicalManifestHash(version.content) !== item.sha256) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
         contents.set(item.revisionId, { kind: 'ARTICLE', content: version.content });
@@ -506,11 +659,22 @@ export class ExportService {
         contents.set(item.revisionId, { kind: item.format as Exclude<ExportContentKind, 'ARTICLE'>, content: version.content });
       }
     }
-    const rendered = renderExportFiles(manifest, contents);
+    let rendered: ReturnType<typeof renderExportFiles>;
+    if (manifest.format === 'PNG' || manifest.format === 'PDF') rendered = await renderVisualExportFiles(manifest, visualAssets);
+    else {
+      rendered = renderExportFiles(manifest, contents);
+      if (manifest.format === 'ZIP' && manifest.items.some(item => item.format.endsWith('_VISUAL'))) {
+        const visualFiles = await renderVisualExportFiles(manifest, visualAssets);
+        rendered = [...rendered.slice(0, -2), ...visualFiles, ...rendered.slice(-2)];
+      }
+    }
     const file = manifest.format === 'ZIP'
       ? { bytes: zipExportFiles(rendered), contentType: 'application/zip', filename: 'contextflow-export.zip' }
       : { bytes: rendered[0]!.bytes, contentType: rendered[0]!.contentType, filename: rendered[0]!.name };
     if (signal?.aborted) throw new JobFailure('CANCELLED', 'NOT_SUBMITTED');
+    const ownership = await this.prisma.project.findFirst({ where: { id: job.projectId, archivedAt: null, trashedAt: null,
+      workspace: { archivedAt: null, trashedAt: null } }, select: { workspaceId: true } });
+    if (!ownership) throw new JobFailure('INPUTS_CHANGED', 'KNOWN_FAILED');
     const assetId = randomUUID(), sha256 = createHash('sha256').update(file.bytes).digest('hex');
     let stored: { bucket: string; objectKey: string };
     if (this.assets.config.driver === 'supabase') await this.prisma.$transaction(tx => this.jobs.assertEffects(tx, job.projectId, job.requestedBy, true), { maxWait: 5_000, timeout: 10_000 });
@@ -518,10 +682,12 @@ export class ExportService {
     try { stored = await this.assets.putExport(job.projectId, assetId, file.bytes); }
     catch { throw new JobFailure('TRANSIENT_TRANSPORT', 'NOT_SUBMITTED'); }
     if (signal?.aborted) {
-      await this.cleanupStaged({ bucket: stored.bucket, objectKey: stored.objectKey });
+      await this.cleanupStaged({ bucket: stored.bucket, objectKey: stored.objectKey, projectId: job.projectId, workspaceId: ownership.workspaceId,
+        requestedBy: job.requestedBy });
       throw new JobFailure('CANCELLED', 'NOT_SUBMITTED');
     }
-    return { assetId, bucket: stored.bucket, objectKey: stored.objectKey, sha256, byteSize: file.bytes.byteLength, contentType: file.contentType, filename: file.filename };
+    return { assetId, bucket: stored.bucket, objectKey: stored.objectKey, sha256, byteSize: file.bytes.byteLength, contentType: file.contentType,
+      filename: file.filename, projectId: job.projectId, workspaceId: ownership.workspaceId, requestedBy: job.requestedBy };
   }
 
   async commit(tx: Prisma.TransactionClient, job: Job, result: unknown): Promise<Prisma.InputJsonValue> {
@@ -532,6 +698,7 @@ export class ExportService {
     if (!staged || typeof staged.assetId !== 'string' || typeof staged.bucket !== 'string' || typeof staged.objectKey !== 'string'
       || typeof staged.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(staged.sha256) || !Number.isInteger(staged.byteSize) || Number(staged.byteSize) < 1
       || Number(staged.byteSize) > 10 * 1024 * 1024 || typeof staged.contentType !== 'string' || typeof staged.filename !== 'string'
+      || staged.projectId !== job.projectId || typeof staged.workspaceId !== 'string' || staged.requestedBy !== job.requestedBy
       || !/^[a-z0-9][a-z0-9._-]{0,199}$/iu.test(staged.filename)) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
     const asset = await tx.asset.create({ data: { id: staged.assetId, projectId: job.projectId, bucket: staged.bucket, objectKey: staged.objectKey,
       mediaType: staged.contentType.split(';', 1)[0]!.trim(), bytes: BigInt(Number(staged.byteSize)), sha256: staged.sha256, state: 'AVAILABLE', purpose: 'EXPORT', createdBy: job.requestedBy } });
@@ -542,13 +709,32 @@ export class ExportService {
 
   async cleanupStaged(result: unknown): Promise<void> {
     const staged = record(result);
-    if (!staged || typeof staged.bucket !== 'string' || typeof staged.objectKey !== 'string') return;
+    if (!staged || typeof staged.bucket !== 'string' || typeof staged.objectKey !== 'string' || typeof staged.projectId !== 'string'
+      || typeof staged.workspaceId !== 'string' || typeof staged.requestedBy !== 'string') return;
     const referenced = await this.prisma.asset.findFirst({ where: { bucket: staged.bucket, objectKey: staged.objectKey }, select: { id: true } });
     if (referenced) return;
-    try { await this.assets.remove(staged.bucket, staged.objectKey); }
-    catch {
-      // Retry this exact unreferenced stage once. Surface persistent cleanup failure to the job handler.
+    const existing = await this.prisma.privateObjectDeletion.findUnique({ where: { bucket_objectKey: { bucket: staged.bucket, objectKey: staged.objectKey } }, select: { id: true, state: true } });
+    if (existing?.state === 'DELETED') return;
+    const pending = existing?.state === 'PENDING' ? existing : null;
+    const deletionId = pending?.id ?? randomUUID();
+    if (pending) await this.prisma.privateObjectDeletion.update({ where: { id: deletionId }, data: { retryAfter: new Date(), errorCategory: null } });
+    else {
+      try {
+        await this.prisma.privateObjectDeletion.create({ data: { id: deletionId, projectId: staged.projectId, workspaceId: staged.workspaceId,
+          requestedBy: staged.requestedBy, bucket: staged.bucket, objectKey: staged.objectKey, state: 'PENDING', retryAfter: new Date() } });
+      } catch {
+        const stillUnreferenced = await this.prisma.asset.findFirst({ where: { bucket: staged.bucket, objectKey: staged.objectKey }, select: { id: true } });
+        if (stillUnreferenced) return;
+        try { await this.assets.remove(staged.bucket, staged.objectKey); return; }
+        catch { throw new ServiceUnavailableException('Private staged export asset requires cleanup'); }
+      }
+    }
+    try {
       await this.assets.remove(staged.bucket, staged.objectKey);
+      await this.prisma.privateObjectDeletion.update({ where: { id: deletionId }, data: { state: 'DELETED', deletedAt: new Date(), errorCategory: null } });
+    } catch {
+      await this.prisma.privateObjectDeletion.update({ where: { id: deletionId }, data: { errorCategory: 'STORAGE_UNAVAILABLE',
+        retryAfter: new Date(Date.now() + 30_000) } });
     }
   }
 
@@ -566,6 +752,7 @@ export class ExportService {
 
   async download(userId: string, projectId: string, requestId: string) {
     const request = await this.authorizedRequest(userId, projectId, requestId);
+    await this.readVisualAssets(projectId, exportManifestSchema.parse(request.manifest));
     const asset = request.artifact!.asset;
     const bytes = await this.assets.read(asset.bucket, asset.objectKey, asset.sha256);
     if (BigInt(bytes.byteLength) !== asset.bytes || asset.sha256 !== request.artifact!.sha256 || bytes.byteLength !== request.artifact!.byteSize) {

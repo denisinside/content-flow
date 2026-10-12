@@ -13,9 +13,10 @@ export class PrivateObjectCleanup {
         ORDER BY "createdAt","id" LIMIT 1 FOR UPDATE SKIP LOCKED`;
       const row = rows[0];
       if (!row) return false;
-      const referenced = await tx.asset.findUnique({ where: { bucket_objectKey: { bucket: row.bucket, objectKey: row.objectKey } }, select: { id: true } });
+      const projectAsset = await tx.asset.findUnique({ where: { bucket_objectKey: { bucket: row.bucket, objectKey: row.objectKey } }, select: { id: true } });
+      const workspaceAsset = await tx.workspaceVisualAsset.findUnique({ where: { bucket_objectKey: { bucket: row.bucket, objectKey: row.objectKey } }, select: { id: true } });
       const attempts = row.attempts + 1;
-      if (referenced) {
+      if (projectAsset || workspaceAsset) {
         await tx.privateObjectDeletion.update({ where: { id: row.id }, data: { attempts, errorCategory: 'REFERENCE_CONFLICT', retryAfter: new Date(Date.now() + 86_400_000) } });
         return true;
       }

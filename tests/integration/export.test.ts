@@ -128,6 +128,7 @@ describe('reviewed export packages and private delivery', () => {
       await db.query('DELETE FROM contextflow."WorkspaceStyleRevision" WHERE "workspaceId"=$1', [workspaceId]);
       await db.query('DELETE FROM contextflow."WorkspaceMember" WHERE "workspaceId"=$1', [workspaceId]);
       await db.query('DELETE FROM contextflow."Workspace" WHERE "id"=$1', [workspaceId]);
+      await db.query('DELETE FROM contextflow."PrivateObjectDeletion" WHERE "requestedBy"=ANY($1::uuid[]) AND "state"=\'DELETED\'', [[owner, outsider]]);
       await db.query('DELETE FROM contextflow."UserProfile" WHERE "id"=ANY($1::uuid[])', [[owner, outsider]]);
       await db.query('ALTER TABLE contextflow."Brief" ENABLE TRIGGER "Brief_pointer_guard"');
       for (const table of ownTables) await db.query(`ALTER TABLE contextflow."${table}" ENABLE TRIGGER USER`);

@@ -11,9 +11,10 @@ import { EditorialModule } from './editorial/editorial.module.js';
 import { ExportModule } from './export/export.module.js';
 import { GoogleOAuthModule } from './google-docs/google-oauth.module.js';
 import { PresenceModule } from './presence/presence.module.js';
+import { VisualModule } from './visuals/visual.module.js';
 
 @Module({
-  imports: [FoundationModule, AuthModule, WorkspacesModule, ProjectsModule, SourcesModule, JobsModule, ClaimsModule, EditorialModule, ExportModule, GoogleOAuthModule, PresenceModule],
+  imports: [FoundationModule, AuthModule, WorkspacesModule, ProjectsModule, SourcesModule, JobsModule, ClaimsModule, EditorialModule, ExportModule, GoogleOAuthModule, PresenceModule, VisualModule],
   controllers: [HealthController],
 })
 export class AppModule {}

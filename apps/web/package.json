@@ -10,6 +10,8 @@
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort"
   },
   "dependencies": {
+    "@contextflow/visuals": "workspace:*",
+    "konva": "10.7.1",
     "@tailwindcss/vite": "4.3.3",
     "@tiptap/core": "3.31.4",
     "@tiptap/pm": "3.31.4",

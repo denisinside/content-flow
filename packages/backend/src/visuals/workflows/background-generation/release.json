@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "contextflow-dify-release-v1",
+  "operation": "VISUAL_BACKGROUND_GENERATION",
+  "releaseId": "visual-background-2026-10-13.5",
+  "contractVersion": "visual-background-v1",
+  "promptTemplateVersion": "visual-background-v5",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "5a54542d66f0e3a4de235d465e8d279a5b3a5801a14e44867b2138f0f6ea10b7",
+  "workflowDslFile": "background-generation-v1.yml",
+  "workflowDslSha256": "97dcb1ee6e32bdc117b83ba61f36b832ecb08213cf207c4b3938cbae8a35406e",
+  "runtimeFile": "scripts/dify/background_generation_runtime.py",
+  "runtimeSha256": "25250fbf78b89eeb66383d5571957450a47a24d97f552c3bc63633dc82144ccb",
+  "target": {
+    "difyVersion": "1.17.1",
+    "graphonVersion": "0.7.0",
+    "dslVersion": "0.7.0"
+  },
+  "provider": "dify",
+  "model": {
+    "name": "gemini-nano-banana-2.1",
+    "transport": "dify-gemini-image-generateContent",
+    "plugin": "langgenius/gemini_image",
+    "pluginVersion": "0.1.10",
+    "modelBinding": "prepare.image_model",
+    "reviewModel": "gemini-3.8-flash"
+  },
+  "apiBaseEnv": "DIFY_API_BASE_URL",
+  "apiKeyEnv": "DIFY_VISUAL_BACKGROUND_API_KEY",
+  "publishedWorkflowIdEnv": "DIFY_VISUAL_BACKGROUND_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_VISUAL_BACKGROUND_CONFIG_SHA256",
+  "inputVariable": "visual_json",
+  "outputVariable": "background_files",
+  "reportVariable": "background_report",
+  "responseMode": "streaming",
+  "configDigest": "506d7704899ff2c31d355f0e9db9bae83de7c819007186216b806bfe481992ac"
+}

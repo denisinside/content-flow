@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { PDFDocument } from 'pdf-lib';
 import { canonicalManifestHash } from '../jobs/job-service.js';
-import type { ExportManifest } from './export-contracts.js';
-import { renderExportFiles, zipExportFiles, type ExportFile } from './export-renderer.js';
+import { createExportInput, type ExportManifest } from './export-contracts.js';
+import { renderExportFiles, renderVisualExportFiles, zipExportFiles, type ExportFile } from './export-renderer.js';
 
 const article = {
   title: 'Історія міста',
@@ -215,5 +217,67 @@ describe('deterministic export renderer', () => {
     expect(() => zipExportFiles([file('same.txt'), file('same.txt')])).toThrow(/duplicate/i);
     expect(() => zipExportFiles([file('large.txt', Buffer.alloc(10 * 1024 * 1024 + 1))])).toThrow(/10 MiB/i);
     expect(() => zipExportFiles([file('файл.txt')])).not.toThrow();
+  });
+
+  it('exports the exact approved cover preview PNG bytes', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/zOQAAAAASUVORK5CYII=', 'base64');
+    const digest = createHash('sha256').update(png).digest('hex');
+    const frameId = '11111111-1111-4111-8111-111111111111';
+    const revisionId = '22222222-2222-4222-8222-222222222222';
+    const previewAssetId = '33333333-3333-4333-8333-333333333333';
+    const visualManifest = { schemaVersion: 'export-manifest-v1', projectId: '44444444-4444-4444-8444-444444444444', projectRevision: 1,
+      formats: ['LINKEDIN_COVER_VISUAL'], format: 'PNG', frozenAt: '2026-10-13T10:00:00.000Z', sources: [], items: [{
+        format: 'LINKEDIN_COVER_VISUAL', revisionId, number: 1, sha256: 'a'.repeat(64), contentMode: 'FACTUAL', reviewCounter: 1, provenance: {},
+        visual: { compositionHash: 'a'.repeat(64), width: 1, height: 1, templateIds: ['editorial'], resourceManifest: [], rendererVersion: 'renderer-v1', frames: [
+          { frameId, ordinal: 1, width: 1, height: 1, previewAssetId, sha256: digest, rendererVersion: 'renderer-v1', fontHashes: { onest: 'b'.repeat(64) } },
+        ] },
+      }] } as unknown as ExportManifest;
+    const files = await renderVisualExportFiles(visualManifest, new Map([[revisionId, { frames: [{ frameId, ordinal: 1, bytes: png }] }]]));
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatchObject({ name: 'linkedin-cover.png', contentType: 'image/png' });
+    expect(files[0]!.bytes.equals(png)).toBe(true);
+  });
+
+  it('writes carousel pages in approved order and adds only visual frame PNGs plus PDF to ZIP', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/zOQAAAAASUVORK5CYII=', 'base64');
+    const digest = createHash('sha256').update(png).digest('hex');
+    const revisionId = '22222222-2222-4222-8222-222222222222';
+    const frameIds = ['11111111-1111-4111-8111-111111111111', '55555555-5555-4555-8555-555555555555'];
+    const frames = frameIds.map((frameId, index) => ({ frameId, ordinal: index + 1, width: 1, height: 1, previewAssetId: `33333333-3333-4333-8333-33333333333${index}`,
+      sha256: digest, rendererVersion: 'renderer-v1', fontHashes: { onest: 'b'.repeat(64) } }));
+    const visual = { compositionHash: 'a'.repeat(64), width: 1, height: 1, templateIds: ['editorial'], resourceManifest: [], rendererVersion: 'renderer-v1', frames };
+    const visualManifest = { schemaVersion: 'export-manifest-v1', projectId: '44444444-4444-4444-8444-444444444444', projectRevision: 1,
+      formats: ['LINKEDIN_CAROUSEL_VISUAL'], format: 'PDF', frozenAt: '2026-10-13T10:00:00.000Z', sources: [], items: [{ format: 'LINKEDIN_CAROUSEL_VISUAL',
+        revisionId, number: 1, sha256: 'a'.repeat(64), contentMode: 'FACTUAL', reviewCounter: 1, provenance: {}, visual }] } as unknown as ExportManifest;
+    const visualAssets = new Map([[revisionId, { frames: frameIds.map((frameId, index) => ({ frameId, ordinal: index + 1, bytes: png })) }]]);
+    const [pdfFile] = await renderVisualExportFiles(visualManifest, visualAssets);
+    const pdf = await PDFDocument.load(pdfFile!.bytes);
+    expect(pdf.getPages()).toHaveLength(2);
+    expect(pdf.getPages()[0]!.getSize()).toEqual({ width: 1, height: 1 });
+
+    const zipManifest = { ...visualManifest, format: 'ZIP' as const };
+    const textFiles = renderExportFiles(zipManifest, new Map());
+    const visualFiles = await renderVisualExportFiles(zipManifest, visualAssets);
+    const files = [...textFiles.slice(0, -2), ...visualFiles, ...textFiles.slice(-2)];
+    expect(files.map(file => file.name)).toEqual(['linkedin-carousel-01.png', 'linkedin-carousel-02.png', 'linkedin-carousel.pdf', 'manifest.json', 'sources.json']);
+    const entries = unzipStored(zipExportFiles(files));
+    expect([...entries.keys()]).toEqual(files.map(file => file.name));
+    expect(entries.get('linkedin-carousel-01.png')!.bytes.equals(png)).toBe(true);
+    expect(entries.get('sources.json')!.bytes.toString('utf8')).toBe('[]\n');
+  });
+
+  it('accepts bounded mixed ZIPs and rejects non-cover PNG or stories PDF selections', () => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    const all = ['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL',
+      'INSTAGRAM_STORIES', 'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT', 'LINKEDIN_COVER_VISUAL',
+      'INSTAGRAM_COVER_VISUAL', 'LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL', 'INSTAGRAM_STORIES_VISUAL'] as const;
+    expect(createExportInput.safeParse({ expectedProjectRevision: 1, commandKey: 'mixed', format: 'ZIP',
+      items: all.map(format => ({ format, revisionId: id, reviewCounter: 1 })) }).success).toBe(true);
+    expect(createExportInput.safeParse({ expectedProjectRevision: 1, commandKey: 'cover', format: 'PNG',
+      items: [{ format: 'INSTAGRAM_COVER_VISUAL', revisionId: id, reviewCounter: 1 }] }).success).toBe(true);
+    expect(createExportInput.safeParse({ expectedProjectRevision: 1, commandKey: 'stories', format: 'PDF',
+      items: [{ format: 'INSTAGRAM_STORIES_VISUAL', revisionId: id, reviewCounter: 1 }] }).success).toBe(false);
+    expect(createExportInput.safeParse({ expectedProjectRevision: 1, commandKey: 'visual-text', format: 'MARKDOWN',
+      items: [{ format: 'LINKEDIN_COVER_VISUAL', revisionId: id, reviewCounter: 1 }] }).success).toBe(false);
   });
 });

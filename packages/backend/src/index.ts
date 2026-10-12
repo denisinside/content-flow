@@ -55,6 +55,12 @@ export type { ArticleProviderInput, ArticleWorkflowSettings } from './editorial/
 export { createArticleJobHandler } from './editorial/article-jobs-handler.js';
 export { TelegramService } from './editorial/telegram.service.js';
 export { ScriptService } from './editorial/script.service.js';
+export { VisualService } from './visuals/visual.service.js';
+export { VisualRenderer } from './visuals/visual-renderer.js';
+export { VisualBackgroundService } from './visuals/background.service.js';
+export { createBackgroundJobHandler } from './visuals/background-jobs-handler.js';
+export { DifyBackgroundProvider, BackgroundProviderError, backgroundWorkflowRelease, backgroundWorkflowSettings } from './visuals/background-provider.js';
+export { backgroundGenerateSchema, backgroundApplySchema } from './visuals/background-contracts.js';
 export { ScriptLanguageService } from './editorial/script-language.service.js';
 export { scriptContentSchema, scriptFrameSchema, scriptMappingSchema, scriptSaveDraftInput, scriptCheckpointInput, scriptReviewInput } from './editorial/script-contracts.js';
 export type { ScriptContent, ScriptFrame } from './editorial/script-contracts.js';

@@ -8,7 +8,7 @@ import { ConfigurationError, loadRuntimeConfig } from '../config.js';
 export const STORAGE_MAX_BYTES = 10 * 1024 * 1024;
 const workspaceRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const objectKeyPattern = /^([0-9a-f-]{36})\/(?:originals|exports)\/([0-9a-f-]{36})$/i;
+const objectKeyPattern = /^([0-9a-f-]{36})\/(?:originals|exports|visuals)\/([0-9a-f-]{36})$/i;
 
 export interface PrivateStorageConfig {
   driver: 'filesystem' | 'supabase';
@@ -117,7 +117,11 @@ export class PrivateAssetStore {
     return this.putObject(projectId, assetId, bytes, 'exports');
   }
 
-  private async putObject(projectId: string, assetId: string, bytes: Buffer, purpose: 'originals' | 'exports'): Promise<{ bucket: string; objectKey: string }> {
+  async putWorkspaceVisual(workspaceId: string, assetId: string, bytes: Buffer): Promise<{ bucket: string; objectKey: string }> {
+    return this.putObject(workspaceId, assetId, bytes, 'visuals');
+  }
+
+  private async putObject(projectId: string, assetId: string, bytes: Buffer, purpose: 'originals' | 'exports' | 'visuals'): Promise<{ bucket: string; objectKey: string }> {
     if (!uuid.test(projectId) || !uuid.test(assetId) || !bytes.length || bytes.length > STORAGE_MAX_BYTES) {
       throw new ServiceUnavailableException('Private file integrity check failed');
     }

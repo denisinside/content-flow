@@ -30,6 +30,9 @@ model UserProfile {
   acceptedInvites WorkspaceInvite[] @relation("InviteAcceptor")
   exportRequests ExportRequest[] @relation("ExportRequester")
   styleRevisions WorkspaceStyleRevision[]
+  createdWorkspaceVisualAssets WorkspaceVisualAsset[] @relation("WorkspaceVisualAssetCreator")
+  visualDrafts VisualCompositionDraft[] @relation("VisualDraftEditor")
+  visualRevisions VisualCompositionRevision[] @relation("VisualRevisionCreator")
   createdAssets Asset[] @relation("AssetCreator")
   createdMaterials Material[] @relation("MaterialCreator")
   createdSnapshots SourceSnapshot[] @relation("SnapshotCreator")
@@ -92,6 +95,7 @@ model Workspace {
   members WorkspaceMember[]
   invites WorkspaceInvite[]
   styles WorkspaceStyleRevision[]
+  visualAssets WorkspaceVisualAsset[]
   projects Project[]
   @@index([ownerId])
   @@schema("contextflow")
@@ -143,6 +147,8 @@ model WorkspaceStyleRevision {
   adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftStyle")
   adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionStyle")
   reviewedAdaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionReviewedStyle")
+  visualDrafts VisualCompositionDraft[] @relation("VisualDraftStyle")
+  visualRevisions VisualCompositionRevision[] @relation("VisualRevisionStyle")
   @@id([workspaceId, revision])
   @@schema("contextflow")
 }
@@ -239,6 +245,7 @@ model Project {
   exportRequests ExportRequest[]
   exportItems ExportItem[]
   exportArtifacts ExportArtifact[]
+  visualCompositions VisualComposition[] @relation("VisualCompositionProjectWorkspace")
   adaptationDrafts AdaptationDraft[] @relation("AdaptationDraftProjectWorkspace")
   adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionProjectWorkspace")
   outline Outline?
@@ -279,6 +286,7 @@ model Asset {
   sourceSnapshots SourceSnapshot[]
   originalMaterials Material[] @relation("MaterialOriginal")
   exportArtifacts ExportArtifact[]
+  visualPreviews VisualPreview[]
   @@unique([projectId, id])
   @@unique([bucket, objectKey])
   @@index([projectId, state, createdAt])
@@ -353,6 +361,7 @@ model SourceSnapshot {
 }
 
 enum JobOperation {
+  VISUAL_BACKGROUND_GENERATION
   WEB_IMPORT
   DOCUMENT_IMPORT
   CLAIM_EXTRACTION
@@ -362,6 +371,33 @@ enum JobOperation {
   EXPORT_BUILD
   GOOGLE_DOCS_SYNC
   @@schema("contextflow")
+}
+
+model VisualBackgroundCandidate {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ compositionRevisionId String @db.Uuid
+ frameId String @db.Uuid
+ jobId String @unique @db.Uuid
+ aiExecutionId String @db.Uuid
+ assetId String @unique @db.Uuid
+ report Json
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([projectId,id])
+ @@schema("contextflow")
+}
+
+model VisualBackgroundApplication {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ candidateId String @db.Uuid
+ commandKey String @db.VarChar(128)
+ inputHash String @db.Char(64)
+ appliedBy String @db.Uuid
+ draftCounter Int
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([projectId,commandKey])
+ @@schema("contextflow")
 }
 
 enum JobStatus {
@@ -508,7 +544,7 @@ model EditorPresence {
 
 model PrivateObjectDeletion {
   id String @id @default(uuid()) @db.Uuid
-  projectId String @db.Uuid
+  projectId String? @db.Uuid
   workspaceId String @db.Uuid
   requestedBy String @db.Uuid
   requester UserProfile @relation("ObjectDeletionRequester", fields: [requestedBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
@@ -1550,6 +1586,8 @@ model AdaptationRevision {
  reviewer UserProfile? @relation("AdaptationReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  reviewedAt DateTime? @db.Timestamptz(3)
  claims AdaptationRevisionClaim[]
+  visualDraftSources VisualCompositionDraft[] @relation("VisualDraftAdaptationParent")
+  visualRevisionSources VisualCompositionRevision[] @relation("VisualRevisionAdaptationParent")
  exportItems ExportItem[] @relation("ExportAdaptationRevision")
  @@unique([projectId,id])
  @@unique([projectId,adaptationId,id])
@@ -1627,6 +1665,8 @@ model ScriptRevision {
  aiExecutionId String? @db.Uuid
  exportItems ExportItem[] @relation("ExportScriptRevision")
  languageSuggestions ScriptLanguageSuggestion[] @relation("ScriptLanguageSuggestionRevision")
+  visualDraftSources VisualCompositionDraft[] @relation("VisualDraftScriptParent")
+  visualRevisionSources VisualCompositionRevision[] @relation("VisualRevisionScriptParent")
  @@unique([projectId,id])
  @@unique([projectId,scriptId,id])
  @@unique([scriptId,number])
@@ -1673,11 +1713,132 @@ model ScriptRevisionClaim {
  @@schema("contextflow")
 }
 
+// User-supplied Workspace brand logos have Workspace ancestry and never point
+// through a Project Asset. Object keys are workspaceUUID/visuals/assetUUID.
+model WorkspaceVisualAsset {
+ id String @id @default(uuid()) @db.Uuid
+ workspaceId String @db.Uuid
+ workspace Workspace @relation(fields:[workspaceId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ bucket String @db.VarChar(63)
+ objectKey String @db.VarChar(1024)
+ mediaType String @db.VarChar(255)
+ bytes BigInt
+ sha256 String @db.Char(64)
+ createdBy String @db.Uuid
+ creator UserProfile @relation("WorkspaceVisualAssetCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([workspaceId,id])
+ @@unique([bucket,objectKey])
+ @@index([workspaceId,createdAt])
+ @@schema("contextflow")
+}
+
+model VisualComposition {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ workspaceId String @db.Uuid
+ project Project @relation("VisualCompositionProjectWorkspace",fields:[projectId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
+ format ProjectFormat
+ revision Int @default(0)
+ currentApprovedRevisionId String? @db.Uuid
+ draft VisualCompositionDraft?
+ revisions VisualCompositionRevision[]
+ @@unique([projectId,format])
+ @@unique([projectId,workspaceId,id])
+ @@schema("contextflow")
+}
+
+model VisualCompositionDraft {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ workspaceId String @db.Uuid
+ compositionId String @unique @db.Uuid
+ composition VisualComposition @relation(fields:[projectId,workspaceId,compositionId],references:[projectId,workspaceId,id],onDelete:Restrict,onUpdate:NoAction)
+ counter Int @default(0)
+ parentKind String @db.VarChar(16)
+ parentRevisionId String @db.Uuid
+ parentAdaptationRevisionId String? @db.Uuid
+ parentScriptRevisionId String? @db.Uuid
+ adaptationParent AdaptationRevision? @relation("VisualDraftAdaptationParent",fields:[projectId,parentAdaptationRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ scriptParent ScriptRevision? @relation("VisualDraftScriptParent",fields:[projectId,parentScriptRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ parentRevisionHash String @db.Char(64)
+ parentReviewCounter Int
+ workspaceStyleRevision Int
+ style WorkspaceStyleRevision @relation("VisualDraftStyle",fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ content Json
+ sha256 String @db.Char(64)
+ updatedBy String @db.Uuid
+ editor UserProfile @relation("VisualDraftEditor",fields:[updatedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ updatedAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([projectId,id])
+ @@unique([projectId,compositionId])
+ @@unique([projectId,workspaceId,compositionId])
+ @@schema("contextflow")
+}
+
+model VisualCompositionRevision {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ workspaceId String @db.Uuid
+ compositionId String @db.Uuid
+ composition VisualComposition @relation(fields:[projectId,workspaceId,compositionId],references:[projectId,workspaceId,id],onDelete:Restrict,onUpdate:NoAction)
+ number Int
+ parentKind String @db.VarChar(16)
+ parentRevisionId String @db.Uuid
+ parentAdaptationRevisionId String? @db.Uuid
+ parentScriptRevisionId String? @db.Uuid
+ adaptationParent AdaptationRevision? @relation("VisualRevisionAdaptationParent",fields:[projectId,parentAdaptationRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ scriptParent ScriptRevision? @relation("VisualRevisionScriptParent",fields:[projectId,parentScriptRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ parentRevisionHash String @db.Char(64)
+ parentReviewCounter Int
+ workspaceStyleRevision Int
+ style WorkspaceStyleRevision @relation("VisualRevisionStyle",fields:[workspaceId,workspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
+ content Json
+ sha256 String @db.Char(64)
+ resourceManifest Json
+ rendererVersion String @db.VarChar(64)
+ createdBy String @db.Uuid
+ creator UserProfile @relation("VisualRevisionCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ approvedBy String? @db.Uuid
+ approvedAt DateTime? @db.Timestamptz(3)
+ withdrawnBy String? @db.Uuid
+ withdrawnAt DateTime? @db.Timestamptz(3)
+ reviewCounter Int @default(0)
+ previews VisualPreview[]
+ exports ExportItem[] @relation("ExportVisualRevision")
+ @@unique([projectId,id])
+ @@unique([projectId,workspaceId,compositionId,id])
+ @@unique([compositionId,number])
+ @@schema("contextflow")
+}
+
+model VisualPreview {
+ id String @id @default(uuid()) @db.Uuid
+ projectId String @db.Uuid
+ workspaceId String @db.Uuid
+ compositionId String @db.Uuid
+ revisionId String @db.Uuid
+ revision VisualCompositionRevision @relation(fields:[projectId,workspaceId,compositionId,revisionId],references:[projectId,workspaceId,compositionId,id],onDelete:Restrict,onUpdate:NoAction)
+ assetId String @db.Uuid
+ asset Asset @relation(fields:[projectId,assetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ frameId String @db.Uuid
+ rendererVersion String @db.VarChar(128)
+ fontHashes Json
+ overflow Json
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([projectId,id])
+ @@unique([projectId,revisionId,frameId])
+ @@schema("contextflow")
+}
+
 enum ExportFormat {
   TXT
   MARKDOWN
   JSON
   ZIP
+  PNG
+  PDF
   @@schema("contextflow")
 }
 
@@ -1715,11 +1876,14 @@ model ExportItem {
   adaptationRevision AdaptationRevision? @relation("ExportAdaptationRevision",fields:[projectId,adaptationRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
   scriptRevisionId String? @db.Uuid
   scriptRevision ScriptRevision? @relation("ExportScriptRevision",fields:[projectId,scriptRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  visualRevisionId String? @db.Uuid
+  visualRevision VisualCompositionRevision? @relation("ExportVisualRevision",fields:[projectId,visualRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
   @@unique([projectId,id])
   @@unique([requestId,ordinal])
   @@unique([requestId,articleVersionId])
   @@unique([requestId,adaptationRevisionId])
   @@unique([requestId,scriptRevisionId])
+  @@unique([requestId,visualRevisionId])
   @@schema("contextflow")
 }
 

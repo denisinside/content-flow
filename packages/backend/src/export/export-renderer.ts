@@ -3,14 +3,18 @@ import { telegramContentSchema, validateFormatContent, type AdaptationFormat } f
 import { canonicalManifestHash } from '../jobs/job-service.js';
 import { scriptContentSchema } from '../editorial/script-contracts.js';
 import type { ExportManifest } from './export-contracts.js';
+import { PDFDocument } from 'pdf-lib';
 
 export type ExportFile = { name: string; bytes: Buffer; contentType: string };
 
 const MAX_EXPORT_BYTES = 10 * 1024 * 1024;
 const CREATIVE_LABEL = '[Авторський текст · без перевіреної фактичної основи]';
 export type ExportContentKind = 'ARTICLE' | 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT';
+export type ExportVisualFrame = { frameId: string; ordinal: number; bytes: Buffer };
+export type ExportVisual = { frames: ExportVisualFrame[] };
 const formatOrder: Record<ExportContentKind, number> = { ARTICLE: 0, TELEGRAM_POST: 1, LINKEDIN_TEXT: 2, LINKEDIN_COVER: 3, INSTAGRAM_COVER: 4,
   LINKEDIN_CAROUSEL: 5, INSTAGRAM_CAROUSEL: 6, INSTAGRAM_STORIES: 7, LINKEDIN_CAROUSEL_SCRIPT: 8, INSTAGRAM_CAROUSEL_SCRIPT: 9, INSTAGRAM_STORIES_SCRIPT: 10 };
+const visualFormatOrder: Record<string, number> = { LINKEDIN_COVER_VISUAL: 11, INSTAGRAM_COVER_VISUAL: 12, LINKEDIN_CAROUSEL_VISUAL: 13, INSTAGRAM_CAROUSEL_VISUAL: 14, INSTAGRAM_STORIES_VISUAL: 15 };
 const utf8 = (value: string) => Buffer.from(value, 'utf8');
 const escapeMarkdown = (value: string) => value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;')
   .replace(/([\\`*_{}\[\]()#+.!|~-])/gu, '\\$1');
@@ -138,7 +142,8 @@ function renderedFile(item: ExportManifest['items'][number], content: unknown, f
   const filename = ({ ARTICLE: 'article', TELEGRAM_POST: 'telegram', LINKEDIN_TEXT: 'linkedin-text',
     LINKEDIN_COVER: 'linkedin-cover', INSTAGRAM_COVER: 'instagram-cover', LINKEDIN_CAROUSEL: 'linkedin-carousel',
     INSTAGRAM_CAROUSEL: 'instagram-carousel', INSTAGRAM_STORIES: 'instagram-stories', LINKEDIN_CAROUSEL_SCRIPT: 'linkedin-carousel-script',
-    INSTAGRAM_CAROUSEL_SCRIPT: 'instagram-carousel-script', INSTAGRAM_STORIES_SCRIPT: 'instagram-stories-script' } as const)[item.format];
+    INSTAGRAM_CAROUSEL_SCRIPT: 'instagram-carousel-script', INSTAGRAM_STORIES_SCRIPT: 'instagram-stories-script' } as Partial<Record<ExportManifest['items'][number]['format'], string>>)[item.format];
+  if (!filename) throw new Error('Visual target cannot be rendered as text');
   const rendered = itemBody(item, content, format === 'MARKDOWN');
   return {
     // Names are chosen from a closed set; no caller-controlled path is used.
@@ -148,15 +153,39 @@ function renderedFile(item: ExportManifest['items'][number], content: unknown, f
   };
 }
 
+function visualStem(format: string): string {
+  return format.toLowerCase().replace('_visual', '').replaceAll('_', '-');
+}
+
+async function visualPdf(item: ExportManifest['items'][number], visual: ExportVisual): Promise<ExportFile> {
+  const receipt = item.visual;
+  if (!receipt || !item.format.endsWith('_CAROUSEL_VISUAL')) throw new Error('PDF export requires a frozen carousel visual');
+  const frames = [...visual.frames].sort((a, b) => a.ordinal - b.ordinal);
+  if (frames.length !== receipt.frames.length || frames.some((frame, index) => frame.frameId !== receipt.frames[index]?.frameId || frame.ordinal !== index + 1)) {
+    throw new Error('Visual PDF frame order does not match the frozen manifest');
+  }
+  const pdf = await PDFDocument.create();
+  for (const frame of frames) {
+    const png = await pdf.embedPng(frame.bytes);
+    if (png.width !== receipt.width || png.height !== receipt.height) throw new Error('Visual PDF page dimensions do not match the approved composition');
+    const page = pdf.addPage([receipt.width, receipt.height]);
+    page.drawImage(png, { x: 0, y: 0, width: receipt.width, height: receipt.height });
+  }
+  return { name: `${visualStem(item.format)}.pdf`, bytes: Buffer.from(await pdf.save({ useObjectStreams: false })), contentType: 'application/pdf' };
+}
+
 export function renderExportFiles(manifest: ExportManifest, contents: Map<string, { kind: ExportContentKind; content: unknown }>): ExportFile[] {
-  const ordered = [...manifest.items].sort((a, b) => formatOrder[a.format as ExportContentKind] - formatOrder[b.format as ExportContentKind]);
+  const ordered = [...manifest.items].sort((a, b) => (formatOrder[a.format as ExportContentKind] ?? visualFormatOrder[a.format]!) - (formatOrder[b.format as ExportContentKind] ?? visualFormatOrder[b.format]!));
   if (new Set(ordered.map(item => item.format)).size !== ordered.length) throw new Error('Export manifest contains duplicate item formats');
   if (manifest.format === 'JSON' && (ordered.length !== 1 || !ordered[0]!.format.endsWith('_SCRIPT'))) throw new Error('JSON export requires exactly one script');
   if (manifest.format === 'TXT' && ordered.some(item => item.format.endsWith('_SCRIPT'))) throw new Error('Script export requires JSON, Markdown or ZIP');
+  const visualItems = ordered.filter(item => item.format.endsWith('_VISUAL'));
+  if (visualItems.length > 0 && manifest.format !== 'ZIP') throw new Error('Visual targets are available only as PNG, PDF or ZIP');
+  if (manifest.format === 'PNG' || manifest.format === 'PDF') throw new Error('Individual visual exports must be rendered from approved preview assets');
   const formats: Array<'TXT' | 'MARKDOWN'> = manifest.format === 'ZIP' ? ['TXT', 'MARKDOWN'] : manifest.format === 'JSON' ? [] : [manifest.format];
   const files: ExportFile[] = [];
   for (const format of formats) {
-    for (const item of ordered.filter(row => !row.format.endsWith('_SCRIPT') || manifest.format === 'MARKDOWN')) {
+    for (const item of ordered.filter(row => !row.format.endsWith('_VISUAL') && (!row.format.endsWith('_SCRIPT') || manifest.format === 'MARKDOWN'))) {
       const stored = contents.get(item.revisionId);
       if (!stored || stored.kind !== item.format) throw new Error('Export content does not match the frozen manifest');
       if (canonicalManifestHash(stored.content) !== item.sha256) throw new Error('Export content hash does not match the frozen manifest');
@@ -191,6 +220,43 @@ export function renderExportFiles(manifest: ExportManifest, contents: Map<string
     files.push({ name: 'sources.json', bytes: utf8(`${canonicalJson(manifest.sources)}\n`), contentType: 'application/json; charset=utf-8' });
   }
   ensureSize(files);
+  return files;
+}
+
+export async function renderVisualExportFiles(manifest: ExportManifest, visuals: Map<string, ExportVisual>): Promise<ExportFile[]> {
+  const ordered = [...manifest.items].filter(item => item.format.endsWith('_VISUAL'))
+    .sort((a, b) => visualFormatOrder[a.format]! - visualFormatOrder[b.format]!);
+  if (!ordered.length) return [];
+  const renderItem = async (item: ExportManifest['items'][number]) => {
+    const receipt = item.visual;
+    const visual = visuals.get(item.revisionId);
+    if (!receipt || !visual) throw new Error('Approved visual preview assets are unavailable');
+    const frames = [...visual.frames].sort((a, b) => a.ordinal - b.ordinal);
+    if (frames.length !== receipt.frames.length || frames.some((frame, index) => frame.frameId !== receipt.frames[index]?.frameId || frame.ordinal !== index + 1)) {
+      throw new Error('Visual frame order does not match the frozen manifest');
+    }
+    return { receipt, frames };
+  };
+  if (manifest.format === 'PNG') {
+    if (ordered.length !== 1 || !ordered[0]!.format.endsWith('_COVER_VISUAL')) throw new Error('PNG export requires one approved cover visual');
+    const item = ordered[0]!;
+    const { frames } = await renderItem(item);
+    if (frames.length !== 1 || !frames[0]?.bytes.length) throw new Error('PNG export requires one approved cover frame');
+    return [{ name: `${visualStem(item.format)}.png`, bytes: Buffer.from(frames[0].bytes), contentType: 'image/png' }];
+  }
+  if (manifest.format === 'PDF') {
+    if (ordered.length !== 1 || !ordered[0]!.format.endsWith('_CAROUSEL_VISUAL')) throw new Error('PDF export requires one approved carousel visual');
+    const item = ordered[0]!;
+    return [await visualPdf(item, visuals.get(item.revisionId)!)];
+  }
+  if (manifest.format !== 'ZIP') throw new Error('Visuals are available only as PNG, PDF or ZIP');
+  const files: ExportFile[] = [];
+  for (const item of ordered) {
+    const { frames } = await renderItem(item);
+    const stem = visualStem(item.format);
+    for (const frame of frames) files.push({ name: `${stem}-${String(frame.ordinal).padStart(2, '0')}.png`, bytes: Buffer.from(frame.bytes), contentType: 'image/png' });
+    if (item.format.endsWith('_CAROUSEL_VISUAL')) files.push(await visualPdf(item, visuals.get(item.revisionId)!));
+  }
   return files;
 }
 

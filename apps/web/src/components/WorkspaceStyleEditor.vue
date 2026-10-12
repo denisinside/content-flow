@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { FONT_CATALOG } from '@contextflow/visuals'
 
 type SettingValue = string | number | boolean
 type Style = { revision: number; brandbook: string; tone: string; settings: Record<string, SettingValue> }
@@ -32,6 +33,11 @@ const keyPattern = /^[A-Za-z][A-Za-z0-9_]{0,79}$/
 const settingCount = computed(() => rows.value.length)
 const dirty = computed(() => !!style.value && serializeDraft() !== baseline.value)
 const canSave = computed(() => !props.disabled && !loading.value && !saving.value && !conflict.value && !!style.value && dirty.value && !fieldError.value)
+const visualSettings = computed(() => Object.fromEntries(rows.value.map(row => [row.key, row.value])))
+const visualBackground = computed({ get: () => typeof visualSettings.value['visualBackground'] === 'string' ? visualSettings.value['visualBackground'] as string : '#ffffff', set: (value: string) => setVisualSetting('visualBackground', value) })
+const visualText = computed({ get: () => typeof visualSettings.value['visualText'] === 'string' ? visualSettings.value['visualText'] as string : '#20262b', set: (value: string) => setVisualSetting('visualText', value) })
+const visualAccent = computed({ get: () => typeof visualSettings.value['visualAccent'] === 'string' ? visualSettings.value['visualAccent'] as string : '#343a40', set: (value: string) => setVisualSetting('visualAccent', value) })
+const visualFont = computed({ get: () => typeof visualSettings.value['visualFont'] === 'string' ? visualSettings.value['visualFont'] as string : 'onest', set: (value: string) => setVisualSetting('visualFont', value) })
 
 function serializeDraft() {
   return JSON.stringify({
@@ -110,6 +116,12 @@ async function load(options: { discard?: boolean; keepDraft?: boolean } = {}) {
 
 function updateRowKind(row: SettingRow) {
   row.value = row.kind === 'boolean' ? false : ''
+}
+
+function setVisualSetting(key: string, value: string) {
+  const row = rows.value.find(item => item.key === key)
+  if (row) { row.kind = 'string'; row.value = value }
+  else rows.value.push({ id: nextRowId++, key, kind: 'string', value })
 }
 
 function addSetting() {
@@ -216,6 +228,36 @@ onBeforeUnmount(() => { requestVersion++ })
       <p class="style-inheritance">
         Ці налаштування доступні учасникам і успадковуються всіма проєктами. У брифі можна уточнити тон для окремого проєкту.
       </p>
+
+      <fieldset
+        class="visual-brand-settings"
+        :disabled="disabled || saving"
+      >
+        <legend>Вигляд візуалів</legend>
+        <p class="field-help">
+          Базові кольори й шрифт для нових композицій. Зміни не перезаписують готові кадри.
+        </p>
+        <label>Тло <input
+          v-model="visualBackground"
+          type="color"
+        ></label>
+        <label>Текст <input
+          v-model="visualText"
+          type="color"
+        ></label>
+        <label>Акцент <input
+          v-model="visualAccent"
+          type="color"
+        ></label>
+        <label class="visual-font-setting">Шрифт <select v-model="visualFont"><option
+          v-for="font in FONT_CATALOG"
+          :key="font.id"
+          :value="font.id"
+        >{{ font.label }}</option></select></label>
+        <p class="field-help visual-logo-help">
+          Логотип можна додати в редакторі візуалу як актив простору.
+        </p>
+      </fieldset>
 
       <div class="style-field">
         <label for="workspace-brandbook">Брендбук</label>
@@ -476,6 +518,13 @@ onBeforeUnmount(() => { requestVersion++ })
 .style-header p, .field-help { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .style-revision, .field-count { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .style-inheritance { max-width: 72ch; margin: 20px 0 28px; color: var(--lead-ink); font-size: 14px; line-height: 1.6; }
+.visual-brand-settings { display:grid; grid-template-columns:repeat(3,minmax(110px,1fr)); gap:12px 18px; margin:0 0 24px; padding:16px 0 20px; border:0; border-bottom:1px solid var(--rule); }
+.visual-brand-settings legend { padding:0; font-size:15px; font-weight:600; }
+.visual-brand-settings .field-help { grid-column:1/-1; margin-top:-8px; }
+.visual-brand-settings label { display:grid; gap:7px; color:var(--ink); font-size:13px; }
+.visual-brand-settings input[type=color] { width:100%; max-width:120px; height:38px; padding:3px; border:1px solid var(--field-rule); background:var(--document); }
+.visual-brand-settings select { width:100%; max-width:230px; min-height:40px; border:1px solid var(--field-rule); border-radius:2px; padding:0 10px; background:var(--document); color:var(--ink); font:inherit; font-size:14px; }
+.visual-brand-settings .visual-logo-help { margin:0; }
 .style-field { display: grid; gap: 8px; padding: 23px 0; border-top: 1px solid var(--rule); }
 .style-field > label, .settings-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .style-field textarea, .setting-row input, .setting-row select, .add-setting input, .add-setting select { width: 100%; min-width: 0; border: 1px solid var(--field-rule); border-radius: 2px; background: var(--document); color: var(--ink); font: inherit; font-size: 14px; }

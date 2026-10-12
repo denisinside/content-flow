@@ -15,6 +15,7 @@ const ArticleWorkspace = defineAsyncComponent(() => import('./ArticleWorkspace.v
 const TelegramWorkspace = defineAsyncComponent(() => import('./TelegramWorkspace.vue'))
 const ScriptWorkspace = defineAsyncComponent(() => import('./ScriptWorkspace.vue'))
 const ExportWorkspace = defineAsyncComponent(() => import('./ExportWorkspace.vue'))
+const VisualWorkspace = defineAsyncComponent(() => import('./VisualWorkspace.vue'))
 
 type ChannelFormat = 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'TELEGRAM_POST'
 type ProjectFormat =
@@ -26,6 +27,8 @@ type ProjectFormat =
   | 'INSTAGRAM_CAROUSEL'
   | 'INSTAGRAM_STORIES'
   | 'TELEGRAM_POST'
+
+type VisualFormat = 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES'
 
 interface Project {
   id: string
@@ -69,6 +72,7 @@ const lifecycleNotice = ref('')
 const nextCursor = ref<string | null>(null)
 const currentProject = ref<Project | null>(null)
 const scriptRefreshEpoch = ref(0)
+const visualDirty = ref(false)
 const historicalArticle = ref(false)
 const listLoading = ref(true)
 const detailLoading = ref(false)
@@ -84,7 +88,7 @@ const conflict = ref(false)
 let requestVersion = 0
 let requestController: AbortController | null = null
 
-const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|channels|telegram|export))?\/?$/i)?.[1] ?? null)
+const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|channels|telegram|visuals|export))?\/?$/i)?.[1] ?? null)
 const isArticle = computed(() => /\/article\/?$/i.test(pathname.value))
 const isChannels = computed(() => /\/(?:channels|telegram)\/?$/i.test(pathname.value))
 const channelFormats = computed(() => (currentProject.value?.formats.filter((format): format is ChannelFormat => ['LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'TELEGRAM_POST'].includes(format)) ?? []))
@@ -95,6 +99,12 @@ const selectedChannelFormat = computed<ChannelFormat>(() => {
 })
 const selectedScriptFormat = computed(() => ['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'].includes(selectedChannelFormat.value) ? selectedChannelFormat.value as 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' : null)
 const isExport = computed(() => /\/export\/?$/i.test(pathname.value))
+const isVisuals = computed(() => /\/visuals\/?$/i.test(pathname.value))
+const visualFormats = computed(() => (currentProject.value?.formats.filter((format): format is VisualFormat => ['LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'].includes(format)) ?? []))
+const selectedVisualFormat = computed<VisualFormat>(() => {
+  const requested = new URLSearchParams(search.value).get('format')
+  return visualFormats.value.includes(requested as VisualFormat) ? requested as VisualFormat : visualFormats.value[0] ?? 'LINKEDIN_COVER'
+})
 const isDetail = computed(() => page.value !== null)
 const isTrashed = computed(() => Boolean(currentProject.value?.trashedAt))
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
@@ -105,6 +115,7 @@ const presencePage = computed(() => {
   if (isArticle.value) return 'article'
   if (isBrief.value) return 'brief'
   if (isSources.value || isFacts.value || isExport.value) return null
+  if (isVisuals.value) return null
   if (isChannels.value) {
     return selectedChannelFormat.value === 'TELEGRAM_POST'
       ? 'telegram'
@@ -134,6 +145,7 @@ function formatUpdatedAt(value: string) {
 
 function routeTo(path: string, push = true) {
   if (`${pathname.value}${search.value}` === path && push) return
+  if (isVisuals.value && visualDirty.value && !window.confirm('У візуалі є незбережені правки. Перейти далі? Правки можна буде відновити в цьому браузері.')) return
   if (saving.value) {
     requestController?.abort()
     requestVersion += 1
@@ -182,6 +194,10 @@ function onProjectLifecycleChanged(result: { action: 'archive' | 'trash' | 'rest
 
 function onPopState() {
   if (window.location.pathname === '/settings' || (window.location.pathname === pathname.value && window.location.search === search.value)) return
+  if (isVisuals.value && visualDirty.value && !window.confirm('У візуалі є незбережені правки. Перейти далі? Правки можна буде відновити в цьому браузері.')) {
+    window.history.pushState({}, '', `${pathname.value}${search.value}`)
+    return
+  }
   requestController?.abort()
   requestVersion += 1
   saving.value = false
@@ -690,7 +706,7 @@ onBeforeUnmount(() => {
         </Button>
 
         <a
-          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isChannels || isExport)"
+          v-if="currentProject && (isSources || isFacts || isBrief || isArticle || isChannels || isVisuals || isExport)"
           class="project-navigation-title"
           :href="`/projects/${currentProject.id}`"
           @click.prevent="routeTo(`/projects/${currentProject.id}`)"
@@ -703,7 +719,7 @@ onBeforeUnmount(() => {
         >
           <a
             :href="`/projects/${currentProject.id}`"
-            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isChannels && !isExport ? 'page' : undefined"
+            :aria-current="!isSources && !isFacts && !isBrief && !isArticle && !isChannels && !isVisuals && !isExport ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}`)"
           >Огляд</a>
           <a
@@ -733,6 +749,12 @@ onBeforeUnmount(() => {
             :aria-current="isChannels ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`)"
           >Канали</a>
+          <a
+            v-if="visualFormats.length"
+            :href="`/projects/${currentProject.id}/visuals?format=${selectedVisualFormat}`"
+            :aria-current="isVisuals ? 'page' : undefined"
+            @click.prevent="routeTo(`/projects/${currentProject.id}/visuals?format=${selectedVisualFormat}`)"
+          >Візуали</a>
           <a
             :href="`/projects/${currentProject.id}/export`"
             :aria-current="isExport ? 'page' : undefined"
@@ -841,6 +863,20 @@ onBeforeUnmount(() => {
             :format="selectedScriptFormat"
             :archived="Boolean(currentProject.archivedAt)"
             @session-expired="emit('session-expired')"
+          />
+        </template><template v-else-if="isVisuals">
+          <VisualWorkspace
+            :key="`${currentProject.id}:${selectedVisualFormat}`"
+            :project-id="currentProject.id"
+            :workspace-id="currentProject.workspaceId"
+            :user-id="userId"
+            :csrf-token="csrfToken"
+            :format="selectedVisualFormat"
+            :formats="visualFormats"
+            :archived="Boolean(currentProject.archivedAt)"
+            @session-expired="emit('session-expired')"
+            @dirty="visualDirty = $event"
+            @format-change="routeTo(`/projects/${currentProject.id}/visuals?format=${$event}`)"
           />
         </template><template v-else-if="isExport">
           <ExportWorkspace

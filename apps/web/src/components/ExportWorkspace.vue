@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 
-type OutputFormat = 'ARTICLE' | 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT'
-type PackageFormat = 'TXT' | 'MARKDOWN' | 'JSON' | 'ZIP'
+type OutputFormat = 'ARTICLE' | 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT' | 'LINKEDIN_COVER_VISUAL' | 'INSTAGRAM_COVER_VISUAL' | 'LINKEDIN_CAROUSEL_VISUAL' | 'INSTAGRAM_CAROUSEL_VISUAL' | 'INSTAGRAM_STORIES_VISUAL'
+type PackageFormat = 'TXT' | 'MARKDOWN' | 'JSON' | 'PNG' | 'PDF' | 'ZIP'
 type ExportStatus = 'REQUESTED' | 'BUILDING' | 'READY' | 'FAILED' | 'CANCELLED' | 'OBSOLETE'
 interface ReadinessItem {
   format: string
@@ -65,15 +65,23 @@ const selectedMatchesReadiness = computed(() => selected.value.length > 0 && sel
 }))
 const canBuild = computed(() => {
   if (props.archived || busy.value || !selectedMatchesReadiness.value) return false
-  if (packageFormat.value === 'ZIP') return selected.value.length >= 1 && selected.value.length <= 11
+  if (packageFormat.value === 'ZIP') return selected.value.length >= 1 && selected.value.length <= 16
   if (selected.value.length !== 1) return false
-  const script = selected.value[0]!.format.endsWith('_SCRIPT')
-  return packageFormat.value === 'JSON' ? script : packageFormat.value === 'TXT' ? !script : true
+  const format = selected.value[0]!.format
+  const script = format.endsWith('_SCRIPT')
+  const visual = format.endsWith('_VISUAL')
+  const coverVisual = ['LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL'].includes(format)
+  const carouselVisual = ['LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL'].includes(format)
+  if (packageFormat.value === 'JSON') return script
+  if (packageFormat.value === 'PNG') return coverVisual
+  if (packageFormat.value === 'PDF') return carouselVisual
+  if (visual) return false
+  return packageFormat.value === 'TXT' ? !script : true
 })
 const readyCount = computed(() => state.value?.items.filter(item => item.ready).length ?? 0)
 
 function supported(item: ReadinessItem): item is ReadinessItem & { format: OutputFormat; revisionId: string; number: number; reviewCounter: number } {
-  return ['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT'].includes(item.format) && !!item.revisionId && item.number !== null && item.reviewCounter !== null
+  return ['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT', 'LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL', 'LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL', 'INSTAGRAM_STORIES_VISUAL'].includes(item.format) && !!item.revisionId && item.number !== null && item.reviewCounter !== null
 }
 function isSelected(item: ReadinessItem) {
   return supported(item) && selected.value.some(row => row.format === item.format && row.revisionId === item.revisionId && row.reviewCounter === item.reviewCounter)
@@ -88,21 +96,25 @@ function toggle(item: ReadinessItem) {
     selected.value.push({ format: item.format, revisionId: item.revisionId, reviewCounter: item.reviewCounter, title: item.title, number: item.number, contentMode: item.contentMode })
   }
   pendingCommand = null
-  if (selected.value.length > 1 && packageFormat.value !== 'ZIP') packageFormat.value = 'ZIP'
-  else if (selected.value.length === 1 && selected.value[0]!.format.endsWith('_SCRIPT') && packageFormat.value === 'TXT') packageFormat.value = 'MARKDOWN'
-  else if (packageFormat.value === 'JSON' && (selected.value.length !== 1 || !selected.value[0]!.format.endsWith('_SCRIPT'))) packageFormat.value = 'MARKDOWN'
+  if (selected.value.length > 1) packageFormat.value = 'ZIP'
+  else if (selected.value.length === 1) packageFormat.value = defaultPackageFormat(selected.value[0]!.format)
 }
 function removeSelection(item: Selection) {
   selected.value = selected.value.filter(row => row.format !== item.format || row.revisionId !== item.revisionId || row.reviewCounter !== item.reviewCounter)
   pendingCommand = null
-  if (packageFormat.value === 'JSON' && (selected.value.length !== 1 || !selected.value[0]!.format.endsWith('_SCRIPT'))) packageFormat.value = 'MARKDOWN'
+  if (selected.value.length === 1) packageFormat.value = defaultPackageFormat(selected.value[0]!.format)
+  else if (selected.value.length > 1) packageFormat.value = 'ZIP'
 }
 function reasonLabel(reason: string) {
   const value = reason.toLowerCase()
+  if (value.includes('visual') && (value.includes('approval') || value.includes('unapproved') || value.includes('not_approved'))) return 'Потрібне окреме погодження візуальної версії.'
+  if (value.includes('visual') && (value.includes('stale') || value.includes('review') || value.includes('changed'))) return 'Візуал або його сценарій змінилися — перегляньте версію.'
   if (value.includes('approval') || value.includes('not_approved') || value.includes('unapproved')) return 'Потрібне погодження редактора.'
   if (value.includes('stale') || value.includes('review') || value.includes('changed')) return 'Залежності змінилися — перегляньте матеріал.'
   if (value.includes('invalid') || value.includes('withdraw') || value.includes('evidence') || value.includes('conflict')) return 'Є недійсна або відкликана фактична основа.'
   if (value.includes('unimplemented') || value.includes('not_implemented') || value.includes('unsupported') || value.includes('not_available')) return 'Цей формат ще не можна експортувати.'
+  if (value.includes('preview') || value.includes('render') || value.includes('overflow')) return 'Потрібно підготувати коректне серверне прев’ю всіх кадрів.'
+  if (value.includes('asset') || value.includes('frame')) return 'Не готове потрібне зображення або кадр.'
   if (value.includes('missing') || value.includes('required')) return 'Не готові потрібні для цього матеріалу дані.'
   return 'Матеріал поки не готовий до експорту.'
 }
@@ -118,7 +130,19 @@ function formatLabel(format: string) {
   if (format === 'LINKEDIN_CAROUSEL_SCRIPT') return 'Сценарій каруселі LinkedIn'
   if (format === 'INSTAGRAM_CAROUSEL_SCRIPT') return 'Сценарій каруселі Instagram'
   if (format === 'INSTAGRAM_STORIES_SCRIPT') return 'Сценарій історій Instagram'
+  if (format === 'LINKEDIN_COVER_VISUAL') return 'Готова обкладинка LinkedIn'
+  if (format === 'INSTAGRAM_COVER_VISUAL') return 'Готова обкладинка Instagram'
+  if (format === 'LINKEDIN_CAROUSEL_VISUAL') return 'Готова карусель LinkedIn'
+  if (format === 'INSTAGRAM_CAROUSEL_VISUAL') return 'Готова карусель Instagram'
+  if (format === 'INSTAGRAM_STORIES_VISUAL') return 'Готові історії Instagram'
   return 'Інший вибраний формат'
+}
+function defaultPackageFormat(format: OutputFormat): PackageFormat {
+  if (format.endsWith('_SCRIPT')) return 'MARKDOWN'
+  if (format.endsWith('_COVER_VISUAL')) return 'PNG'
+  if (format.endsWith('_CAROUSEL_VISUAL')) return 'PDF'
+  if (format === 'INSTAGRAM_STORIES_VISUAL') return 'ZIP'
+  return 'TXT'
 }
 function statusLabel(status: ExportStatus) {
   return ({ REQUESTED: 'У черзі', BUILDING: 'Готуємо файл', READY: 'Готовий', FAILED: 'Не вдалося підготувати', CANCELLED: 'Скасований', OBSOLETE: 'Входи змінилися' } satisfies Record<ExportStatus, string>)[status]
@@ -257,7 +281,7 @@ onBeforeUnmount(() => {
           Готовність і експорт
         </h1>
         <p class="export-lead">
-          Оберіть погоджені матеріали для файлу. Сценарії можна передати дизайнеру вже зараз; готові слайди з’являться після M5. Статтю включено лише тоді, коли ви її виберете.
+          Оберіть незалежно готові тексти, сценарії та візуали. Обкладинка завантажується як PNG, карусель — як PDF, а змішані матеріали можна зібрати у ZIP. Статтю включено лише тоді, коли ви її виберете.
         </p>
       </div>
     </header>
@@ -302,7 +326,7 @@ onBeforeUnmount(() => {
           v-if="!state.items.length"
           class="export-empty"
         >
-          У проєкті поки немає вибраних текстових форматів для експорту.
+          У проєкті поки немає підготовлених матеріалів для експорту.
         </p>
         <article
           v-for="item in state.items"
@@ -410,6 +434,24 @@ onBeforeUnmount(() => {
             >
             JSON сценарію
           </label>
+          <label :aria-disabled="selected.length !== 1 || !['LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL'].includes(selected[0]?.format ?? '')">
+            <input
+              v-model="packageFormat"
+              type="radio"
+              value="PNG"
+              :disabled="selected.length !== 1 || !['LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL'].includes(selected[0]?.format ?? '')"
+            >
+            PNG обкладинки
+          </label>
+          <label :aria-disabled="selected.length !== 1 || !['LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL'].includes(selected[0]?.format ?? '')">
+            <input
+              v-model="packageFormat"
+              type="radio"
+              value="PDF"
+              :disabled="selected.length !== 1 || !['LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL'].includes(selected[0]?.format ?? '')"
+            >
+            PDF каруселі
+          </label>
           <label><input
             v-model="packageFormat"
             type="radio"
@@ -419,7 +461,7 @@ onBeforeUnmount(() => {
             v-if="packageFormat !== 'ZIP' && selected.length !== 1"
             class="export-muted"
           >
-            TXT і Markdown містять один матеріал. Для кількох виберіть ZIP.
+            Окремий файл містить один матеріал. Для кількох виберіть ZIP.
           </p>
           <p
             v-if="packageFormat === 'JSON' && selected.length === 1 && !selected[0]?.format.endsWith('_SCRIPT')"
@@ -434,10 +476,22 @@ onBeforeUnmount(() => {
             Сценарії доступні як JSON, читабельний Markdown або пакет ZIP.
           </p>
           <p
-            v-if="packageFormat === 'ZIP' && selected.length > 11"
+            v-if="packageFormat === 'PNG' && selected.length === 1 && !selected[0]?.format.endsWith('_COVER_VISUAL')"
+            class="export-muted"
+          >
+            PNG доступний для однієї погодженої обкладинки.
+          </p>
+          <p
+            v-if="packageFormat === 'PDF' && selected.length === 1 && !selected[0]?.format.endsWith('_CAROUSEL_VISUAL')"
+            class="export-muted"
+          >
+            PDF доступний для однієї погодженої каруселі; історії залишаються набором PNG у ZIP.
+          </p>
+          <p
+            v-if="packageFormat === 'ZIP' && selected.length > 16"
             class="export-reasons"
           >
-            ZIP підтримує до одинадцяти вибраних матеріалів.
+            ZIP підтримує до шістнадцяти вибраних матеріалів.
           </p>
         </fieldset>
         <Button
