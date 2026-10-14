@@ -42,8 +42,8 @@ export class SourcesController {
   }
 
   @Post('projects/:projectId/materials')
-  @ApiBody({ schema: { type: 'object', required: ['label', 'purpose', 'text'], additionalProperties: false,
-    properties: { label: { type: 'string', minLength: 1, maxLength: 200 }, purpose: { type: 'string', enum: ['FACTUAL_SOURCE', 'NOTES', 'BRANDBOOK', 'STYLE_SAMPLE', 'SUPPLIED_ARTICLE'] }, text: { type: 'string', minLength: 1, maxLength: 200000 } } } })
+  @ApiBody({ schema: { type: 'object', required: ['purpose', 'text'], additionalProperties: false,
+    properties: { label: { type: 'string', maxLength: 200, description: 'Optional. Defaults to the first 80 characters of the text.' }, purpose: { type: 'string', enum: ['FACTUAL_SOURCE', 'NOTES', 'BRANDBOOK', 'STYLE_SAMPLE', 'SUPPLIED_ARTICLE'] }, text: { type: 'string', minLength: 1, maxLength: 200000 } } } })
   @ApiResponse({ status: 201, type: CreateSourceResultDto })
   @ApiOperation({ summary: 'Create a manual text source and its immutable first snapshot' })
   async createText(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) {
@@ -55,35 +55,41 @@ export class SourcesController {
   @Post('projects/:projectId/materials/upload')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: STORAGE_MAX_BYTES, files: 1, fields: 2 } }))
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ schema: { type: 'object', required: ['file', 'label', 'purpose'], properties: {
-    file: { type: 'string', format: 'binary' }, label: { type: 'string', maxLength: 200 }, purpose: { type: 'string', enum: ['FACTUAL_SOURCE', 'NOTES', 'BRANDBOOK', 'STYLE_SAMPLE', 'SUPPLIED_ARTICLE'] },
+  @ApiBody({ schema: { type: 'object', required: ['file', 'purpose'], properties: {
+    file: { type: 'string', format: 'binary' }, label: { type: 'string', maxLength: 200, description: 'Optional. Defaults to the uploaded filename.' }, purpose: { type: 'string', enum: ['FACTUAL_SOURCE', 'NOTES', 'BRANDBOOK', 'STYLE_SAMPLE', 'SUPPLIED_ARTICLE'] },
   } } })
   @ApiResponse({ status: 201, type: CreateSourceResultDto })
   @ApiOperation({ summary: 'Upload validated UTF-8 TXT or Markdown as a private original and immutable snapshot' })
   async upload(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown,
     @UploadedFile() file?: UploadedFile) {
     const parsed = uploadSourceInput.safeParse(body);
-    if (!parsed.success || !file) throw new BadRequestException('Upload requires a file, label, and purpose');
+    if (!parsed.success || !file) throw new BadRequestException('Upload requires a file and purpose');
     const cookie = cookieValue(request, SESSION_COOKIE);
     if (!cookie) throw new UnauthorizedException('Session expired');
     return this.sources.upload(request.sessionUser.id, id(projectId), cookie, parsed.data, file);
   }
 
   @Post('projects/:projectId/materials/url')
+  @ApiBody({ schema: { type: 'object', required: ['purpose', 'url', 'commandKey'], additionalProperties: false,
+    properties: { label: { type: 'string', maxLength: 200, description: 'Optional. Defaults to the normalized URL.' }, purpose: { type: 'string', enum: ['FACTUAL_SOURCE', 'NOTES', 'BRANDBOOK', 'STYLE_SAMPLE', 'SUPPLIED_ARTICLE'] }, url: { type: 'string', minLength: 1, maxLength: 2048 }, commandKey: { type: 'string', format: 'uuid' } } } })
   @ApiOperation({ summary: 'Create a URL source and durable single-page import using an explicit command key' })
   async importUrl(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) {
     const parsed = importUrlInput.safeParse(body);
-    if (!parsed.success) throw new BadRequestException('URL import requires a label, purpose, URL, and command key');
+    if (!parsed.success) throw new BadRequestException('URL import requires a purpose, URL, and command key');
     return this.sources.importUrl(request.sessionUser.id, id(projectId), parsed.data);
   }
 
   @Post('projects/:projectId/materials/document')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: STORAGE_MAX_BYTES, files: 1, fields: 3 } }))
   @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', required: ['file', 'purpose', 'commandKey'], properties: {
+    file: { type: 'string', format: 'binary' }, label: { type: 'string', maxLength: 200, description: 'Optional. Defaults to the uploaded filename.' },
+    purpose: { type: 'string', enum: ['FACTUAL_SOURCE', 'NOTES', 'BRANDBOOK', 'STYLE_SAMPLE', 'SUPPLIED_ARTICLE'] }, commandKey: { type: 'string', format: 'uuid' },
+  } } })
   @ApiOperation({ summary: 'Retain validated private PDF/DOCX bytes and submit a durable digital-text import with OCR disabled' })
   async importDocument(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown, @UploadedFile() file?: UploadedFile) {
     const parsed = importDocumentInput.safeParse(body);
-    if (!parsed.success || !file) throw new BadRequestException('Document import requires a file, label, purpose, and command key');
+    if (!parsed.success || !file) throw new BadRequestException('Document import requires a file, purpose, and command key');
     const cookie = cookieValue(request, SESSION_COOKIE);
     if (!cookie) throw new UnauthorizedException('Session expired');
     return this.sources.importDocument(request.sessionUser.id, id(projectId), cookie, parsed.data, file);

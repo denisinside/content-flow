@@ -73,6 +73,17 @@ async function fixture(page: Page, emptySources = false, linkedEvidence = false,
       return json({ notice: { version: '1', text: 'Синтетичне повідомлення' }, accepted: consent, acceptedAt: consent ? now : null });
     }
     if (path === '/api/auth/activity') return json({ authenticated: true });
+    if (request.method() === 'GET' && workspaceList.some(item => path === `/api/v1/workspaces/${item.id}/style`)) {
+      return json({ style: { revision: 3, tone: briefRevision.tone, brandbook: '', settings: {} } });
+    }
+    if (path === `${base}/presence` && ['GET', 'POST', 'DELETE'].includes(request.method())) {
+      if (request.method() === 'GET') return json({ page: url.searchParams.get('page'), people: [], ttlSeconds: 60 });
+      const body = request.postDataJSON() as { page: string; clientId: string };
+      expect(['article', 'outline', 'brief', 'telegram', 'linkedin-text', 'linkedin-cover', 'instagram-cover',
+        'linkedin-carousel', 'instagram-carousel', 'instagram-stories']).toContain(body.page);
+      expect(body.clientId).toMatch(/^[0-9a-f-]{36}$/i);
+      return json({ ok: true });
+    }
     if (path === '/api/v1/workspaces' && request.method() === 'GET') return json({ workspaces: workspaceList, nextCursor: null });
     if (path === '/api/v1/workspaces' && request.method() === 'POST') {
       const body = request.postDataJSON() as { name: string };
@@ -469,6 +480,7 @@ test('direct profile route preserves its URL, recovers preference loading and re
   await expect(profile.getByText('Не вдалося завантажити налаштування сесії.', { exact: true })).toBeVisible();
   await profile.getByRole('button', { name: 'Спробувати ще раз', exact: true }).click();
   await expect(page.locator('.profile-current-limit')).toContainText('1 год');
+  await profile.getByRole('checkbox', { name: 'Я прочитав(-ла) повідомлення й погоджуюся на зовнішню обробку матеріалів.', exact: true }).check();
   await profile.getByRole('button', { name: 'Погодитися на зовнішню обробку', exact: true }).click();
   await expect(profile.getByText('Зовнішня обробка · Згоду збережено', { exact: true })).toBeVisible();
   await page.reload();
@@ -530,9 +542,9 @@ test('cancelled workspace selection, creation and joining preserve unsaved edito
   await expect(page.getByLabel('Авторські нотатки', { exact: true })).toHaveValue('Незбережений бриф.');
   await page.goto('/projects');
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
-  await page.getByLabel('Тема проєкту', { exact: true }).fill('Незбережена тема.');
+  await page.getByLabel('Назва й тема проєкту', { exact: true }).fill('Незбережена тема.');
   await choice.click(); await page.getByRole('option', { name: 'Інша редакція', exact: true }).click();
-  await expect(page.getByLabel('Тема проєкту', { exact: true })).toHaveValue('Незбережена тема.');
+  await expect(page.getByLabel('Назва й тема проєкту', { exact: true })).toHaveValue('Незбережена тема.');
   expect(confirmations).toBe(5);
   await assertClean(context);
 });

@@ -1,8 +1,11 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Query, Req, StreamableFile, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Query, Req, Res, ServiceUnavailableException, StreamableFile, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import type { ServerResponse } from 'node:http';
 import { VisualService, VisualBackgroundService, backgroundGenerateSchema, backgroundApplySchema } from '@contextflow/backend';
 import { z } from 'zod';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
+import { SessionService } from '../auth/session-service.js';
+import { cookieValue, SESSION_COOKIE, setCookie } from '../auth/csrf.js';
 
 type VisualState = Awaited<ReturnType<VisualService['get']>>;
 const idSchema = z.uuid();
@@ -21,7 +24,8 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T { const result = schem
 @UseGuards(SessionGuard)
 @Controller('api/v1/projects/:projectId/visuals')
 export class VisualController {
-  constructor(@Inject(VisualService) private readonly visuals: VisualService, @Inject(VisualBackgroundService) private readonly backgrounds: VisualBackgroundService) {}
+  constructor(@Inject(VisualService) private readonly visuals: VisualService, @Inject(VisualBackgroundService) private readonly backgrounds: VisualBackgroundService,
+    @Inject(SessionService) private readonly sessions: SessionService) {}
   @Get('backgrounds')
   backgroundsState(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Query('format') format: string): ReturnType<VisualBackgroundService['list']> {
     return this.backgrounds.list(request.sessionUser.id,id(project),format);
@@ -74,8 +78,12 @@ export class VisualController {
   }
   @Get('assets/:assetId')
   async readAsset(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Param('assetId') assetId: string,
-    @Query('scope') scope: string): Promise<StreamableFile> {
+    @Query('scope') scope: string, @Res({ passthrough: true }) response: ServerResponse): Promise<StreamableFile> {
     const result = await this.visuals.readAsset(request.sessionUser.id, id(project), scope, id(assetId));
+    await this.assertCurrentSession(request, response);
+    await this.visuals.assertAssetReadable(request.sessionUser.id, id(project), scope, id(assetId), result.sha256, result.mediaType);
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('X-Content-Type-Options', 'nosniff');
     return new StreamableFile(result.bytes, { type: result.mediaType, disposition: 'inline', length: result.bytes.length });
   }
   @Post('revisions/:revisionId/preview')
@@ -84,8 +92,22 @@ export class VisualController {
     return this.visuals.preview(request.sessionUser.id, id(project), format, id(revision), parse(previewSchema, body).frameId);
   }
   @Get('preview/:assetId')
-  async readPreview(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Param('assetId') assetId: string): Promise<StreamableFile> {
-    const bytes = await this.visuals.readPreview(request.sessionUser.id, id(project), id(assetId));
-    return new StreamableFile(bytes, { type: 'image/png', disposition: 'inline', length: bytes.length });
+  async readPreview(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Param('assetId') assetId: string,
+    @Res({ passthrough: true }) response: ServerResponse): Promise<StreamableFile> {
+    const result = await this.visuals.readPreviewWithMetadata(request.sessionUser.id, id(project), id(assetId));
+    await this.assertCurrentSession(request, response);
+    await this.visuals.assertPreviewReadable(request.sessionUser.id, id(project), id(assetId), result.sha256);
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    return new StreamableFile(result.bytes, { type: 'image/png', disposition: 'inline', length: result.bytes.length });
+  }
+
+  private async assertCurrentSession(request: AuthenticatedRequest, response: ServerResponse): Promise<void> {
+    const session = await this.sessions.check(cookieValue(request, SESSION_COOKIE), false);
+    if (session.kind === 'unavailable') throw new ServiceUnavailableException('Authentication temporarily unavailable');
+    if (session.kind !== 'active' || session.user.id !== request.sessionUser.id) {
+      setCookie(response, SESSION_COOKIE, '', 0);
+      throw new UnauthorizedException('Session expired');
+    }
   }
 }

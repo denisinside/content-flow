@@ -518,13 +518,14 @@ onBeforeUnmount(() => { requestVersion++ })
 .style-header p, .field-help { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .style-revision, .field-count { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .style-inheritance { max-width: 72ch; margin: 20px 0 28px; color: var(--lead-ink); font-size: 14px; line-height: 1.6; }
-.visual-brand-settings { display:grid; grid-template-columns:repeat(3,minmax(110px,1fr)); gap:12px 18px; margin:0 0 24px; padding:16px 0 20px; border:0; border-bottom:1px solid var(--rule); }
+.visual-brand-settings { display:grid; min-width:0; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px 18px; margin:0 0 24px; padding:16px 0 20px; border:0; border-bottom:1px solid var(--rule); }
 .visual-brand-settings legend { padding:0; font-size:15px; font-weight:600; }
 .visual-brand-settings .field-help { grid-column:1/-1; margin-top:-8px; }
 .visual-brand-settings label { display:grid; gap:7px; color:var(--ink); font-size:13px; }
 .visual-brand-settings input[type=color] { width:100%; max-width:120px; height:38px; padding:3px; border:1px solid var(--field-rule); background:var(--document); }
 .visual-brand-settings select { width:100%; max-width:230px; min-height:40px; border:1px solid var(--field-rule); border-radius:2px; padding:0 10px; background:var(--document); color:var(--ink); font:inherit; font-size:14px; }
 .visual-brand-settings .visual-logo-help { margin:0; }
+@media (max-width:520px) { .visual-brand-settings { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .style-field { display: grid; gap: 8px; padding: 23px 0; border-top: 1px solid var(--rule); }
 .style-field > label, .settings-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .style-field textarea, .setting-row input, .setting-row select, .add-setting input, .add-setting select { width: 100%; min-width: 0; border: 1px solid var(--field-rule); border-radius: 2px; background: var(--document); color: var(--ink); font: inherit; font-size: 14px; }

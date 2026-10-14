@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { test, expect, type APIResponse, type Page } from '@playwright/test';
 
-async function checked<T>(response: APIResponse): Promise<T> { const body = await response.text(); expect(response.ok(), `${response.url()} ${response.status()}: ${body}`).toBe(true); return JSON.parse(body) as T; }
+async function checked<T>(response: Pick<APIResponse, 'text' | 'ok' | 'url' | 'status'>): Promise<T> { const body = await response.text(); expect(response.ok(), `${response.url()} ${response.status()}: ${body}`).toBe(true); return JSON.parse(body) as T; }
 interface ArticleState { article: { revision: number; currentApprovedVersionId: string | null; draft: { origin: string; baseVersionId: string | null; content: { title: string; document: unknown } }; versions: { id: string; number: number; status: string; content: { title: string; document: unknown }; approvedAt: string | null }[] } | null; mappingIssues: { reason: string }[] }
 async function capture(page: Page, name: string) { for (const width of [1440, 1280, 768, 390]) { await page.setViewportSize({ width, height: 900 }); await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: `.codex/artifacts/m32/article-live-${name}-${width}.png`, fullPage: true }); }; await page.setViewportSize({ width: 1440, height: 900 }); }
 
@@ -11,8 +11,12 @@ test('real editor saves and reloads a ready article without outline, checkpoints
   const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await page.goto('/'); await page.getByRole('button', { name: 'Реєстрація' }).click();
   await page.getByLabel(/Ваше ім’я/).fill(`M32 ${nonce.slice(-6)}`); await page.getByLabel('Електронна пошта').fill(`m32-live-${nonce}@example.test`); await page.getByLabel('Пароль').fill('TestOnly!ContextFlow2026'); await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText(`Вітаємо, M32 ${nonce.slice(-6)}`)).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText(`M32 ${nonce.slice(-6)}`, { timeout: 20_000 });
+  await page.goto('/settings#external-processing-notice');
+  await page.getByRole('checkbox', { name: 'Я прочитав(-ла) повідомлення й погоджуюся на зовнішню обробку матеріалів.', exact: true }).check();
   await page.getByRole('button', { name: 'Погодитися на зовнішню обробку' }).click();
+  await expect(page.getByText('Зовнішня обробка · Згоду збережено', { exact: true })).toBeVisible();
+  await page.goto('/projects');
   const session = await checked<{ csrfToken: string; user: { id: string } }>(await page.request.get('/api/auth/session'));
   const headers = { 'X-CSRF-Token': session.csrfToken, Origin: new URL(page.url()).origin };
   const workspace = await checked<{ workspace: { id: string } }>(await page.request.post('/api/v1/workspaces', { headers, data: { name: `M32 acceptance ${nonce}` } }));
@@ -26,7 +30,11 @@ test('real editor saves and reloads a ready article without outline, checkpoints
   const imported = await checked<ArticleState>(await page.request.get(`${base}/article`)); expect(imported.article!.draft.origin).toBe('UNVERIFIED_IMPORTED'); expect(imported.article!.versions).toHaveLength(0);
   await page.reload(); await expect(writing).toContainText('Автобус відкриває двері');
   await writing.fill('Відредагована сцена: пасажир дивиться у вікно.'); await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Зберегти версію' }).click(); await page.getByRole('button', { name: 'Історія версій' }).click(); await page.getByLabel('Переглянув твердження без посилань').check(); await page.getByRole('button', { name: 'Погодити версію 1', exact: true }).click(); await expect(page.getByText(/Погоджено · Версія 1/)).toBeVisible();
+  await page.getByRole('button', { name: 'Зберегти версію' }).click(); await page.getByRole('button', { name: 'Історія версій' }).click(); await page.getByLabel('Переглянув твердження без посилань').check();
+  const firstApprovalResponse = page.waitForResponse(response => response.url().endsWith('/approve') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Погодити версію 1', exact: true }).click();
+  await checked<ArticleState>(await firstApprovalResponse);
+  await expect(page.getByText(/Погоджено · Версія 1/)).toBeVisible();
   const approved = await checked<ArticleState>(await page.request.get(`${base}/article`)); const firstVersion = approved.article!.versions[0]!; expect(firstVersion.status).toBe('APPROVED'); expect(firstVersion.approvedAt).toBeTruthy(); expect(approved.article!.currentApprovedVersionId).toBe(firstVersion.id);
   await capture(page, 'approved-history');
   await writing.fill('Нова сцена для окремої чернетки.'); await expect(page.getByText('Збережено', { exact: true })).toBeVisible(); await page.reload(); await expect(writing).toContainText('Нова сцена для окремої чернетки.');

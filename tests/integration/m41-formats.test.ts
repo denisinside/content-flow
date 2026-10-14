@@ -144,8 +144,11 @@ describe('M4.1 LinkedIn text and Instagram cover', () => {
       approved.push({ format, revisionId: candidate.id, reviewCounter: candidate.reviewCounter });
     }
     const ready = await exports.readiness(owner, projectId);
-    expect(ready.ready).toBe(true);
-    expect(ready.items.filter(item => formats.includes(item.format as typeof formats[number])).every(item => item.ready)).toBe(true);
+    expect(ready.ready).toBe(false);
+    expect(ready.items.find(item => item.format === 'INSTAGRAM_COVER_VISUAL')).toMatchObject({ ready: false, reasons: ['APPROVAL_REQUIRED'] });
+    const selectedItems = ready.items.filter(item => formats.includes(item.format as typeof formats[number]));
+    expect(selectedItems).toHaveLength(formats.length);
+    expect(selectedItems.every(item => item.ready)).toBe(true);
     const frozenExport = await exports.freeze(owner, projectId, { expectedProjectRevision: ready.projectRevision, commandKey: randomUUID(), format: 'ZIP',
       items: approved });
     await worker!.process({ jobId: frozenExport.jobId, ordinal: 1 });

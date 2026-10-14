@@ -410,7 +410,6 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
                   type="button"
                   class="script-frame-tab"
                   :aria-current="selectedFrame === index ? 'step' : undefined"
-                  :aria-label="`Кадр ${index + 1}: ${frameTitle(frame, index)}`"
                   @click="selectedFrame = index"
                   @keydown="onOutlineKeydown($event, index)"
                 >
@@ -425,7 +424,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
                     variant="ghost"
                     size="sm"
                     :disabled="readonly || index === 0"
-                    :aria-label="`Перемістити кадр ${index + 1} вище`"
+                    :aria-label="`Вгору: Перемістити кадр ${index + 1} вище`"
                     @click="moveFrame(index, -1)"
                   >
                     Вгору
@@ -434,7 +433,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
                     variant="ghost"
                     size="sm"
                     :disabled="readonly || index === frames.length - 1"
-                    :aria-label="`Перемістити кадр ${index + 1} нижче`"
+                    :aria-label="`Вниз: Перемістити кадр ${index + 1} нижче`"
                     @click="moveFrame(index, 1)"
                   >
                     Вниз

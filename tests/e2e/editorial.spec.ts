@@ -94,6 +94,7 @@ test('manual article structure approves exact revision; late AI remains an expli
   await expect(page.getByLabel('Назва розділу', { exact: true })).toHaveValue('Поїздка містом');
   await page.getByText('Пропозиція AI · Не застосовано', { exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Пропозиція заголовка AI', exact: true })).toBeVisible();
+  await page.locator('.outline-edit > summary').click();
   await page.getByLabel('Назва розділу', { exact: true }).fill('Незбережений ручний розділ');
   await expect(page.getByRole('button', { name: 'Застосувати структуру', exact: true })).toBeDisabled();
   mkdirSync(artifacts, { recursive: true });

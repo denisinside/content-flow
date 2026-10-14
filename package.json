@@ -31,6 +31,9 @@
     "verify:auth": "pnpm prepare:backend && tsx scripts/check-auth.ts",
     "verify:projects": "pnpm prepare:backend && tsx scripts/check-projects.ts",
     "verify:migrations": "node scripts/verify-test-migrations.mjs",
+    "verify:m62-restore": "pnpm prepare:backend && pnpm --filter @contextflow/api build && tsx scripts/recovery/m62-restore-drill.ts",
+    "verify:m62-worker": "pnpm prepare:backend && node scripts/recovery/m62-worker-process.mjs",
+    "verify:m63-ui": "pnpm --filter @contextflow/web build && playwright test --config playwright.m63.config.ts",
     "verify:workspace-backfill": "node scripts/verify-workspace-backfill.mjs",
     "verify:prisma": "node scripts/verify-prisma.mjs",
     "verify:bootstrap": "node scripts/verify-bootstrap.mjs"
@@ -43,6 +46,7 @@
     "@playwright/test": "1.63.0",
     "@types/node": "24.19.0",
     "@types/pg": "8.23.1",
+    "axe-core": "4.14.0",
     "eslint": "10.11.0",
     "eslint-plugin-vue": "10.11.1",
     "ioredis": "5.11.1",

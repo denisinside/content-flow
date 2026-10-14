@@ -57,19 +57,24 @@ test('real Facts workflow persists exact evidence, immutable approvals and froze
   await page.getByLabel('Електронна пошта').fill(`m23-live-${nonce}@example.test`);
   await page.getByLabel('Пароль').fill(PASSWORD);
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText(`Вітаємо, ${displayName}`)).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText(displayName, { timeout: 20_000 });
   const session = await (await page.request.get('/api/auth/session')).json() as { authenticated: boolean; user: { id: string; displayName: string } };
   expect(session).toMatchObject({ authenticated: true, user: { displayName } });
   const actorId = session.user.id;
+  await page.goto('/settings#external-processing-notice');
+  await page.getByRole('checkbox', { name: 'Я прочитав(-ла) повідомлення й погоджуюся на зовнішню обробку матеріалів.', exact: true }).check();
   await page.getByRole('button', { name: 'Погодитися на зовнішню обробку' }).click();
+  await expect(page.getByText('Зовнішня обробка · Згоду збережено', { exact: true })).toBeVisible();
+  await page.goto('/projects');
 
   await page.goto('/projects');
   await page.getByRole('button', { name: 'Новий простір' }).click();
+  await page.getByRole('button', { name: 'Створити новий простір', exact: true }).click();
   await page.getByLabel('Назва простору').fill(`M23 Live ${nonce}`);
   await page.getByRole('button', { name: 'Створити простір' }).click();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
   const topic = `Live Facts acceptance ${nonce}`;
-  await page.getByLabel('Тема проєкту').fill(topic);
+  await page.getByLabel('Назва й тема проєкту').fill(topic);
   await page.getByRole('checkbox', { name: 'Публікація у LinkedIn', exact: true }).check();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: topic })).toBeVisible();
@@ -149,6 +154,7 @@ test('real Facts workflow persists exact evidence, immutable approvals and froze
   await expect(page.locator('.facts-reader')).toContainText(displayName);
   await page.getByRole('button', { name: /Версія 2 · Потребує перегляду/ }).click();
   await page.reload();
+  await page.locator('.claim-open').filter({ hasText: revisedWording }).click();
   await expect(page.locator('.claim-document')).toHaveText(revisedWording);
   await expect(page.locator('.facts-reader .claim-status')).toHaveText('Потребує перегляду');
   await page.locator('.facts-reader .facts-details').filter({ hasText: 'Історія та схвалення' }).locator('summary').first().click();

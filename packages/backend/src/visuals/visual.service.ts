@@ -513,6 +513,9 @@ export class VisualService {
     } catch (error) { await this.discardStaged(project, staged.workspaceId, user, stored); throw error; }
   }
   async readPreview(user: string, project: string, assetId: string) {
+    return (await this.readPreviewWithMetadata(user, project, assetId)).bytes;
+  }
+  async readPreviewWithMetadata(user: string, project: string, assetId: string) {
     const meta = await this.command(user, project, async tx => {
       const preview = await tx.visualPreview.findFirst({ where: { projectId: project, assetId }, include: { asset: true } });
       if (!preview || preview.asset.mediaType !== 'image/png' || preview.asset.state !== AssetState.AVAILABLE) throw new NotFoundException('Visual preview not found');
@@ -523,7 +526,17 @@ export class VisualService {
       const current = await tx.visualPreview.findFirst({ where: { projectId: project, assetId }, include: { asset: true } });
       if (!current || current.asset.sha256 !== meta.sha256) throw new NotFoundException('Visual preview not found');
     }, false);
-    return bytes;
+    return { bytes, sha256: meta.sha256 };
+  }
+  async assertPreviewReadable(user: string, project: string, assetId: string, expectedSha256: string): Promise<void> {
+    await this.command(user, project, async tx => {
+      const projectRow = await tx.project.findUniqueOrThrow({ where: { id: project }, select: { workspaceId: true } });
+      const preview = await tx.visualPreview.findFirst({ where: { projectId: project, workspaceId: projectRow.workspaceId, assetId },
+        include: { asset: { select: { sha256: true, mediaType: true, state: true } } } });
+      if (!preview || preview.asset.sha256 !== expectedSha256 || preview.asset.mediaType !== 'image/png' || preview.asset.state !== AssetState.AVAILABLE) {
+        throw new NotFoundException('Visual preview not found');
+      }
+    }, false);
   }
   async readAsset(user: string, project: string, scope: string, assetId: string) {
     if (!workspaceScope(scope)) throw new BadRequestException('Invalid visual asset scope');
@@ -543,6 +556,19 @@ export class VisualService {
         : await tx.workspaceVisualAsset.findFirst({ where: { id: assetId, workspaceId: p.workspaceId, sha256: meta.sha256 }, select: { id: true } });
       if (!current) throw new NotFoundException('Visual image not found');
     }, false);
-    return { bytes, mediaType: meta.mediaType };
+    return { bytes, mediaType: meta.mediaType, sha256: meta.sha256 };
+  }
+  async assertAssetReadable(user: string, project: string, scope: string, assetId: string, expectedSha256: string,
+    expectedMediaType: string): Promise<void> {
+    if (!workspaceScope(scope)) throw new BadRequestException('Invalid visual asset scope');
+    await this.command(user, project, async tx => {
+      const p = await tx.project.findUniqueOrThrow({ where: { id: project }, select: { workspaceId: true } });
+      const current = scope === 'PROJECT'
+        ? await tx.asset.findFirst({ where: { id: assetId, projectId: project, sha256: expectedSha256, mediaType: expectedMediaType,
+          state: AssetState.AVAILABLE }, select: { id: true } })
+        : await tx.workspaceVisualAsset.findFirst({ where: { id: assetId, workspaceId: p.workspaceId, sha256: expectedSha256,
+          mediaType: expectedMediaType }, select: { id: true } });
+      if (!current) throw new NotFoundException('Visual image not found');
+    }, false);
   }
 }

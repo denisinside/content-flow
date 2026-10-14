@@ -327,6 +327,7 @@ watch(() => props.refreshEpoch, (next, previous) => {
     <Teleport to="#workspace-header-controls">
       <div
         class="workspace-header-controls"
+        role="group"
         aria-label="Робочий простір"
       >
         <span

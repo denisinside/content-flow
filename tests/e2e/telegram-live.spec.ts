@@ -36,7 +36,7 @@ test('real channels-only DIRECT Telegram approval and exact-input re-review pres
   await checked(await page.request.post(`${base}/brief`, { headers, data: brief }));
   await page.goto(`/projects/${project.project.id}/telegram`);
   await expect(page.getByRole('heading', { name: 'Допис у Telegram' })).toBeVisible();
-  const writing = page.getByRole('textbox', { name: 'Текст допису у Telegram' });
+  const writing = page.getByRole('textbox', { name: 'Текст публікації', exact: true });
   await expect(page.getByText(/працює без статті та структури/)).toBeVisible();
   const before = await checked<{ article: unknown }>(await page.request.get(`${base}/article`)); expect(before.article).toBeNull();
   const editorial = await checked<{ outline: unknown }>(await page.request.get(`${base}/editorial`)); expect(editorial.outline).toBeNull();

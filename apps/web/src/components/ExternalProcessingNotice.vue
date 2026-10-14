@@ -7,12 +7,13 @@ interface NoticeResponse {
   acceptedAt: string | null
 }
 
-const props = defineProps<{ csrfToken: string; userId: string; expanded?: boolean }>()
+const props = defineProps<{ csrfToken: string; userId: string; expanded?: boolean; hideAccepted?: boolean }>()
 const emit = defineEmits<{ 'session-expired': [] }>()
 
 const state = ref<'loading' | 'ready' | 'error'>('loading')
 const notice = ref<NoticeResponse['notice'] | null>(null)
 const accepted = ref(false)
+const checked = ref(false)
 const acceptedAt = ref<string | null>(null)
 const busy = ref(false)
 const errorMessage = ref('')
@@ -26,6 +27,7 @@ function readableDate(value: string | null) {
 }
 
 async function loadNotice() {
+  checked.value = false
   controller?.abort()
   controller = new AbortController()
   const signal = controller.signal
@@ -54,7 +56,7 @@ async function loadNotice() {
 }
 
 async function acceptNotice() {
-  if (accepted.value || busy.value || !notice.value) return
+  if (!checked.value || accepted.value || busy.value || !notice.value) return
   const current = generation
   busy.value = true
   errorMessage.value = ''
@@ -69,7 +71,10 @@ async function acceptNotice() {
       emit('session-expired')
       return
     }
-    if (!response.ok) throw new Error('Не вдалося зберегти згоду. Спробуйте ще раз.')
+    if (!response.ok) {
+      checked.value = false
+      throw new Error('Не вдалося зберегти згоду. Оновіть повідомлення та підтвердьте його знову.')
+    }
     const result = await response.json() as NoticeResponse
     if (current !== generation) return
     notice.value = result.notice
@@ -92,6 +97,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section
+    v-if="!(hideAccepted && state === 'ready' && accepted)"
     id="external-processing-notice"
     tabindex="-1"
     class="external-notice"
@@ -145,13 +151,24 @@ onBeforeUnmount(() => {
     </details>
     <template v-else-if="notice">
       <p class="external-notice-copy">
+        Перед імпортом посилань і використанням зовнішніх сервісів підтвердьте згоду. Вона збережеться у вашому обліковому записі.
+      </p>
+      <p class="external-notice-copy">
         {{ notice.text }}
       </p>
+      <label class="external-notice-checkbox">
+        <input
+          v-model="checked"
+          type="checkbox"
+          :disabled="busy"
+        >
+        <span>Я прочитав(-ла) повідомлення й погоджуюся на зовнішню обробку матеріалів.</span>
+      </label>
       <div class="external-notice-footer">
         <button
           class="external-notice-button external-notice-accept"
           type="button"
-          :disabled="busy"
+          :disabled="busy || !checked"
           @click="acceptNotice"
         >
           {{ busy ? 'Зберігаємо…' : 'Погодитися на зовнішню обробку' }}
@@ -164,6 +181,15 @@ onBeforeUnmount(() => {
       >
         {{ errorMessage }}
       </p>
+      <button
+        v-if="errorMessage"
+        class="external-notice-button"
+        type="button"
+        :disabled="busy"
+        @click="loadNotice"
+      >
+        Оновити повідомлення
+      </button>
     </template>
   </section>
 </template>
@@ -175,6 +201,10 @@ onBeforeUnmount(() => {
 .external-notice-heading h2 { margin: 0; font-family: var(--serif); font-size: 20px; font-weight: 500; }
 .external-notice-copy, .external-notice-error, .external-notice-accepted { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; white-space: pre-line; }
 .external-notice-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.external-notice-checkbox { display: flex; align-items: flex-start; gap: 10px; margin-top: 14px; color: var(--ink); font-size: 13px; line-height: 1.6; cursor: pointer; }
+.external-notice-checkbox input { flex: none; width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--ink); }
+.external-notice-checkbox input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.external-notice-button:disabled { opacity: .5; cursor: not-allowed; }
 .external-notice-disclosure summary { color: var(--evidence, #2c6660); font-size: 12px; cursor: pointer; }
 .external-notice-button { min-height: 36px; padding: 7px 11px; border: 1px solid var(--rule); border-radius: 2px; background: transparent; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
 .external-notice-accept { border-color: var(--copper); background: var(--copper); color: var(--copper-foreground, #fff); }

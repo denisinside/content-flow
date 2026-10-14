@@ -96,7 +96,7 @@ const canReimport = computed(() => selectedMaterial.value?.kind === 'URL' || (se
 const originalUrl = computed(() => /^https?:\/\//i.test(selectedMaterial.value?.sourceUrl ?? '') ? selectedMaterial.value?.sourceUrl : null)
 const textCount = computed(() => text.value.length)
 const editorCount = computed(() => editorText.value.length)
-const canAdd = computed(() => listState.value === 'ready' && !busy.value && !editing.value && label.value.trim().length > 0 && (mode.value === 'upload' || mode.value === 'document' || (mode.value === 'url' && sourceUrl.value.trim().length > 0) || (mode.value === 'text' && textCount.value > 0 && textCount.value <= TEXT_LIMIT)))
+const canAdd = computed(() => listState.value === 'ready' && !busy.value && !editing.value && (mode.value === 'upload' || mode.value === 'document' || (mode.value === 'url' && sourceUrl.value.trim().length > 0) || (mode.value === 'text' && textCount.value > 0 && textCount.value <= TEXT_LIMIT)))
 let commandKey = ''
 let commandPayload = ''
 
@@ -282,15 +282,15 @@ async function addMaterial() {
       response = await fetch(`/api/v1/projects/${encodeURIComponent(props.projectId)}/materials`, {
         method: 'POST', credentials: 'same-origin', signal,
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken },
-        body: JSON.stringify({ label: label.value.trim(), purpose: purpose.value, text: text.value }),
+        body: JSON.stringify({ ...(label.value.trim() ? { label: label.value.trim() } : {}), purpose: purpose.value, text: text.value }),
       })
     } else if (mode.value === 'url') {
-      const payload = JSON.stringify({ label: label.value.trim(), purpose: purpose.value, url: sourceUrl.value.trim() })
+      const payload = JSON.stringify({ ...(label.value.trim() ? { label: label.value.trim() } : {}), purpose: purpose.value, url: sourceUrl.value.trim() })
       if (commandPayload !== payload) { commandKey = crypto.randomUUID(); commandPayload = payload }
       response = await fetch(`/api/v1/projects/${encodeURIComponent(props.projectId)}/materials/url`, {
         method: 'POST', credentials: 'same-origin', signal,
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken },
-        body: JSON.stringify({ label: label.value.trim(), purpose: purpose.value, url: sourceUrl.value.trim(), commandKey }),
+        body: JSON.stringify({ ...(label.value.trim() ? { label: label.value.trim() } : {}), purpose: purpose.value, url: sourceUrl.value.trim(), commandKey }),
       })
     } else {
       const input = document.getElementById('source-file') as HTMLInputElement | null
@@ -299,10 +299,10 @@ async function addMaterial() {
       if (file.size > (mode.value === 'document' ? DOCUMENT_LIMIT : FILE_LIMIT)) throw new Error(mode.value === 'document' ? 'Документ має бути не більшим за 10 МБ.' : 'Файл має бути не більшим за 1 МБ.')
       const form = new FormData()
       form.set('file', file)
-      form.set('label', label.value.trim())
+      if (label.value.trim()) form.set('label', label.value.trim())
       form.set('purpose', purpose.value)
       if (mode.value === 'document') {
-        const payload = JSON.stringify({ label: label.value.trim(), purpose: purpose.value, filename: file.name, size: file.size, lastModified: file.lastModified })
+        const payload = JSON.stringify({ ...(label.value.trim() ? { label: label.value.trim() } : {}), purpose: purpose.value, filename: file.name, size: file.size, lastModified: file.lastModified })
         if (commandPayload !== payload) { commandKey = crypto.randomUUID(); commandPayload = payload }
         form.set('commandKey', commandKey)
       }
@@ -664,11 +664,10 @@ onBeforeUnmount(() => {
               v-model="label"
               class="source-input"
               maxlength="200"
-              required
               placeholder="Наприклад, Інтерв’ю з редакторкою"
               :disabled="busy || archived"
             >
-            <FieldDescription>Коротко назвіть цей матеріал.</FieldDescription>
+            <FieldDescription>Необов’язково. Якщо залишити порожнім, назва з’явиться з тексту, назви файлу або адреси.</FieldDescription>
           </Field>
           <Field class="source-field">
             <FieldLabel for="source-purpose">
@@ -847,7 +846,7 @@ onBeforeUnmount(() => {
               type="button"
               :disabled="archived || busy || detailState === 'loading' || includeBusyId === material.id || (editing && selectedMaterial?.id === material.id)"
               :aria-pressed="material.included"
-              :aria-label="`${material.included ? 'Виключити' : 'Включити'} ${material.label}`"
+              :aria-label="`${material.included ? 'Ураховується' : 'Виключено'}: ${material.included ? 'Виключити' : 'Включити'} ${material.label}`"
               @click="toggleIncluded(material)"
             >
               <span aria-hidden="true">{{ material.included ? '✓' : '＋' }}</span>

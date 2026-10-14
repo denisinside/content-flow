@@ -15,7 +15,7 @@ type VisualState = {
   format: Format; formatSelected: boolean;
   style: { revision: number; revisionId: string; defaults: { background: string; text: string; accent: string; font: string; logo: null } };
   parent: { kind: 'ADAPTATION' | 'SCRIPT'; id: string; sha256: string; reviewCounter: number; content: unknown; staleReasons: string[]; blockingReasons: string[]; eligible: boolean };
-  composition: { id: string; revision: number; draft: { counter: number; content: Composition; sha256: string; parentKind: string; parentRevisionId: string; parentRevisionHash: string; parentReviewCounter: number } | null; revisions: Array<{ id: string; number: number; content: Composition;sha256:string }> } | null;
+  composition: { id: string; revision: number; draft: { counter: number; content: Composition; sha256: string; parentKind: string; parentRevisionId: string; parentRevisionHash: string; parentReviewCounter: number } | null; revisions: Array<{ id: string; number: number; content: Composition; sha256: string; parentKind: string; parentRevisionId: string; parentRevisionHash: string; parentReviewCounter: number; reviewCounter: number; approvedAt: null; withdrawnAt: null; eligible: boolean; staleReasons: string[]; blockingReasons: string[]; hasUnmapped: boolean; previews: [] }> } | null;
 };
 
 const json = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
@@ -50,6 +50,8 @@ function makeState(format: Format, initialized = false): VisualState {
 }
 
 async function fixture(page: Page) {
+  const pageErrors: string[] = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
   const states = new Map<Format, VisualState>(formats.map(format => [format, makeState(format)]));
   const commands: Array<{ path: string; body: Record<string, unknown> }> = [];
   let conflictNextDraft = false;
@@ -111,7 +113,11 @@ async function fixture(page: Page) {
       const format = url.searchParams.get('format') as Format, next = states.get(format)!;
       commands.push({ path, body: request.postDataJSON() as Record<string, unknown> });
       next.composition!.revision++;
-      next.composition!.revisions.unshift({ id: `50000000-0000-4000-8000-${String(next.composition!.revision).padStart(12, '0')}`, number: next.composition!.revision, content: structuredClone(next.composition!.draft!.content),sha256:next.composition!.draft!.sha256 });
+      const draft = next.composition!.draft!;
+      next.composition!.revisions.unshift({ id: `50000000-0000-4000-8000-${String(next.composition!.revision).padStart(12, '0')}`, number: next.composition!.revision,
+        content: structuredClone(draft.content), sha256: draft.sha256, parentKind: draft.parentKind, parentRevisionId: draft.parentRevisionId,
+        parentRevisionHash: draft.parentRevisionHash, parentReviewCounter: draft.parentReviewCounter,
+        reviewCounter: 0, approvedAt: null, withdrawnAt: null, eligible: true, staleReasons: [], blockingReasons: [], hasUnmapped: true, previews: [] });
       next.composition!.draft!.counter++;
       return json(route, structuredClone(next));
     }
@@ -122,7 +128,7 @@ async function fixture(page: Page) {
     if (path === `${base}/visuals/assets/60000000-0000-4000-8000-000000000001`) return route.fulfill({ status: 200, contentType: 'image/png', body: png });
     return json(route, {});
   });
-  return { states, commands, loseApplyResponse:()=>{loseApplyResponse=true;},enableBackground:(unknown=false)=>{backgroundEnabled=true;backgroundUnknown=unknown;},setConflict: () => { conflictNextDraft = true; }, expireSession: () => { sessionExpiredOnVisualGet = true; } };
+  return { states, commands, pageErrors, loseApplyResponse:()=>{loseApplyResponse=true;},enableBackground:(unknown=false)=>{backgroundEnabled=true;backgroundUnknown=unknown;},setConflict: () => { conflictNextDraft = true; }, expireSession: () => { sessionExpiredOnVisualGet = true; } };
 }
 
 test('M5.2 generated background applies explicitly while text remains separately editable',async({page})=>{
@@ -226,9 +232,18 @@ test('text, template, typography and position persist through checkpoint and rel
   await page.getByLabel('Шрифт', { exact: true }).selectOption('source-serif');
   await page.getByLabel('Розмір шрифту').fill('64');
   await page.getByLabel('Колір тексту').fill('#315b70');
+  const finalDraftResponse = page.waitForResponse(response => response.url().includes('/visuals/draft')
+    && response.request().method() === 'POST'
+    && (response.request().postDataJSON() as { composition: Composition }).composition.frames[0]?.layers[0]?.['x'] === 120);
   await page.getByLabel('X', { exact: true }).fill('120');
+  expect((await finalDraftResponse).ok()).toBe(true);
   await expect.poll(() => ctx.states.get('INSTAGRAM_CAROUSEL')!.composition!.draft!.content.frames[0]!.layers[0]!['text']).toBe('Український заголовок з новим формулюванням');
+  await expect(page.getByRole('status').filter({ hasText: /^Чернетку збережено\.$/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Зберегти версію' })).toBeEnabled();
+  const checkpointResponse = page.waitForResponse(response => response.url().includes('/visuals/checkpoint')
+    && response.request().method() === 'POST', { timeout: 10_000 });
   await page.getByRole('button', { name: 'Зберегти версію' }).click();
+  expect((await checkpointResponse).ok()).toBe(true);
   await expect(page.getByRole('status').filter({ hasText: 'Контрольну версію композиції збережено.' })).toBeVisible();
   await page.reload();
   await expect(text).toHaveValue('Український заголовок з новим формулюванням');
@@ -236,6 +251,7 @@ test('text, template, typography and position persist through checkpoint and rel
   await expect(page.getByLabel('Шрифт', { exact: true })).toHaveValue('source-serif');
   await expect(page.getByLabel('Розмір шрифту')).toHaveValue('64');
   await expect(page.getByLabel('X', { exact: true })).toHaveValue('120');
+  expect(ctx.pageErrors).toEqual([]);
 });
 
 test('a private uploaded image is added as an independent editable layer and renders locally', async ({ page }) => {

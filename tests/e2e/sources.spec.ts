@@ -8,6 +8,12 @@ function sourceItem(page: Page, label: string) {
   return page.locator('.source-item-open').filter({ hasText: label });
 }
 
+async function openSourceForm(page: Page) {
+  const disclosure = page.locator('.source-add');
+  if (await disclosure.getAttribute('open') === null) await disclosure.locator(':scope > summary').click();
+  await expect(page.getByLabel('Назва', { exact: true })).toBeVisible();
+}
+
 async function setFormats(page: Page, selected: readonly string[]): Promise<void> {
   const formats = [
     'Стаття',
@@ -30,9 +36,11 @@ async function createWorkspace(page: Page): Promise<void> {
   await page.goto('/projects');
   await expect(page.getByRole('button', { name: 'Новий простір' })).toBeVisible();
   await page.getByRole('button', { name: 'Новий простір' }).click();
-  await page.getByLabel('Назва простору').fill(`M21 Sources ${Date.now()}`);
+  await page.getByRole('button', { name: 'Створити новий простір', exact: true }).click();
+  const name = `M21 Sources ${Date.now()}`;
+  await page.getByLabel('Назва простору').fill(name);
   await page.getByRole('button', { name: 'Створити простір' }).click();
-  await expect(page.getByLabel('Поточний простір')).toHaveValue(/.+/);
+  await expect(page.getByLabel('Поточний простір')).toContainText(name);
 }
 
 async function captureAtWidths(page: Page, state: string): Promise<void> {
@@ -54,21 +62,22 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await page.getByLabel('Електронна пошта').fill(`m21-sources-${nonce}@example.test`);
   await page.getByLabel('Пароль').fill(TEST_PASSWORD);
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText('Вітаємо, M21 Sources Test')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText('M21 Sources Test', { timeout: 20_000 });
 
+  await page.goto('/settings#external-processing-notice');
   await expect(page.getByRole('heading', { name: 'Зовнішня обробка матеріалів' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Погодитися на зовнішню обробку' })).toBeVisible();
 
   await createWorkspace(page);
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
   const topic = `M21 source project ${nonce}`;
-  await page.getByLabel('Тема проєкту').fill(topic);
+  await page.getByLabel('Назва й тема проєкту').fill(topic);
   await setFormats(page, ['Публікація у LinkedIn']);
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: topic })).toBeVisible();
   await page.getByRole('button', { name: 'Відкрити джерела' }).click();
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]+\/sources$/i);
-  await expect(page.getByRole('heading', { name: 'Додати матеріал' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Додати джерело', exact: true })).toBeVisible();
   await expect(page.getByText('Джерел поки немає. Додайте текст або файл вище.')).toBeVisible();
   await captureAtWidths(page, 'empty');
   await page.getByLabel('Назва', { exact: true }).focus();
@@ -104,6 +113,7 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await captureAtWidths(page, 'manual');
 
   const markdown = '# Витяг\n\nЦе файл **Markdown** з українським текстом.';
+  await openSourceForm(page);
   await page.getByRole('button', { name: 'TXT / Markdown' }).click();
   await page.getByLabel('Назва', { exact: true }).fill('Завантажений конспект');
   await page.locator('#source-file').setInputFiles({ name: 'interview.md', mimeType: 'text/markdown', buffer: Buffer.from(markdown, 'utf8') });
@@ -219,6 +229,7 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await expect(page.locator('.source-plain-text')).toContainText(pendingWriteText);
   await expect(page.getByRole('button', { name: 'Завантажити оригінал' })).toBeEnabled();
 
+  await openSourceForm(page);
   await page.getByRole('button', { name: 'Текст', exact: true }).click();
   await page.getByLabel('Назва', { exact: true }).fill('Збережено попри збій списку');
   await page.getByLabel('Текст джерела').fill('Запис уже збережено; збій оновлення списку має видиму дію відновлення.');
@@ -234,6 +245,7 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await expect(sourceItem(page, 'Збережено попри збій списку')).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Оновити список джерел' })).toHaveCount(0);
 
+  await openSourceForm(page);
   await page.getByRole('button', { name: 'TXT / Markdown' }).click();
   await page.getByLabel('Назва', { exact: true }).fill('Відмова зовнішньої обробки');
   await page.locator('#source-file').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Синтетичний тест згоди.', 'utf8') });
@@ -244,12 +256,18 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await expect(page.getByRole('alert')).toContainText('Перевірте повідомлення про зовнішню обробку');
   const noticeLink = page.getByRole('link', { name: 'Переглянути повідомлення й надати потрібну згоду' });
   await expect(noticeLink).toBeVisible();
+  const sourcePath = new URL(page.url()).pathname;
   await noticeLink.click();
+  await page.getByRole('checkbox', { name: 'Я прочитав(-ла) повідомлення й погоджуюся на зовнішню обробку матеріалів.', exact: true }).check();
   await page.getByRole('button', { name: 'Погодитися на зовнішню обробку' }).click();
   await expect(page.getByText(/Згоду збережено/)).toBeVisible();
   await page.reload();
   await expect(page.getByText(/Згоду збережено/)).toBeVisible();
+  await page.goto(sourcePath);
+  await expect(page).toHaveURL(/\/sources$/);
+  await expect(sourceItem(page, 'Збережено попри збій списку')).toBeVisible();
 
+  await openSourceForm(page);
   await page.getByRole('button', { name: 'Текст', exact: true }).click();
   await page.getByLabel('Назва', { exact: true }).fill('Збереження після помилки');
   await page.getByLabel('Текст джерела').fill('Цей текст має залишитися у формі після помилки мережі.');

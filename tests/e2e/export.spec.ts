@@ -91,7 +91,7 @@ test('only selected ready outputs enter the package; missing unselected article 
 
 test('empty project output list explains why there is nothing to package', async ({ page }) => {
   await fixture(page, readiness([]));
-  await expect(page.getByText('У проєкті поки немає вибраних текстових форматів для експорту.')).toBeVisible();
+  await expect(page.getByText('У проєкті поки немає підготовлених матеріалів для експорту.')).toBeVisible();
   await expect(page.getByText('Спочатку виберіть готовий матеріал.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Підготувати файл' })).toBeDisabled();
 });

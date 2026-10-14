@@ -516,7 +516,7 @@ onBeforeUnmount(() => {
               for="project-topic"
               class="workspace-field-label"
             >
-              Тема проєкту
+              Назва й тема проєкту
             </FieldLabel>
             <Textarea
               id="project-topic"
@@ -529,7 +529,7 @@ onBeforeUnmount(() => {
               :disabled="saving"
             />
             <FieldDescription class="field-hint">
-              До 500 символів. Тему можна змінити пізніше.
+              Коротко: про що готуємо матеріал. Це також назва у списку проєктів. Максимум 500 символів; можна змінити пізніше.
             </FieldDescription>
           </Field>
         </FieldGroup>
@@ -687,7 +687,7 @@ onBeforeUnmount(() => {
     <section
       v-else
       id="workspace-task"
-      :aria-labelledby="currentProject ? (isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isChannels ? 'telegram-title' : isExport ? 'export-title' : 'project-detail-title') : undefined"
+      :aria-labelledby="currentProject ? (isTrashed ? 'project-trashed-title' : isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isChannels ? 'telegram-title' : isVisuals ? 'visual-heading' : isExport ? 'export-title' : 'project-detail-title') : undefined"
       class="workspace-content project-detail"
       tabindex="-1"
     >
@@ -979,7 +979,7 @@ onBeforeUnmount(() => {
                   for="project-topic"
                   class="workspace-field-label"
                 >
-                  Тема проєкту
+                  Назва й тема проєкту
                 </FieldLabel>
                 <Textarea
                   id="project-topic"
@@ -991,7 +991,7 @@ onBeforeUnmount(() => {
                   :disabled="saving"
                 />
                 <FieldDescription class="field-hint">
-                  До 500 символів.
+                  Коротко: про що готуємо матеріал. Це також назва у списку проєктів. Максимум 500 символів.
                 </FieldDescription>
               </Field>
             </FieldGroup>

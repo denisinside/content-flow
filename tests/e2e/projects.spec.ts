@@ -35,11 +35,11 @@ async function captureAtWidths(page: Page, state: string): Promise<void> {
 
 async function createWorkspace(page: Page, name: string): Promise<void> {
   await page.goto('/projects');
-  await expect(page.getByRole('heading', { name: 'Робочі простори' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Новий простір', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Новий простір' }).click();
+  await page.getByRole('button', { name: 'Створити новий простір', exact: true }).click();
   await page.getByLabel('Назва простору').fill(name);
   await page.getByRole('button', { name: 'Створити простір' }).click();
-  await expect(page.getByLabel('Поточний простір')).toHaveValue(/.+/);
   await expect(page.getByLabel('Поточний простір')).toContainText(name);
 }
 
@@ -56,10 +56,10 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await page.getByLabel('Електронна пошта').fill(ownerEmail);
   await page.getByLabel('Пароль').fill(TEST_PASSWORD);
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText(`Вітаємо, ${ownerName}`)).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText(`${ownerName}`, { timeout: 20_000 });
 
   await page.goto('/projects');
-  await expect(page.getByText('Створіть простір для команди та її проєктів або прийміть запрошення.')).toBeVisible();
+  await expect(page.getByText('Створіть простір для своїх проєктів або прийміть запрошення.')).toBeVisible();
   await captureAtWidths(page, 'workspace-empty');
   await createWorkspace(page, 'M14 Browser Workspace');
   await expect(page.getByRole('button', { name: 'Створити проєкт' })).toBeVisible();
@@ -79,8 +79,8 @@ test('a real signed-in user can create, list, open and edit a private project', 
   expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
 
   await page.getByRole('button', { name: 'Створити проєкт' }).click();
-  await expect(page.getByLabel('Тема проєкту')).toBeVisible();
-  const reducedTransitionMs = await page.getByLabel('Тема проєкту').evaluate(element => {
+  await expect(page.getByLabel('Назва й тема проєкту')).toBeVisible();
+  const reducedTransitionMs = await page.getByLabel('Назва й тема проєкту').evaluate(element => {
     const duration = getComputedStyle(element).transitionDuration.split(',')[0]?.trim() ?? '0s';
     const amount = Number.parseFloat(duration);
     return duration.endsWith('ms') ? amount : amount * 1000;
@@ -88,31 +88,31 @@ test('a real signed-in user can create, list, open and edit a private project', 
   expect(reducedTransitionMs).toBeLessThanOrEqual(0.01);
   await captureAtWidths(page, 'create');
   const originalTopic = `M13 test project ${Date.now()}`;
-  await page.getByLabel('Тема проєкту').fill(originalTopic);
+  await page.getByLabel('Назва й тема проєкту').fill(originalTopic);
   await setFormats(page, ['Публікація у LinkedIn', 'Обкладинка Instagram']);
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
 
   await expect(page).toHaveURL(/\/projects\/[^/]+$/);
   const projectId = new URL(page.url()).pathname.split('/').at(-1)!;
   await expect(page.getByRole('heading', { name: originalTopic })).toBeVisible();
-  await expect(page.getByText('Публікація у LinkedIn')).toBeVisible();
-  await expect(page.getByText('Обкладинка Instagram')).toBeVisible();
+  await expect(page.getByText('Публікація у LinkedIn', { exact: true })).toBeVisible();
+  await expect(page.getByText('Обкладинка Instagram', { exact: true })).toBeVisible();
   await captureAtWidths(page, 'detail');
 
   await page.getByRole('button', { name: 'Редагувати проєкт' }).click();
-  await expect(page.getByLabel('Тема проєкту')).toHaveValue(originalTopic);
+  await expect(page.getByLabel('Назва й тема проєкту')).toHaveValue(originalTopic);
   const updatedTopic = `${originalTopic} — updated`;
-  await page.getByLabel('Тема проєкту').fill(updatedTopic);
+  await page.getByLabel('Назва й тема проєкту').fill(updatedTopic);
   await setFormats(page, ['Обкладинка Instagram', 'Допис у Telegram']);
   await captureAtWidths(page, 'edit');
   await page.getByRole('button', { name: 'Зберегти зміни' }).click();
 
   await expect(page.getByRole('heading', { name: updatedTopic })).toBeVisible();
-  await expect(page.getByText('Допис у Telegram')).toBeVisible();
+  await expect(page.getByText('Допис у Telegram', { exact: true })).toBeVisible();
   await expect(page.getByText('Публікація у LinkedIn')).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole('heading', { name: updatedTopic })).toBeVisible();
-  await expect(page.getByText('Допис у Telegram')).toBeVisible();
+  await expect(page.getByText('Допис у Telegram', { exact: true })).toBeVisible();
   await page.goto('/projects');
   await expect(page.getByText(updatedTopic, { exact: true })).toBeVisible();
   await captureAtWidths(page, 'list');
@@ -159,7 +159,7 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await page.getByRole('link', { name: updatedTopic, exact: true }).click();
   await page.getByRole('button', { name: 'Редагувати проєкт' }).click();
   const longTopic = 'Д'.repeat(500);
-  await page.getByLabel('Тема проєкту').fill(longTopic);
+  await page.getByLabel('Назва й тема проєкту').fill(longTopic);
   await page.getByRole('button', { name: 'Зберегти зміни' }).click();
   await expect(page.getByRole('heading', { name: longTopic, exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 900 });
@@ -179,7 +179,7 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await page.getByRole('button', { name: 'Усі проєкти' }).click();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
   const articleTopic = `M13 article-only ${Date.now()}`;
-  await page.getByLabel('Тема проєкту').fill(articleTopic);
+  await page.getByLabel('Назва й тема проєкту').fill(articleTopic);
   await expect(page.getByRole('checkbox', { name: 'Стаття' })).not.toBeChecked();
   await expect(page.getByText('Стаття — за бажанням.')).toBeVisible();
   await captureAtWidths(page, 'article-create');
@@ -219,6 +219,7 @@ test('a real signed-in user can create, list, open and edit a private project', 
   await expect(articleProjectRow).not.toContainText('Стаття');
   await expect(page.locator('.project-row').filter({ hasText: longTopic })).not.toContainText('Стаття');
 
+  await page.locator('#account-title').click();
   await page.getByRole('button', { name: 'Вийти' }).click();
   await expect(page.getByRole('heading', { level: 2, name: 'Раді вас бачити' })).toBeVisible();
   const protectedAfterLogout = await page.evaluate(async projectIdValue => {
@@ -237,7 +238,7 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   await page.getByLabel('Електронна пошта').fill(`m13-recovery-${Date.now()}@example.test`);
   await page.getByLabel('Пароль').fill(TEST_PASSWORD);
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText('Вітаємо, M13 Recovery Test')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText('M13 Recovery Test', { timeout: 20_000 });
   await createWorkspace(page, 'M14 Recovery Workspace');
 
   let releaseList!: () => void;
@@ -260,7 +261,7 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   await expect(page.getByRole('alert')).toContainText('Не вдалося завантажити проєкти');
   await captureAtWidths(page, 'unavailable');
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
-  await page.getByLabel('Тема проєкту').fill('Concurrent project settings');
+  await page.getByLabel('Назва й тема проєкту').fill('Concurrent project settings');
   await setFormats(page, ['Допис у Telegram']);
   let releaseRetry!: () => void;
   const heldRetry = new Promise<void>(resolve => { releaseRetry = resolve; });
@@ -277,7 +278,7 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   await expect(page.getByText('Проєктів поки немає', { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
-  await page.getByLabel('Тема проєкту').fill('Concurrent project settings');
+  await page.getByLabel('Назва й тема проєкту').fill('Concurrent project settings');
   await setFormats(page, ['Допис у Telegram']);
   await page.route('**/api/v1/projects*', route => route.fulfill({
     status: 503, contentType: 'application/json', body: JSON.stringify({ message: 'Unavailable' }),
@@ -285,21 +286,21 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await expect(page.getByRole('alert')).toContainText('Не вдалося зберегти');
   await expect(page.getByRole('heading', { name: 'Завантажуємо ваші проєкти' })).toHaveCount(0);
-  await expect(page.getByLabel('Тема проєкту')).toHaveValue('Concurrent project settings');
+  await expect(page.getByLabel('Назва й тема проєкту')).toHaveValue('Concurrent project settings');
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await expect(page).toHaveURL(/\/projects\/[^/]+$/);
   const projectUrl = page.url();
   const secondPage = await context.newPage();
   await secondPage.goto(projectUrl);
   await secondPage.getByRole('button', { name: 'Редагувати проєкт' }).click();
-  await secondPage.getByLabel('Тема проєкту').fill('My unsaved stale edit');
+  await secondPage.getByLabel('Назва й тема проєкту').fill('My unsaved stale edit');
   await page.getByRole('button', { name: 'Редагувати проєкт' }).click();
-  await page.getByLabel('Тема проєкту').fill('Settings saved by the other tab');
+  await page.getByLabel('Назва й тема проєкту').fill('Settings saved by the other tab');
   await page.getByRole('button', { name: 'Зберегти зміни' }).click();
   await expect(page.getByRole('heading', { name: 'Settings saved by the other tab' })).toBeVisible();
   await secondPage.getByRole('button', { name: 'Зберегти зміни' }).click();
   await expect(secondPage.getByRole('alert')).toContainText('Є нові зміни');
-  await expect(secondPage.getByLabel('Тема проєкту')).toHaveValue('My unsaved stale edit');
+  await expect(secondPage.getByLabel('Назва й тема проєкту')).toHaveValue('My unsaved stale edit');
   await captureAtWidths(secondPage, 'conflict');
   await secondPage.getByRole('button', { name: 'Скинути мої зміни й оновити' }).click();
   await expect(secondPage.getByRole('heading', { name: 'Settings saved by the other tab' })).toBeVisible();
@@ -308,14 +309,14 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   // Leaving the edit screen resets its mode, so a list creation form cannot
   // accidentally PATCH the project whose settings were open previously.
   await page.getByRole('button', { name: 'Редагувати проєкт' }).click();
-  await page.getByLabel('Тема проєкту').fill('This edit must be discarded on navigation');
+  await page.getByLabel('Назва й тема проєкту').fill('This edit must be discarded on navigation');
   await page.getByRole('button', { name: 'Усі проєкти' }).click();
-  await expect(page.getByLabel('Тема проєкту')).toHaveCount(0);
+  await expect(page.getByLabel('Назва й тема проєкту')).toHaveCount(0);
   await page.getByRole('link', { name: 'Settings saved by the other tab', exact: true }).click();
   await page.getByRole('button', { name: 'Редагувати проєкт' }).click();
-  await page.getByLabel('Тема проєкту').fill('Discard this edit on browser Back too');
+  await page.getByLabel('Назва й тема проєкту').fill('Discard this edit on browser Back too');
   await page.goBack();
-  await expect(page.getByLabel('Тема проєкту')).toHaveCount(0);
+  await expect(page.getByLabel('Назва й тема проєкту')).toHaveCount(0);
   await page.goForward();
   await expect(page.getByRole('heading', { name: 'Settings saved by the other tab' })).toBeVisible();
 
@@ -323,7 +324,7 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   // has unmounted the workspace. A late reply must not navigate or restore it.
   await page.getByRole('button', { name: 'Усі проєкти' }).click();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
-  await page.getByLabel('Тема проєкту').fill('Delayed create during logout');
+  await page.getByLabel('Назва й тема проєкту').fill('Delayed create during logout');
   await setFormats(page, ['Публікація у LinkedIn']);
   let releaseCreate!: () => void;
   let sawCreate!: () => void;
@@ -343,6 +344,7 @@ test('project loading, outages, edit conflicts and a delayed create survive reco
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await intercepted;
   await expect(page.getByRole('button', { name: 'Зберігаємо…' })).toBeDisabled();
+  await page.locator('#account-title').click();
   await page.getByRole('button', { name: 'Вийти' }).click();
   await expect(page.getByRole('heading', { name: 'Раді вас бачити' })).toBeVisible();
   const loggedOutUrl = page.url();
@@ -363,12 +365,16 @@ test('Workspace switching and targeted invitation consent control nested Project
   await page.getByLabel('Електронна пошта').fill(`m14-owner-${nonce}@example.test`);
   await page.getByLabel('Пароль').fill(TEST_PASSWORD);
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText('Вітаємо, M14 Owner')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText('M14 Owner', { timeout: 20_000 });
   await createWorkspace(page, 'M14 Shared Workspace');
-  const sharedWorkspaceId = await page.getByLabel('Поточний простір').inputValue();
+  const workspaceResponse = await page.request.get('/api/v1/workspaces');
+  expect(workspaceResponse.ok()).toBe(true);
+  const workspaceList = await workspaceResponse.json() as { workspaces: Array<{ id: string; name: string }> };
+  const sharedWorkspaceId = workspaceList.workspaces.find(item => item.name === 'M14 Shared Workspace')!.id;
+  expect(sharedWorkspaceId).toMatch(/^[0-9a-f-]{36}$/i);
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
   const topic = `Shared story ${nonce}`;
-  await page.getByLabel('Тема проєкту').fill(topic);
+  await page.getByLabel('Назва й тема проєкту').fill(topic);
   await setFormats(page, ['Стаття']);
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: topic })).toBeVisible();
@@ -376,7 +382,9 @@ test('Workspace switching and targeted invitation consent control nested Project
   await page.getByRole('button', { name: 'Усі проєкти' }).click();
   await createWorkspace(page, 'M14 Private Workspace');
   await expect(page.getByText('Проєктів поки немає', { exact: true })).toBeVisible();
-  await page.getByLabel('Поточний простір').selectOption(sharedWorkspaceId);
+  await page.getByLabel('Поточний простір').click();
+  await page.getByRole('option', { name: 'M14 Shared Workspace', exact: true }).click();
+  await expect(page.getByLabel('Поточний простір')).toContainText('M14 Shared Workspace');
   await expect(page.getByRole('link', { name: topic, exact: true })).toBeVisible();
 
   const recipientContext = await browser.newContext({ baseURL: webOrigin });
@@ -388,11 +396,11 @@ test('Workspace switching and targeted invitation consent control nested Project
     await recipient.getByLabel('Електронна пошта').fill(recipientEmail);
     await recipient.getByLabel('Пароль').fill(TEST_PASSWORD);
     await recipient.getByRole('button', { name: 'Створити обліковий запис' }).click();
-    await expect(recipient.getByText('Вітаємо, M14 Recipient')).toBeVisible({ timeout: 20_000 });
-    await expect(recipient.getByText('Створіть простір для команди та її проєктів або прийміть запрошення.')).toBeVisible();
+    await expect(recipient.locator('#account-title')).toHaveText('M14 Recipient', { timeout: 20_000 });
+    await expect(recipient.getByText('Створіть простір для своїх проєктів або прийміть запрошення.')).toBeVisible();
     expect((await recipient.request.get(`/api/v1/projects/${projectId}`)).status()).toBe(404);
 
-    await page.getByText('Учасники та керування простором').click();
+    await page.getByRole('button', { name: 'Керування простором', exact: true }).click();
     await page.getByLabel('Запросити людину').fill(recipientEmail);
     await page.getByRole('button', { name: 'Запросити', exact: true }).click();
     const invitationUrl = await page.getByLabel('Посилання для запрошеної людини').inputValue();
@@ -404,10 +412,10 @@ test('Workspace switching and targeted invitation consent control nested Project
     await expect(recipient.getByLabel('Поточний простір')).toContainText('M14 Shared Workspace');
     await expect(recipient.getByRole('link', { name: topic, exact: true })).toBeVisible();
     expect((await recipient.request.get(`/api/v1/projects/${projectId}`)).status()).toBe(200);
-    await recipient.getByText('Учасники та керування простором').click();
+    await recipient.getByRole('button', { name: 'Керування простором', exact: true }).click();
     await recipient.getByRole('button', { name: 'Вийти з простору' }).click();
     await recipient.getByRole('button', { name: 'Підтвердити' }).click();
-    await expect(recipient.getByText('Створіть простір для команди та її проєктів або прийміть запрошення.')).toBeVisible();
+    await expect(recipient.getByText('Створіть простір для своїх проєктів або прийміть запрошення.')).toBeVisible();
     expect((await recipient.request.get(`/api/v1/projects/${projectId}`)).status()).toBe(404);
   } finally {
     await recipientContext.close();

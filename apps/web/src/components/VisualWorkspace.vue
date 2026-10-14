@@ -638,7 +638,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(autosave); controller.abor
 </script>
 
 <template>
-  <main
+  <section
     class="visual-workspace"
     aria-labelledby="visual-heading"
   >
@@ -1090,7 +1090,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(autosave); controller.abor
     >
       {{ notice }}
     </p>
-  </main>
+  </section>
 </template>
 
 <style scoped>

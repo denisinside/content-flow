@@ -25,14 +25,19 @@ test('import progress, immutable comparison, failure recovery and explicit uncer
   await page.getByLabel('Електронна пошта').fill(`m22-imports-${nonce}@example.test`);
   await page.getByLabel('Пароль').fill('TestOnly!ContextFlow2026');
   await page.getByRole('button', { name: 'Створити обліковий запис' }).click();
-  await expect(page.getByText('Вітаємо, M22 Imports Test')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('#account-title')).toHaveText('M22 Imports Test', { timeout: 20_000 });
+  await page.goto('/settings#external-processing-notice');
+  await page.getByRole('checkbox', { name: 'Я прочитав(-ла) повідомлення й погоджуюся на зовнішню обробку матеріалів.', exact: true }).check();
   await page.getByRole('button', { name: 'Погодитися на зовнішню обробку' }).click();
+  await expect(page.getByText('Зовнішня обробка · Згоду збережено', { exact: true })).toBeVisible();
+  await page.goto('/projects');
   await page.goto('/projects');
   await page.getByRole('button', { name: 'Новий простір' }).click();
+  await page.getByRole('button', { name: 'Створити новий простір', exact: true }).click();
   await page.getByLabel('Назва простору').fill(`M22 Imports ${nonce}`);
   await page.getByRole('button', { name: 'Створити простір' }).click();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).click();
-  await page.getByLabel('Тема проєкту').fill(`M22 import project ${nonce}`);
+  await page.getByLabel('Назва й тема проєкту').fill(`M22 import project ${nonce}`);
   await page.getByRole('checkbox', { name: 'Публікація у LinkedIn', exact: true }).check();
   await page.getByRole('button', { name: 'Створити проєкт', exact: true }).last().click();
   await page.getByRole('button', { name: 'Відкрити джерела' }).click();
@@ -148,6 +153,7 @@ test('import progress, immutable comparison, failure recovery and explicit uncer
   await expect(page.getByText('Текст обох копій однаковий. Кожна версія збережена окремо.')).toBeVisible();
   await page.getByRole('button', { name: 'Закрити порівняння' }).click();
 
+  await page.locator('.source-add > summary').click();
   await page.getByRole('button', { name: 'PDF / DOCX' }).click();
   await page.getByLabel('Назва', { exact: true }).fill(fileMaterial.label);
   await page.locator('#source-file').setInputFiles({ name: 'scan.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.7 synthetic browser fixture') });

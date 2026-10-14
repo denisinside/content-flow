@@ -4,6 +4,7 @@ import WorkspaceHub from './components/WorkspaceHub.vue'
 import ProfileSettings from './components/ProfileSettings.vue'
 import SiteFooter from './components/SiteFooter.vue'
 import WorkspaceRecovery from './components/WorkspaceRecovery.vue'
+import ExternalProcessingNotice from './components/ExternalProcessingNotice.vue'
 
 interface User {
   id: string
@@ -476,6 +477,7 @@ onUnmounted(() => {
         <a
           v-if="state === 'signed-in'"
           class="skip-link"
+          tabindex="0"
           href="#workspace-task"
         >До робочої області</a>
         <a
@@ -726,9 +728,6 @@ onUnmounted(() => {
               {{ busy ? 'Зачекайте…' : isRegistering ? 'Створити обліковий запис' : 'Увійти' }}
             </button>
           </form>
-          <p class="privacy-note">
-            За замовчуванням сесія завершується після 24 годин бездіяльності. Особистий ліміт можна змінити після входу.
-          </p>
         </section>
 
         <section
@@ -738,6 +737,7 @@ onUnmounted(() => {
         >
           <ProfileSettings
             v-show="profileOpen"
+            :active="profileOpen"
             :email="user?.email ?? ''"
             :display-name="user?.displayName ?? null"
             :csrf-token="csrfToken"
@@ -851,6 +851,14 @@ onUnmounted(() => {
             :workspaces="workspaces"
             @session-expired="handleProjectSessionExpired"
             @changed="onWorkspaceLifecycleChanged"
+          />
+          <ExternalProcessingNotice
+            v-if="!profileOpen"
+            :key="user?.id ?? ''"
+            :csrf-token="csrfToken"
+            :user-id="user?.id ?? ''"
+            hide-accepted
+            @session-expired="handleProjectSessionExpired"
           />
           <WorkspaceHub
             v-show="!profileOpen"

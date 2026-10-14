@@ -268,7 +268,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main
+  <section
     class="export-workspace"
     aria-labelledby="export-title"
   >
@@ -590,7 +590,7 @@ onBeforeUnmount(() => {
     >
       {{ notice }}
     </p>
-  </main>
+  </section>
 </template>
 
 <style scoped>

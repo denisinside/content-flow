@@ -30,8 +30,8 @@ describe('Google OAuth schema guards on the isolated TEST runtime role', () => {
       await client.query('INSERT INTO contextflow."UserProfile" ("id") VALUES ($1), ($2)', [userId, otherUserId]);
       await client.query(
         `INSERT INTO contextflow."AppSession"
-          ("id", "cookieDigest", "userId", "encryptedProviderTokens", "tokenKeyVersion", "providerTokenExpiresAt", "expiresAt")
-         VALUES ($1, $2, $3, $4, 1, $5, $6), ($7, $8, $9, $4, 1, $5, $6)`,
+          ("id", "cookieDigest", "userId", "encryptedProviderTokens", "tokenKeyVersion", "providerTokenExpiresAt", "createdAt", "lastUserActivityAt", "expiresAt")
+         VALUES ($1, $2, $3, $4, 1, $5, $5, $5, $6), ($7, $8, $9, $4, 1, $5, $5, $5, $6)`,
         [sessionId, randomBytes(32).toString('hex'), userId, 'synthetic-session-ciphertext', timestamp, '2026-10-12T12:00:00.000Z', otherSessionId, randomBytes(32).toString('hex'), otherUserId]
       );
       const createAttempt = async (id: string, owner: string, session: string, expiresAt: string) => client.query(

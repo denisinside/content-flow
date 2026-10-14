@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import ExternalProcessingNotice from './ExternalProcessingNotice.vue'
 
-defineProps<{ email: string; displayName: string | null; csrfToken: string; userId: string }>()
+defineProps<{ email: string; displayName: string | null; csrfToken: string; userId: string; active?: boolean }>()
 defineEmits<{ 'session-expired': []; back: [] }>()
 </script>
 
@@ -56,6 +56,7 @@ defineEmits<{ 'session-expired': []; back: [] }>()
       <slot name="session" />
     </section>
     <ExternalProcessingNotice
+      v-if="active"
       :csrf-token="csrfToken"
       :user-id="userId"
       expanded

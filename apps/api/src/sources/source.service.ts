@@ -11,7 +11,7 @@ import { PrivateAssetStore } from '../storage/private-asset-store.js';
 import { ExternalProcessingService } from '../auth/external-processing.js';
 import { SessionService } from '../auth/session-service.js';
 import { tokenDigest } from '../auth/session-crypto.js';
-import type { AppendSnapshotInput, CreateTextSourceInput, UpdateMaterialInput, UploadSourceInput, ImportUrlInput, ImportDocumentInput, ReimportSourceInput } from './source-input.js';
+import { defaultSourceLabel, type AppendSnapshotInput, type CreateTextSourceInput, type UpdateMaterialInput, type UploadSourceInput, type ImportUrlInput, type ImportDocumentInput, type ReimportSourceInput } from './source-input.js';
 
 const TEXT_MAX_BYTES = 1024 * 1024;
 
@@ -171,12 +171,13 @@ export class SourceService {
 
   async createText(userId: string, projectId: string, input: CreateTextSourceInput) {
     const text = normalizeSourceText(input.text);
+    const label = input.label ?? defaultSourceLabel('TEXT', text);
     sourceFragments(text);
     return this.health.prisma.$transaction(async tx => {
       await this.lockProject(tx, userId, projectId);
       const materialId = randomUUID();
       await tx.material.create({ data: { id: materialId, projectId, kind: MaterialKind.TEXT,
-        purpose: input.purpose, label: input.label, createdBy: userId }, select: { id: true } });
+        purpose: input.purpose, label, createdBy: userId }, select: { id: true } });
       const result = await this.addSnapshot(tx, { userId, projectId, materialId, text, origin: SourceOrigin.MANUAL_TEXT });
       return { material: materialView(await tx.material.findUniqueOrThrow({ where: { projectId_id: { projectId, id: materialId } }, select: MATERIAL_SELECT })),
         snapshot: snapshotView(result.snapshot) };
@@ -185,6 +186,7 @@ export class SourceService {
 
   async upload(userId: string, projectId: string, cookie: string, input: UploadSourceInput, file: UploadedFile) {
     const decoded = decodeSourceFile(file);
+    const label = input.label ?? defaultSourceLabel('FILE', decoded.filename);
     sourceFragments(decoded.text);
     await this.health.prisma.$transaction(tx => this.lockProject(tx, userId, projectId));
     if (this.assets.config.driver === 'supabase') await this.externalProcessing.requireAccepted(userId);
@@ -203,7 +205,7 @@ export class SourceService {
           mediaType: decoded.mediaType, bytes: BigInt(originalBytes.byteLength), sha256: sha256(originalBytes),
           state: 'STAGED', purpose: AssetPurpose.ORIGINAL, createdBy: userId } });
         await tx.material.create({ data: { id: materialId, projectId, kind: MaterialKind.FILE,
-          purpose: input.purpose, label: input.label, createdBy: userId, originalAssetId: assetId, originalFilename: decoded.filename }, select: { id: true } });
+          purpose: input.purpose, label, createdBy: userId, originalAssetId: assetId, originalFilename: decoded.filename }, select: { id: true } });
         const result = await this.addSnapshot(tx, { userId, projectId, materialId, text: decoded.text,
           origin: SourceOrigin.LOCAL_FILE, originalAssetId: assetId, originalFilename: decoded.filename });
         const available = await tx.asset.updateMany({ where: { id: assetId, projectId, state: 'STAGED' }, data: { state: 'AVAILABLE' } });
@@ -254,14 +256,15 @@ export class SourceService {
       if (error instanceof ImportValidationError) throw new BadRequestException(error.message);
       throw error;
     }
-    const requestHash = canonicalManifestHash({ userId, label: input.label, purpose: input.purpose, url });
+    const label = input.label ?? defaultSourceLabel('URL', url);
+    const requestHash = canonicalManifestHash({ userId, label, purpose: input.purpose, url });
     await this.externalProcessing.requireAccepted(userId);
     return this.health.prisma.$transaction(async tx => {
       await this.lockProject(tx, userId, projectId);
       const replay = await this.importReplay(tx, projectId, userId, 'WEB_IMPORT', input.commandKey, requestHash);
       if (replay) return replay;
       const material = await tx.material.create({ data: { id: randomUUID(), projectId, kind: MaterialKind.URL,
-        purpose: input.purpose, label: input.label, sourceUrl: url, createdBy: userId }, select: MATERIAL_SELECT });
+        purpose: input.purpose, label, sourceUrl: url, createdBy: userId }, select: MATERIAL_SELECT });
       const job = await this.jobs.create(tx, { userId, projectId, operation: 'WEB_IMPORT', commandKey: input.commandKey,
         contractVersion: IMPORT_CONTRACT, inputManifest: await this.importManifest(userId, material, requestHash), deadlineMs: 120000 });
       return { material: materialView(material), job: jobView(job) };
@@ -275,7 +278,8 @@ export class SourceService {
       throw error;
     }
     await this.externalProcessing.requireAccepted(userId);
-    const digest = sha256(document.bytes), requestHash = canonicalManifestHash({ userId, label: input.label, purpose: input.purpose,
+    const label = input.label ?? defaultSourceLabel('FILE', document.filename);
+    const digest = sha256(document.bytes), requestHash = canonicalManifestHash({ userId, label, purpose: input.purpose,
       filename: document.filename, mediaType: document.mediaType, sha256: digest });
     const replay = await this.health.prisma.$transaction(async tx => {
       await this.lockProject(tx, userId, projectId);
@@ -295,7 +299,7 @@ export class SourceService {
         await tx.asset.create({ data: { id: assetId, projectId, ...location, mediaType: document.mediaType, bytes: BigInt(document.bytes.length),
           sha256: digest, state: 'AVAILABLE', purpose: 'ORIGINAL', createdBy: userId } });
         const material = await tx.material.create({ data: { id: randomUUID(), projectId, kind: MaterialKind.FILE,
-          purpose: input.purpose, label: input.label, originalAssetId: assetId, originalFilename: document.filename, createdBy: userId }, select: MATERIAL_SELECT });
+          purpose: input.purpose, label, originalAssetId: assetId, originalFilename: document.filename, createdBy: userId }, select: MATERIAL_SELECT });
         const job = await this.jobs.create(tx, { userId, projectId, operation: 'DOCUMENT_IMPORT', commandKey: input.commandKey,
           contractVersion: IMPORT_CONTRACT, inputManifest: await this.importManifest(userId, material, requestHash, { mediaType: document.mediaType, sha256: digest }) });
         used = true;

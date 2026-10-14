@@ -580,14 +580,14 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               aria-label="Жирний"
               @click="format('bold')"
             >
-              <strong>Ж</strong>
+              <strong aria-hidden="true">Ж</strong>
             </button><button
               type="button"
               :aria-pressed="editor?.isActive('italic')"
               aria-label="Курсив"
               @click="format('italic')"
             >
-              <em>К</em>
+              <em aria-hidden="true">К</em>
             </button><button
               type="button"
               :aria-pressed="editor?.isActive('heading', { level: 2 })"
@@ -847,7 +847,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 > Переглянув твердження без посилань</label><Button
                   class="workspace-button workspace-button-primary"
                   :disabled="busy || dirty || conflict || !!version.blockingReasons?.length || !!state.mappingIssues.length || (version.hasUnmapped && !acknowledgeUnmapped)"
-                  @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped, expectedReviewCounter: version.reviewCounter ?? 0 })"
+                  @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped })"
                 >
                   Погодити версію {{ version.number }}
                 </Button>
