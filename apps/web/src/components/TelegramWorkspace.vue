@@ -1,21 +1,22 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
+import SourceMarkdown from './SourceMarkdown.vue'
 
 type InputMode = 'DIRECT' | 'ARTICLE_DERIVED'
 type ContentMode = 'FACTUAL' | 'CREATIVE'
 type ChannelFormat = 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES'
 interface Mapping { startOffset: number; endOffset: number; quote: string; claimRevisionId: string; evidenceId: string; field?: 'text' | 'cover' }
-interface Content { text: string; mappings: Mapping[]; cover?: { text: string; instruction: string } }
-interface Inputs { inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; briefRevisionId: string; basisRevisionId: string | null; sourceArticleVersionId: string | null; workspaceId: string; workspaceStyleRevision: number }
+interface SourceMapping { startOffset: number; endOffset: number; quote: string; passageId: string; packetId: string; field?: 'text' | 'cover' }
+interface SourcePassage { passageId: string; packetId: string; snapshotId: string; quote: string; materialId: string; materialTitle: string; startOffset: number; endOffset: number }
+interface Content { text: string; mappings: Mapping[]; sourceMappings?: SourceMapping[]; cover?: { text: string; instruction: string } }
+interface Inputs { inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; briefRevisionId: string; sourceEvidenceSetId?: string | null; sourceArticleVersionId: string | null; workspaceId: string; workspaceStyleRevision: number }
 interface Draft extends Inputs { content: Content; baseRevisionId: string | null }
-interface RevisionClaim { evidenceId: string; claimRevisionId: string; quote: string; linkedText: string; evidence?: { quote: string; relation: string; invalidatedAt: string | null; snapshotId: string; snapshot: { material: { label: string } } }; claimRevision?: { wording: string } }
-interface Revision extends Inputs { id: string; number: number; content: Content; claims?: RevisionClaim[]; hasUnmapped: boolean; status: 'PROPOSED' | 'APPROVED' | 'WITHDRAWN'; origin: string; reviewCounter: number; approvedAt: string | null; approvedBy: string | null; withdrawnAt: string | null; withdrawalReason: string | null; reviewedBriefRevisionId: string | null; reviewedBasisRevisionId: string | null; reviewedSourceArticleVersionId: string | null; reviewedWorkspaceStyleRevision: number | null; reviewedBy: string | null; reviewedAt: string | null; acknowledgedUnmapped: boolean; staleReasons: string[]; blockingReasons: string[] }
-interface Evidence { claimRevisionId: string; evidenceId: string; wording: string; quote: string; snapshotId: string; materialTitle: string }
+interface Revision extends Inputs { id: string; number: number; content: Content; hasUnmapped: boolean; status: 'PROPOSED' | 'APPROVED' | 'WITHDRAWN'; origin: string; reviewCounter: number; approvedAt: string | null; approvedBy: string | null; withdrawnAt: string | null; withdrawalReason: string | null; reviewedBriefRevisionId: string | null; reviewedSourceArticleVersionId: string | null; reviewedWorkspaceStyleRevision: number | null; reviewedBy: string | null; reviewedAt: string | null; acknowledgedUnmapped: boolean; staleReasons: string[]; blockingReasons: string[] }
 interface Job { id: string; status: string; operation: string; format?: ChannelFormat; retryAllowed: boolean; failureCode?: string | null; safeMessage?: string | null }
 interface LanguageSuggestion { id: string; sourceRevisionId: string; locator: { start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean }
 interface RecoveredDraft { content: Content; inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; expectedRevision: number }
-interface State { adaptation: { id: string; revision: number; draft: Draft | null; currentApprovedRevisionId: string | null; revisions: Revision[] } | null; formatSelected?: boolean; telegramSelected?: boolean; brief: { id: string; revision: number; currentRevision: { id: string; contentMode: ContentMode } | null; history: unknown[] } | null; style: { revision: number }; prerequisites: { blockingReasons: string[]; missingBasis?: boolean; unverified?: boolean }; approvedArticle: { id: string; number: number; contentMode: ContentMode; title?: string; approvedAt?: string; inspection?: { eligible?: boolean; staleReasons?: string[]; blockingReasons: string[] } } | null; eligibleEvidence: Evidence[]; staleReasons: string[]; mappingIssues: { locator: string; reason: string }[]; hasUnmapped: boolean; blockingReasons: string[] }
+interface State { adaptation: { id: string; revision: number; draft: Draft | null; currentApprovedRevisionId: string | null; revisions: Revision[] } | null; formatSelected?: boolean; telegramSelected?: boolean; brief: { id: string; revision: number; currentRevision: { id: string; contentMode: ContentMode } | null; history: unknown[] } | null; style: { revision: number }; approvedArticle: { id: string; number: number; sourceEvidenceSetId?: string | null; contentMode: ContentMode; title?: string; approvedAt?: string; inspection?: { eligible?: boolean; staleReasons?: string[]; blockingReasons: string[] } } | null; eligibleSourcePassages?: SourcePassage[]; staleReasons: string[]; mappingIssues: { locator: string; reason: string }[]; hasUnmapped: boolean; blockingReasons: string[] }
 const props = withDefaults(defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; formats?: ChannelFormat[]; initialFormat?: ChannelFormat; archived?: boolean }>(), { formats: () => ['TELEGRAM_POST'], initialFormat: 'TELEGRAM_POST' })
 const emit = defineEmits<{ 'session-expired': []; 'format-change': [format: ChannelFormat]; 'caption-generated': [] }>()
 const base = computed(() => `/api/v1/projects/${encodeURIComponent(props.projectId)}/telegram?format=${encodeURIComponent(format.value)}`)
@@ -52,6 +53,14 @@ const articleSourceNeedsReview = computed(() => inputMode.value === 'ARTICLE_DER
 const activeApproval = computed(() => state.value?.adaptation?.revisions.find(row => row.id === state.value?.adaptation?.currentApprovedRevisionId) ?? null)
 const localMappingIssues = computed(() => mappings.value.filter(item => fieldText(item.field).slice(item.startOffset, item.endOffset) !== item.quote))
 const mappings = ref<Mapping[]>([])
+const sourceMappings = ref<SourceMapping[]>([])
+const sourceRequest = ref<{ id: string; stage: string; errorCategory: string | null } | null>(null)
+const sourceRecoveryKey = computed(() => `${recoveryKey.value}:source-request`)
+const sourceActive = computed(() => !!sourceRequest.value && !['SUCCEEDED','FAILED','CANCELLED'].includes(sourceRequest.value.stage))
+const selectedSource = ref<SourcePassage | null>(null)
+const sourceContext = ref<string | null>(null)
+const sourceLoading = ref(false)
+const sourceError = ref('')
 const jobs = ref<Job[]>([])
 const jobMessage = ref('')
 const languageSuggestions = ref<LanguageSuggestion[]>([])
@@ -68,9 +77,9 @@ let inFlight: Promise<boolean> | null = null
 const commandKeys = new Map<string, string>()
 let formatEpoch = 0
 let controller = new AbortController()
-const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
+const activeJob = computed(() => sourceActive.value || jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
 
-function content(): Content { return { text: text.value, mappings: [...mappings.value].sort((a, b) => a.startOffset - b.startOffset), ...(isCover.value ? { cover: { text: coverText.value, instruction: coverInstruction.value } } : {}) } }
+function content(): Content { return { text: text.value, mappings: [...mappings.value].sort((a, b) => a.startOffset - b.startOffset), ...(sourceMappings.value.length ? { sourceMappings: [...sourceMappings.value] } : {}), ...(isCover.value ? { cover: { text: coverText.value, instruction: coverInstruction.value } } : {}) } }
 function fieldText(field?: 'text' | 'cover') { return field === 'cover' ? coverText.value : text.value }
 function serialize() { return JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }) }
 function retain() { if (sessionEnded || !props.userId || hydration || !dirty.value) return; try { sessionStorage.setItem(recoveryKey.value, JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value, expectedRevision: expectedRevision.value })) } catch { /* Live text remains available if session storage is full. */ } }
@@ -80,7 +89,7 @@ function populate(draft?: Draft | null) {
   text.value = draft?.content.text ?? ''
   coverText.value = draft?.content.cover?.text ?? ''
   coverInstruction.value = draft?.content.cover?.instruction ?? ''
-  mappings.value = draft?.content.mappings ?? []
+  mappings.value = draft?.content.mappings ?? []; sourceMappings.value = draft?.content.sourceMappings ?? []
   inputMode.value = draft?.inputMode ?? 'DIRECT'
   contentMode.value = draft?.contentMode ?? state.value?.brief?.currentRevision?.contentMode ?? 'CREATIVE'
   includeLink.value = draft?.includeLink ?? false
@@ -88,14 +97,14 @@ function populate(draft?: Draft | null) {
   baseline.value = serialize()
   hydration = false
 }
-async function request(path = '', body?: unknown) {
+async function request(path = '', body?: unknown, projectScope = false) {
   const requestFormat = format.value, requestEpoch = formatEpoch
-  const url = path ? `${base.value.split('?')[0]}${path}` : base.value
+  const url = path ? `${projectScope ? projectBase : base.value.split('?')[0]}${path}` : base.value
   const response = await fetch(url, { credentials: 'same-origin', signal: controller.signal, method: body === undefined ? 'GET' : 'POST', ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': props.csrfToken }, body: JSON.stringify({ format: format.value, ...body }) }) })
   if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
   if (!response.ok) {
     if (response.status === 409 && requestEpoch === formatEpoch && requestFormat === format.value) conflict.value = true
-    throw new Error(response.status === 409 ? 'Матеріал або редакційні залежності змінилися. Ваш текст збережено в цьому вікні.' : response.status === 503 ? 'AI-генерація тимчасово недоступна. Ви можете продовжувати редагування.' : response.status === 400 ? 'Перевірте текст і посилання на факти.' : 'Не вдалося виконати дію. Ваш текст залишився в редакторі; повторіть спробу.')
+    throw new Error(response.status === 409 ? 'Матеріал або редакційні залежності змінилися. Ваш текст збережено в цьому вікні.' : response.status === 503 ? 'AI-генерація тимчасово недоступна. Ви можете продовжувати редагування.' : response.status === 400 ? 'Перевірте текст і прив’язку до джерел.' : 'Не вдалося виконати дію. Ваш текст залишився в редакторі; повторіть спробу.')
   }
   return response.json()
 }
@@ -162,8 +171,79 @@ async function refreshInputs() {
   if (!await save()) return
   await command('/draft', { content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value, refreshInputs: true }, true)
 }
+async function generateFromSources() {
+  if (dirty.value && state.value?.adaptation?.draft && !await save()) return
+  retain(); busy.value = true; error.value = ''
+  const generationFormat = format.value,generationEpoch = formatEpoch
+  const key = `source:${generationFormat}:${expectedRevision.value}:${inputMode.value}:${includeLink.value}`
+  const commandKey = commandKeys.get(key) ?? crypto.randomUUID(); commandKeys.set(key,commandKey)
+  try {
+    const result = await request('/source-prepare',{ commandKey,expectedRevision: expectedRevision.value,inputMode: inputMode.value,includeLink: includeLink.value }) as { request: { id: string;stage: string;errorCategory: string | null } }
+    if (generationEpoch !== formatEpoch) return
+    sourceRequest.value = result.request; rememberSourceRequest(); commandKeys.delete(key); jobMessage.value = 'Добираємо докази й готуємо пропозицію. Ваш текст залишається в редакторі.'
+    void pollJobs()
+  } catch (cause) { if (generationEpoch === formatEpoch) error.value = cause instanceof Error ? cause.message : 'Не вдалося підготувати текст із джерел.' }
+  finally { busy.value = false }
+}
+async function cancelSourceRequest() {
+  if (!sourceRequest.value || busy.value) return
+  busy.value = true
+  try {
+    const response = await fetch(`${projectBase}/source-writing/${sourceRequest.value.id}/cancel`,{ method: 'POST',credentials: 'same-origin',signal: controller.signal,
+      headers: { 'Content-Type': 'application/json','X-CSRF-Token': props.csrfToken },body: '{}' })
+    if (!response.ok) throw new Error('Не вдалося скасувати підготовку.')
+    sourceRequest.value = (await response.json()).request; rememberSourceRequest(); jobMessage.value = 'Підготовку скасовано. Ваш текст збережено.'
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося скасувати підготовку.' }
+  finally { busy.value = false }
+}
+function rememberSourceRequest() {
+  try { if (sourceRequest.value && sourceActive.value) sessionStorage.setItem(sourceRecoveryKey.value,sourceRequest.value.id); else sessionStorage.removeItem(sourceRecoveryKey.value) }
+  catch { /* The durable request remains on the server when browser storage is unavailable. */ }
+}
+function restoreSourceRequest() {
+  try {
+    const id = sessionStorage.getItem(sourceRecoveryKey.value)
+    if (id && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(id)) sourceRequest.value = { id,stage: 'INDEXING',errorCategory: null }
+  } catch { /* Draft recovery and ordinary editing remain available. */ }
+}
+function linkSourcePassage(passage: SourcePassage) {
+  const element = activeMappingField.value === 'cover' ? coverEditor.value : editor.value
+  const range = selection.value
+  if (!range || !element || range.end <= range.start) { error.value = 'Спочатку виділіть речення в тексті.'; return }
+  sourceMappings.value = [...sourceMappings.value.filter(row => (row.field ?? 'text') !== activeMappingField.value || row.endOffset <= range.start || row.startOffset >= range.end),
+    { startOffset: range.start,endOffset: range.end,quote: passage.quote,passageId: passage.passageId,packetId: passage.packetId,...(activeMappingField.value === 'cover' ? { field: 'cover' as const } : {}) }]
+  mappings.value = mappings.value.filter(row => (row.field ?? 'text') !== activeMappingField.value || row.endOffset <= range.start || row.startOffset >= range.end)
+  selectedSource.value = passage; changed()
+}
+async function openSourcePassage(passage: SourcePassage) {
+  selectedSource.value = passage; sourceContext.value = null; sourceError.value = ''; sourceLoading.value = true
+  try {
+    const result = await request(`/materials/${encodeURIComponent(passage.materialId)}/snapshots/${encodeURIComponent(passage.snapshotId)}`,undefined,true) as { snapshot?: { normalizedText?: string } }
+    if (selectedSource.value !== passage) return
+    const snapshotText = result.snapshot?.normalizedText
+    if (typeof snapshotText !== 'string') throw new Error('Не вдалося прочитати збережений знімок джерела.')
+    const start = passage.startOffset
+    const end = passage.endOffset
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start
+      || end - start !== passage.quote.length || snapshotText.slice(start, end) !== passage.quote) {
+      throw new Error('Уривок не збігається зі збереженим джерелом. Посилання залишилося без змін.')
+    }
+    sourceContext.value = snapshotText
+  } catch (cause) {
+    if (selectedSource.value === passage) sourceError.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити джерело.'
+  } finally { if (selectedSource.value === passage) sourceLoading.value = false }
+}
+function inspectMappedSource(mapping: SourceMapping) {
+  const passage = state.value?.eligibleSourcePassages?.find(row => row.passageId === mapping.passageId && row.packetId === mapping.packetId)
+  if (passage) void openSourcePassage(passage)
+  else sourceError.value = 'Уривок недоступний у поточному наборі джерел.'
+}
+function retrySourcePassage() { if (selectedSource.value) void openSourcePassage(selectedSource.value) }
+function closeSourcePassage() { selectedSource.value = null; sourceContext.value = null; sourceError.value = '' }
 async function generate() {
-  if (busy.value || readonly.value || !await save()) return
+  if (busy.value || readonly.value) return
+  if (contentMode.value === 'FACTUAL') { await generateFromSources(); return }
+  if (!await save()) return
   const payload = { expectedRevision: expectedRevision.value, format: format.value, inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }
   const identity = JSON.stringify(payload)
   const commandKey = commandKeys.get(identity) ?? crypto.randomUUID()
@@ -184,6 +264,17 @@ async function pollJobs() {
   if (disposed) return
   const requestedFormat = format.value, requestedEpoch = formatEpoch
   try {
+    if (sourceActive.value && sourceRequest.value) {
+      const result = await fetch(`${projectBase}/source-writing/${sourceRequest.value.id}`,{ credentials: 'same-origin',signal: controller.signal })
+      if (result.status === 401) { emit('session-expired'); return }
+      if (requestedEpoch === formatEpoch) {
+        if (result.status === 404) { sourceRequest.value = null; rememberSourceRequest() }
+        else if (result.ok) {
+          sourceRequest.value = (await result.json()).request; rememberSourceRequest()
+          if (sourceRequest.value?.stage === 'SUCCEEDED') { jobMessage.value = 'Пропозиція з доказами готова. Перегляньте її в історії.'; await load(); emit('caption-generated') }
+        }
+      }
+    }
     const response = await fetch(`${projectBase}/jobs`, { credentials: 'same-origin', signal: controller.signal })
     if (response.status === 401) { emit('session-expired'); return }
     if (response.ok && requestedEpoch === formatEpoch && requestedFormat === format.value) {
@@ -278,15 +369,6 @@ function chooseCoverSelection() {
   if (el && el.selectionEnd > el.selectionStart) selection.value = { start: el.selectionStart, end: el.selectionEnd }
 }
 function chooseBodySelection() { activeMappingField.value = 'text'; chooseSelection() }
-function linkEvidence(item: Evidence) {
-  const range = selection.value
-  if (!range || range.end <= range.start) { error.value = 'Виділіть точне формулювання в дописі, до якого прив’язати факт.'; return }
-  const quote = fieldText(activeMappingField.value).slice(range.start, range.end)
-  const next: Mapping = { startOffset: range.start, endOffset: range.end, quote, claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId, ...(activeMappingField.value === 'cover' ? { field: 'cover' } : {}) }
-  mappings.value = [...mappings.value.filter(row => (row.field ?? 'text') !== activeMappingField.value || row.endOffset <= range.start || row.startOffset >= range.end), next].sort((a, b) => a.startOffset - b.startOffset)
-  error.value = ''; changed()
-}
-function removeMapping(mapping: Mapping) { mappings.value = mappings.value.filter(row => row !== mapping); changed() }
 function editText(event: Event) {
   activeMappingField.value = 'text'; updateText((event.target as HTMLTextAreaElement).value, 'text')
 }
@@ -297,6 +379,7 @@ function updateText(next: string, field: 'text' | 'cover' = 'text') {
   while (start < oldEnd && start < newEnd && previous[start] === next[start]) start++
   while (oldEnd > start && newEnd > start && previous[oldEnd - 1] === next[newEnd - 1]) { oldEnd--; newEnd-- }
   const delta = next.length - previous.length
+  sourceMappings.value = sourceMappings.value.flatMap(row => (row.field ?? 'text') !== field || row.endOffset <= start ? [row] : row.startOffset >= oldEnd ? [{ ...row,startOffset: row.startOffset+delta,endOffset: row.endOffset+delta }] : [])
   const adjusted = mappings.value.map(row => {
     if ((row.field ?? 'text') !== field) return row
     if (row.endOffset <= start) return row
@@ -318,7 +401,7 @@ function insertPlaceholder() {
   requestAnimationFrame(() => { el.focus(); el.setSelectionRange(start + token.length, start + token.length) })
 }
 function inputFreshness(reasons: string[]) {
-  const labels: Record<string, string> = { BRIEF_CHANGED: 'змінився бриф', WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', FACTUAL_BASIS_CHANGED: 'змінилася фактична основа', MISSING_FACTUAL_BASIS: 'немає придатної фактичної основи', INVALID_ORIGINAL_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', SOURCE_ARTICLE_CHANGED: 'змінилася погоджена стаття', INVALID_ORIGINAL_SOURCE_ARTICLE: 'початкова стаття більше не погоджена', INVALID_ORIGINAL_SOURCE_EVIDENCE: 'докази початкової статті потребують перегляду' }
+  const labels: Record<string, string> = { BRIEF_CHANGED: 'змінився бриф', WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', FACTUAL_BASIS_CHANGED: 'змінилися джерельні докази', MISSING_FACTUAL_BASIS: 'бракує джерельних доказів', INVALID_ORIGINAL_FACTUAL_BASIS: 'джерельні докази початкової версії втратили придатність', SOURCE_ARTICLE_CHANGED: 'змінилася погоджена стаття', INVALID_ORIGINAL_SOURCE_ARTICLE: 'початкова стаття більше не погоджена', INVALID_ORIGINAL_SOURCE_EVIDENCE: 'докази початкової статті потребують перегляду' }
   return reasons.map(reason => labels[reason] ?? 'змінилися редакційні залежності').join('; ')
 }
 function hasUnresolvedReviewBlock(revision: Revision) {
@@ -328,7 +411,7 @@ function formatDate(value?: string | null) { return value ? new Intl.DateTimeFor
 function restoreLocal() {
   const item = recovered.value
   if (!item) return
-  hydration = true; text.value = item.content.text; coverText.value = item.content.cover?.text ?? ''; coverInstruction.value = item.content.cover?.instruction ?? ''; mappings.value = item.content.mappings; inputMode.value = item.inputMode; contentMode.value = item.contentMode; includeLink.value = item.includeLink
+  hydration = true; text.value = item.content.text; coverText.value = item.content.cover?.text ?? ''; coverInstruction.value = item.content.cover?.instruction ?? ''; mappings.value = item.content.mappings; sourceMappings.value = item.content.sourceMappings ?? []; inputMode.value = item.inputMode; contentMode.value = item.contentMode; includeLink.value = item.includeLink
   recovered.value = null; expectedRevision.value = item.expectedRevision; hydration = false; conflict.value = expectedRevision.value !== (state.value?.adaptation?.revision ?? 0); baseline.value = ''; retain(); if (!conflict.value) void save()
 }
 function discardLocal() { recovered.value = null; sessionStorage.removeItem(recoveryKey.value) }
@@ -337,7 +420,7 @@ async function reconcile(useLocal: boolean) {
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося оновити.' }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { retain(); event.preventDefault(); event.returnValue = '' } }
-function endSession() { sessionEnded = true; disposed = true; controller.abort(); clearTimeout(timer); clearTimeout(pollTimer); hydration = true; text.value = ''; coverText.value = ''; coverInstruction.value = ''; mappings.value = []; recovered.value = null; state.value = null; jobs.value = []; sessionStorage.removeItem(recoveryKey.value) }
+function endSession() { sessionEnded = true; disposed = true; controller.abort(); clearTimeout(timer); clearTimeout(pollTimer); hydration = true; text.value = ''; coverText.value = ''; coverInstruction.value = ''; mappings.value = []; sourceMappings.value = []; recovered.value = null; state.value = null; jobs.value = []; sessionStorage.removeItem(recoveryKey.value) }
 function titleFor(formatValue: ChannelFormat) { return ({ TELEGRAM_POST: 'допис у Telegram', LINKEDIN_TEXT: 'публікацію у LinkedIn', LINKEDIN_COVER: 'обкладинку LinkedIn', INSTAGRAM_COVER: 'обкладинку Instagram', LINKEDIN_CAROUSEL: 'карусель LinkedIn', INSTAGRAM_CAROUSEL: 'карусель Instagram', INSTAGRAM_STORIES: 'історії Instagram' })[formatValue] }
 async function switchFormat(event: Event) {
   const next = (event.target as HTMLSelectElement).value as ChannelFormat
@@ -351,11 +434,12 @@ watch(() => props.initialFormat, async (next) => {
   if (dirty.value) retain()
   clearTimeout(timer)
   format.value = next; formatEpoch++
-  state.value = null; jobs.value = []; jobMessage.value = ''; error.value = ''; conflict.value = false; recovered.value = null; languageSuggestions.value = []; selectedLanguageIds.value = []; languageMessage.value = ''
+  state.value = null; jobs.value = []; sourceRequest.value = null; jobMessage.value = ''; error.value = ''; conflict.value = false; recovered.value = null; languageSuggestions.value = []; selectedLanguageIds.value = []; languageMessage.value = ''
   loading.value = true
   const requestedEpoch = formatEpoch
   try {
     await load(true)
+    restoreSourceRequest()
     const stored = sessionStorage.getItem(recoveryKey.value)
     if (stored) { const value = JSON.parse(stored) as RecoveredDraft; if (JSON.stringify({ content: value.content, inputMode: value.inputMode, contentMode: value.contentMode, includeLink: value.includeLink }) !== baseline.value) recovered.value = value; else sessionStorage.removeItem(recoveryKey.value) }
   } catch (cause) { if (requestedEpoch === formatEpoch) error.value = cause instanceof Error ? cause.message : `Не вдалося відкрити ${titleFor(format.value)}.` }
@@ -368,6 +452,7 @@ onMounted(async () => {
   window.addEventListener('cf:article-session-ended', endSession)
   try {
     await load(true)
+    restoreSourceRequest()
     const stored = sessionStorage.getItem(recoveryKey.value)
     if (stored) { const value = JSON.parse(stored) as RecoveredDraft; if (JSON.stringify({ content: value.content, inputMode: value.inputMode, contentMode: value.contentMode, includeLink: value.includeLink }) !== baseline.value) recovered.value = value; else sessionStorage.removeItem(recoveryKey.value) }
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити Telegram.' }
@@ -433,7 +518,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         <Button
           class="workspace-button"
           variant="outline"
-          :disabled="busy || readonly || conflict || !!recovered || state.brief?.currentRevision?.contentMode !== contentMode || (contentMode === 'FACTUAL' && !!state.prerequisites?.blockingReasons?.length) || (inputMode === 'ARTICLE_DERIVED' && (!selectedArticle || articleSourceNeedsReview))"
+          :disabled="busy || readonly || conflict || !!recovered || state.brief?.currentRevision?.contentMode !== contentMode || (inputMode === 'ARTICLE_DERIVED' && (!selectedArticle || articleSourceNeedsReview))"
           @click="refreshInputs"
         >
           Оновити входи чернетки
@@ -513,8 +598,8 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             v-model="contentMode"
             :disabled="readonly || busy"
           >
-            <option value="FACTUAL">На перевірених фактах</option>
-            <option value="CREATIVE">Авторський · без перевіреної основи</option>
+            <option value="FACTUAL">На основі джерел</option>
+            <option value="CREATIVE">Авторський · без перевірки джерел</option>
           </select>
         </label>
         <label
@@ -530,13 +615,13 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         v-if="contentMode === 'CREATIVE'"
         class="telegram-unverified"
       >
-        Авторський режим · Текст не підтверджений фактичною основою. Погодження підтверджує редакторський перегляд, а не перевірку кожного твердження.
+        Авторський режим · Текст створюється з брифу й авторських вказівок без пошуку в джерелах.
       </p>
       <p
         v-if="inputMode === 'DIRECT'"
         class="telegram-source-note"
       >
-        Самостійний допис працює без статті та структури. Він залежить від брифу, стилю простору та вибраної фактичної основи.
+        Самостійний допис працює без статті та структури. У режимі «На основі джерел» система шукає уривки за брифом у джерелах проєкту.
       </p>
       <p
         v-else
@@ -556,12 +641,6 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         class="telegram-notice"
       >
         Збережіть бриф у вибраному режимі, перш ніж редагувати чи створювати допис.
-      </p>
-      <p
-        v-if="contentMode === 'FACTUAL' && state.prerequisites?.blockingReasons?.length"
-        class="telegram-notice"
-      >
-        Фактичний режим недоступний: немає придатної затвердженої основи. Перейдіть до «Фактів» і погодьте докази.
       </p>
       <div
         v-if="jobMessage"
@@ -676,7 +755,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             <Button
               class="workspace-button"
               variant="outline"
-              :disabled="readonly || busy || activeJob || conflict || !!recovered || state.brief?.currentRevision?.contentMode !== contentMode || (contentMode === 'FACTUAL' && !!state.prerequisites?.blockingReasons?.length) || (inputMode === 'ARTICLE_DERIVED' && (!selectedArticle || articleSourceNeedsReview || !!selectedArticle.inspection?.blockingReasons.length))"
+              :disabled="readonly || busy || activeJob || conflict || !!recovered || state.brief?.currentRevision?.contentMode !== contentMode || (inputMode === 'ARTICLE_DERIVED' && (!selectedArticle || articleSourceNeedsReview || !!selectedArticle.inspection?.blockingReasons.length))"
               @click="generate"
             >
               Запропонувати текст
@@ -768,28 +847,53 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             class="telegram-mapping-warning"
             role="status"
           >
-            Є посилання на твердження, що не відповідають поточному тексту або тексту обкладинки. Видаліть їх або виділіть точні слова й прив’яжіть знову.
+            Є посилання на речення, які змінилися в тексті або на обкладинці. Видаліть їх або виділіть точні слова й прив’яжіть знову.
           </div>
           <div
-            v-if="mappings.length"
-            class="telegram-mapping-list"
-            aria-label="Посилання на докази"
+            v-if="sourceRequest"
+            role="status"
           >
-            <div
-              v-for="mapping in mappings"
-              :key="`${mapping.evidenceId}:${mapping.startOffset}`"
-              class="telegram-mapping-row"
+            {{ sourceRequest.stage === 'FAILED' ? 'Підготовка завершилась із помилкою. Перевірте джерела й повторіть запуск.' : sourceActive ? 'Готуємо текст із джерел…' : '' }}
+            <Button
+              v-if="sourceActive"
+              variant="ghost"
+              :disabled="busy"
+              @click="cancelSourceRequest"
             >
-              <span>«{{ mapping.quote }}»</span><Button
-                class="workspace-button"
+              Скасувати підготовку
+            </Button>
+          </div>
+          <div
+            v-if="sourceMappings.length"
+            aria-label="Посилання на уривки"
+          >
+            <p
+              v-for="mapping in sourceMappings"
+              :key="`${mapping.passageId}:${mapping.startOffset}`"
+            >
+              «{{ fieldText(mapping.field).slice(mapping.startOffset,mapping.endOffset) }}»
+              <Button
                 variant="ghost"
-                :disabled="readonly || busy"
-                @click="removeMapping(mapping)"
+                @click="inspectMappedSource(mapping)"
+              >
+                Переглянути уривок
+              </Button>
+              <Button
+                variant="ghost"
+                :disabled="readonly"
+                @click="sourceMappings = sourceMappings.filter(row => row !== mapping); changed()"
               >
                 Прибрати посилання
               </Button>
-            </div>
+            </p>
           </div>
+          <p
+            v-if="sourceError && !selectedSource"
+            class="telegram-source-error"
+            role="alert"
+          >
+            {{ sourceError }}
+          </p>
           <p
             v-if="includeLink"
             class="telegram-link-note"
@@ -811,30 +915,87 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           aria-labelledby="telegram-evidence-heading"
         >
           <h2 id="telegram-evidence-heading">
-            Факти для допису
+            Докази для допису
           </h2>
           <p>Виділіть точні слова в тексті, а потім прив’яжіть їх до доказу.</p>
-          <p
-            v-if="!state.eligibleEvidence.length"
-            class="telegram-empty-evidence"
+          <section
+            v-if="selectedSource"
+            aria-label="Вибраний уривок"
           >
-            Придатних доказів поки немає. Фактичне погодження буде заблоковано, доки основу не відновлено.
-          </p>
+            <header class="telegram-source-context-heading">
+              <h3>{{ selectedSource.materialTitle }}</h3><Button
+                variant="ghost"
+                @click="closeSourcePassage"
+              >
+                Закрити
+              </Button>
+            </header>
+            <p
+              v-if="sourceLoading"
+              role="status"
+            >
+              Відкриваємо збережене джерело…
+            </p>
+            <p
+              v-else-if="sourceError"
+              role="alert"
+            >
+              {{ sourceError }} <Button
+                variant="ghost"
+                @click="retrySourcePassage"
+              >
+                Спробувати знову
+              </Button>
+            </p>
+            <blockquote
+              v-else-if="sourceContext"
+              class="telegram-source-context"
+            >
+              <SourceMarkdown
+                :text="sourceContext"
+                :highlight="{ startOffset: selectedSource.startOffset, endOffset: selectedSource.endOffset }"
+              />
+            </blockquote>
+            <blockquote v-else>
+              <SourceMarkdown
+                :text="selectedSource.quote"
+                compact
+              />
+            </blockquote>
+            <a :href="`/projects/${projectId}/sources`">Відкрити джерела проєкту</a>
+          </section>
           <article
-            v-for="item in state.eligibleEvidence"
-            :key="item.evidenceId"
+            v-for="item in state.eligibleSourcePassages ?? []"
+            :key="item.passageId"
             class="telegram-evidence-item"
           >
-            <h3>{{ item.wording }}</h3><p>{{ item.materialTitle }}</p><blockquote>{{ item.quote }}</blockquote>
+            <h3>{{ item.materialTitle }}</h3><blockquote>
+              <SourceMarkdown
+                :text="item.quote"
+                compact
+              />
+            </blockquote>
             <Button
-              class="workspace-button"
-              variant="outline"
-              :disabled="readonly || busy || contentMode !== 'FACTUAL'"
-              @click="linkEvidence(item)"
+              variant="ghost"
+              @click="openSourcePassage(item)"
             >
-              Прив’язати виділення
+              Відкрити джерело
+            </Button>
+            <Button
+              variant="outline"
+              :disabled="readonly || contentMode !== 'FACTUAL'"
+              @mousedown.prevent
+              @click="linkSourcePassage(item)"
+            >
+              Прив’язати виділення до уривка
             </Button>
           </article>
+          <p
+            v-if="!state.eligibleSourcePassages?.length"
+            class="telegram-empty-evidence"
+          >
+            Добірка доказів з’явиться після підготовки тексту із джерел.
+          </p>
         </aside>
       </div>
 
@@ -892,24 +1053,14 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           <details>
             <summary>Початкові входи й квитанція перегляду</summary>
             <dl class="telegram-inputs">
-              <dt>Бриф</dt><dd>{{ revision.briefRevisionId }}</dd><dt>Стиль простору</dt><dd>Версія {{ revision.workspaceStyleRevision }}</dd><dt>Фактична основа</dt><dd>{{ revision.basisRevisionId || 'Не використовувалася' }}</dd><dt>Стаття-джерело</dt><dd>{{ revision.sourceArticleVersionId || 'Немає · прямий шлях' }}</dd><dt>Посилання</dt><dd>{{ revision.includeLink ? 'Передбачалося місце' : 'Не передбачалося' }}</dd><dt>Погоджено</dt><dd>{{ formatDate(revision.approvedAt) }}{{ revision.approvedBy ? ` · ${revision.approvedBy}` : '' }}</dd><dt>Останній перегляд</dt><dd>{{ formatDate(revision.reviewedAt) }}{{ revision.reviewedBy ? ` · ${revision.reviewedBy}` : '' }}</dd><dt>Переглянуті залежності</dt><dd>Бриф {{ revision.reviewedBriefRevisionId || '—' }}; основа {{ revision.reviewedBasisRevisionId || '—' }}; стиль {{ revision.reviewedWorkspaceStyleRevision ?? '—' }}; стаття {{ revision.reviewedSourceArticleVersionId || '—' }}</dd>
+              <dt>Бриф</dt><dd>{{ revision.briefRevisionId }}</dd><dt>Стиль простору</dt><dd>Версія {{ revision.workspaceStyleRevision }}</dd><dt>Джерельний контекст</dt><dd>{{ revision.sourceEvidenceSetId || 'Не використовувався' }}</dd><dt>Стаття-джерело</dt><dd>{{ revision.sourceArticleVersionId || 'Немає · прямий шлях' }}</dd><dt>Посилання</dt><dd>{{ revision.includeLink ? 'Передбачалося місце' : 'Не передбачалося' }}</dd><dt>Погоджено</dt><dd>{{ formatDate(revision.approvedAt) }}{{ revision.approvedBy ? ` · ${revision.approvedBy}` : '' }}</dd><dt>Останній перегляд</dt><dd>{{ formatDate(revision.reviewedAt) }}{{ revision.reviewedBy ? ` · ${revision.reviewedBy}` : '' }}</dd><dt>Переглянуті залежності</dt><dd>Бриф {{ revision.reviewedBriefRevisionId || '—' }}; джерела {{ revision.sourceEvidenceSetId || '—' }}; стиль {{ revision.reviewedWorkspaceStyleRevision ?? '—' }}; стаття {{ revision.reviewedSourceArticleVersionId || '—' }}</dd>
             </dl>
             <p v-if="revision.acknowledgedUnmapped">
-              Редактор підтвердив перегляд тверджень без прив’язки до доказів.
+              Редактор підтвердив перегляд речень без прив’язки до доказів.
             </p>
             <p v-if="revision.withdrawalReason">
               Причина відкликання: {{ revision.withdrawalReason }}
             </p>
-            <ul v-if="revision.content.mappings.length">
-              <li
-                v-for="map in revision.content.mappings"
-                :key="`${map.evidenceId}:${map.startOffset}`"
-              >
-                «{{ map.quote }}» — {{ revision.claims?.find(row => row.evidenceId === map.evidenceId)?.evidence?.snapshot.material.label || 'Збережений доказ' }}<details v-if="revision.claims?.find(row => row.evidenceId === map.evidenceId)">
-                  <summary>Точний доказ і твердження</summary><p>{{ revision.claims.find(row => row.evidenceId === map.evidenceId)?.claimRevision?.wording }}</p><blockquote>{{ revision.claims.find(row => row.evidenceId === map.evidenceId)?.evidence?.quote }}</blockquote><p>Фрагмент {{ revision.claims.find(row => row.evidenceId === map.evidenceId)?.evidence?.snapshotId }} · доказ {{ map.evidenceId }} · твердження {{ map.claimRevisionId }}</p>
-                </details>
-              </li>
-            </ul>
           </details>
           <div class="telegram-history-actions">
             <Button
@@ -924,7 +1075,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             <label v-if="revision.hasUnmapped && ((revision.status === 'PROPOSED' && revision.id === state.adaptation?.draft?.baseRevisionId) || (revision.status === 'APPROVED' && revision.id === state.adaptation?.currentApprovedRevisionId && revision.staleReasons.length))"><input
               v-model="reviewAcknowledgements[revision.id]"
               type="checkbox"
-            > Я переглянув непов’язані твердження</label>
+            > Я переглянув речення без посилань на джерела</label>
             <template v-if="revision.status === 'PROPOSED' && revision.id === (state.adaptation?.draft?.baseRevisionId ?? null)">
               <Button
                 class="workspace-button workspace-button-primary"
@@ -1008,6 +1159,11 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 .telegram-evidence-item h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.45; }
 .telegram-evidence-item p { margin: 7px 0; color: var(--muted); font-size: 12px; }
 .telegram-evidence-item blockquote { margin: 10px 0 12px; padding: 0 0 0 12px; border-left: 1px solid var(--rule); color: var(--lead-ink); font: 15px/1.5 SourceSerif, Georgia, serif; }
+.telegram-source-context { max-height: 360px; overflow: auto; overflow-wrap: anywhere; }
+.telegram-source-context-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.telegram-source-context-heading h3 { min-width: 0; overflow-wrap: anywhere; }
+.telegram-source-context mark { background: var(--source-highlight, #edece7); color: var(--ink); text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+.telegram-source-error { color: var(--error); line-height: 1.5; }
 .telegram-empty-evidence { padding-block: 14px; border-top: 1px solid var(--rule); }
 .telegram-mapping-warning, .telegram-recovery, .telegram-error { margin: 12px 0; padding: 12px 0; border-block: 1px solid var(--rule); color: var(--review, #945000); font-size: 13px; line-height: 1.5; }
 .telegram-job-state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 12px 0; padding: 10px 0; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 13px; }

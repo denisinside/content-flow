@@ -7,7 +7,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet 
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import SourceWorkspace from './SourceWorkspace.vue'
-import FactsWorkspace from './FactsWorkspace.vue'
+import EvidenceWorkspace from './EvidenceWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
 import EditorPresence from './EditorPresence.vue'
 import ProjectLifecycle from './ProjectLifecycle.vue'
@@ -687,7 +687,7 @@ onBeforeUnmount(() => {
     <section
       v-else
       id="workspace-task"
-      :aria-labelledby="currentProject ? (isTrashed ? 'project-trashed-title' : isSources ? 'sources-title' : isFacts ? 'facts-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isChannels ? 'telegram-title' : isVisuals ? 'visual-heading' : isExport ? 'export-title' : 'project-detail-title') : undefined"
+      :aria-labelledby="currentProject ? (isTrashed ? 'project-trashed-title' : isSources ? 'sources-title' : isFacts ? 'evidence-title' : isBrief ? 'brief-title' : isArticle ? 'article-heading' : isChannels ? 'telegram-title' : isVisuals ? 'visual-heading' : isExport ? 'export-title' : 'project-detail-title') : undefined"
       class="workspace-content project-detail"
       tabindex="-1"
     >
@@ -731,7 +731,7 @@ onBeforeUnmount(() => {
             :href="`/projects/${currentProject.id}/facts`"
             :aria-current="isFacts ? 'page' : undefined"
             @click.prevent="routeTo(`/projects/${currentProject.id}/facts`)"
-          >Факти</a>
+          >Докази</a>
           <a
             :href="`/projects/${currentProject.id}/brief`"
             :aria-current="isBrief ? 'page' : undefined"
@@ -891,6 +891,7 @@ onBeforeUnmount(() => {
         </template><template v-else-if="isBrief">
           <BriefWorkspace
             :key="currentProject.id"
+            :user-id="userId"
             :project-id="currentProject.id"
             :project-topic="currentProject.topic"
             :csrf-token="csrfToken"
@@ -898,10 +899,11 @@ onBeforeUnmount(() => {
             @session-expired="emit('session-expired')"
           />
         </template><template v-else-if="isFacts">
-          <FactsWorkspace
+          <EvidenceWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
             :project-topic="currentProject.topic"
+            :user-id="userId"
             :csrf-token="csrfToken"
             :archived="currentProject.archivedAt !== null"
             @session-expired="emit('session-expired')"
@@ -1074,9 +1076,9 @@ onBeforeUnmount(() => {
                 <p class="eyebrow">
                   Перевірка
                 </p>
-                <h2>Факти та докази</h2>
+                <h2>Докази для матеріалу</h2>
                 <p class="project-detail-copy">
-                  Перевіряйте твердження й затверджуйте фактичну базу.
+                  Шукайте точні уривки в джерелах під тему або розділ матеріалу.
                 </p>
               </div>
               <Button
@@ -1084,7 +1086,7 @@ onBeforeUnmount(() => {
                 variant="outline"
                 @click="routeTo(`/projects/${currentProject.id}/facts`)"
               >
-                Відкрити факти
+                Знайти докази
               </Button>
             </div>
             <div class="project-sources-entry">

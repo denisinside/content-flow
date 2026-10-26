@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { DependencyHealthService, AssetPurpose, MaterialKind, SourceOrigin, type Prisma, DurableJobService,
   jobView, canonicalManifestHash, importProviderSettings, IMPORT_CONTRACT, FIRECRAWL_OPTIONS, DOCLING_OPTIONS,
-  validateDigitalDocument, normalizeImportUrl, ImportValidationError } from '@contextflow/backend';
+  validateDigitalDocument, normalizeImportUrl, ImportValidationError, normalizeImportedText, importedFragments } from '@contextflow/backend';
 import { PrivateAssetStore } from '../storage/private-asset-store.js';
 import { ExternalProcessingService } from '../auth/external-processing.js';
 import { SessionService } from '../auth/session-service.js';
@@ -37,28 +37,19 @@ function snapshotView(record: SnapshotRecord) { return iso(record); }
 function sha256(bytes: Buffer | string): string { return createHash('sha256').update(bytes).digest('hex'); }
 
 export function normalizeSourceText(value: string): string {
-  const normalized = value.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
-  if (!normalized.trim() || normalized.length > 200_000 || Buffer.from(normalized, 'utf8').toString('utf8') !== normalized
-    || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u.test(normalized)) {
-    throw new BadRequestException('Source text is empty, too long, or contains unsupported control characters');
+  try { return normalizeImportedText(value); }
+  catch (error) {
+    if (error instanceof ImportValidationError) throw new BadRequestException(error.message);
+    throw error;
   }
-  return normalized;
 }
 
 export function sourceFragments(text: string) {
-  const fragments: Array<{ id: string; ordinal: number; startOffset: number; endOffset: number; sha256: string }> = [];
-  const separator = /\n(?:[ \t]*\n)+/gu;
-  let start = 0;
-  for (const match of text.matchAll(separator)) {
-    const end = match.index;
-    if (end > start) fragments.push({ id: randomUUID(), ordinal: fragments.length + 1, startOffset: start,
-      endOffset: end, sha256: sha256(Buffer.from(text.slice(start, end), 'utf8')) });
-    start = end + match[0].length;
+  try { return importedFragments(text); }
+  catch (error) {
+    if (error instanceof ImportValidationError) throw new BadRequestException(error.message);
+    throw error;
   }
-  if (start < text.length) fragments.push({ id: randomUUID(), ordinal: fragments.length + 1, startOffset: start,
-    endOffset: text.length, sha256: sha256(Buffer.from(text.slice(start), 'utf8')) });
-  if (!fragments.length || fragments.length > 1000) throw new BadRequestException('Source must contain between 1 and 1000 paragraphs');
-  return fragments;
 }
 
 export function decodeSourceFile(file: UploadedFile): { text: string; filename: string; mediaType: string } {
@@ -144,16 +135,19 @@ export class SourceService {
     userId: string; projectId: string; materialId: string; text: string; origin: SourceOrigin;
     originalAssetId?: string; originalFilename?: string;
   }) {
+    // Defend every snapshot write so manual, uploaded and provider-derived text share
+    // exactly the same canonical form before its hash and fragment locators are made.
+    const text = normalizeSourceText(args.text);
     const previous = await tx.sourceSnapshot.findFirst({ where: { projectId: args.projectId, materialId: args.materialId },
       orderBy: { sequence: 'desc' }, select: { id: true, sequence: true } });
-    const textBytes = Buffer.from(args.text, 'utf8');
+    const textBytes = Buffer.from(text, 'utf8');
     const snapshot = await tx.sourceSnapshot.create({ data: {
       id: randomUUID(), projectId: args.projectId, materialId: args.materialId,
-      sequence: (previous?.sequence ?? 0) + 1, normalizedText: args.text, sha256: sha256(textBytes), bytes: textBytes.byteLength,
+      sequence: (previous?.sequence ?? 0) + 1, normalizedText: text, sha256: sha256(textBytes), bytes: textBytes.byteLength,
       origin: args.origin, originalAssetId: args.originalAssetId ?? null, originalFilename: args.originalFilename ?? null,
       previousSnapshotId: previous?.id ?? null, createdBy: args.userId,
     }, select: SNAPSHOT_SELECT });
-    const fragments = sourceFragments(args.text);
+    const fragments = sourceFragments(text);
     await tx.sourceFragment.createMany({ data: fragments.map(fragment => ({ ...fragment,
       projectId: args.projectId, snapshotId: snapshot.id })) });
     await tx.material.update({ where: { projectId_id: { projectId: args.projectId, id: args.materialId } }, data: {

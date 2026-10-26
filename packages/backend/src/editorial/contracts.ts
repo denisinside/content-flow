@@ -8,12 +8,17 @@ export const saveBriefInput = z.object({ expectedRevision: z.number().int().nonn
   topic: text(500).min(1), audience: text(2000), centralMessage: text(4000), category: text(120), tone: text(10000).optional(),
   targetLength: z.number().int().min(50).max(20000), cta: text(2000), exclusions: z.array(text(500).min(1)).max(50),
   notes: text(10000), requiredClaimRevisionIds: ids }).strict()
-  .refine(value => value.contentMode === 'FACTUAL' || value.requiredClaimRevisionIds.length === 0);
+  .refine(value => value.requiredClaimRevisionIds.length === 0, { message: 'REQUIRED_CLAIMS_RETIRED' });
 export const outlineContentSchema = z.object({ title: text(500).min(1), sections: z.array(z.object({
-  title: text(300).min(1), purpose: text(2000).min(1), claimRevisionIds: ids }).strict()).min(1).max(30) }).strict();
+  id: z.uuid().optional(), title: text(300).min(1), purpose: text(2000).min(1), targetWords: z.number().int().min(1).max(20000).optional(),
+  claimRevisionIds: ids, sourcePassageIds: ids.optional() }).strict()).min(1).max(30) }).strict();
 export const outlineOutputSchema = z.object({ schemaVersion: z.literal('outline-v1'), content: outlineContentSchema }).strict();
 export const manualOutlineInput = z.object({ expectedRevision: z.number().int().nonnegative(), briefRevisionId: z.uuid(),
-  content: outlineContentSchema }).strict();
+  sourceEvidenceSetId: z.uuid().nullable().optional(), content: outlineContentSchema }).strict();
+export const sourceOutlineOutputSchema = z.object({ title: text(500).min(1), sections: z.array(z.object({
+  id: z.uuid(), title: text(300).min(1), purpose: text(2000).min(1), targetWords: z.number().int().min(1).max(20000),
+  passageIds: ids, requiredClaimRevisionIds: ids }).strict()).min(1).max(30) }).strict()
+  .refine(value => new Set(value.sections.map(section => section.id)).size === value.sections.length);
 export const reviewOutlineInput = z.object({ expectedRevision: z.number().int().positive(), reason: text(2000).min(1).optional() }).strict();
 export const generateOutlineInput = z.object({ commandKey: z.string().regex(/^[\w-]{1,128}$/u) }).strict();
 export const outlineWorkflowReleaseSchema = z.object({ endpoint: z.url(), workflowId: z.uuid(), releaseId: text(100).min(1),
@@ -28,6 +33,7 @@ export type SaveBriefInput = z.infer<typeof saveBriefInput>;
 export type ManualOutlineInput = z.infer<typeof manualOutlineInput>;
 export type ReviewOutlineInput = z.infer<typeof reviewOutlineInput>;
 export type OutlineContent = z.infer<typeof outlineContentSchema>;
+export type SourceOutlineOutput = z.infer<typeof sourceOutlineOutputSchema>;
 export type OutlineOutput = z.infer<typeof outlineOutputSchema>;
 export type OutlineWorkflowRelease = z.infer<typeof outlineWorkflowReleaseSchema>;
 export type OutlineInputManifest = z.infer<typeof outlineInputManifestSchema>;

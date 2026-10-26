@@ -44,7 +44,7 @@ async function main() {
     process.stderr.write('ERROR: this verifier expects promptTemplateFile to be exactly "prompt.md".\n');
     return 1;
   }
-  if (release.promptTemplateVersion !== 'claims-extraction-review-prompt-v2'
+  if (release.promptTemplateVersion !== 'claims-extraction-review-prompt-v5'
       || release.runtimeFile !== 'scripts/dify/claim_extraction_runtime.py'
       || typeof release.runtimeSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(release.runtimeSha256)
       || release.operation !== 'CLAIM_EXTRACTION' || release.contractVersion !== 'claims-v1'

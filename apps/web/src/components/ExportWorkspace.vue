@@ -111,7 +111,7 @@ function reasonLabel(reason: string) {
   if (value.includes('visual') && (value.includes('stale') || value.includes('review') || value.includes('changed'))) return 'Візуал або його сценарій змінилися — перегляньте версію.'
   if (value.includes('approval') || value.includes('not_approved') || value.includes('unapproved')) return 'Потрібне погодження редактора.'
   if (value.includes('stale') || value.includes('review') || value.includes('changed')) return 'Залежності змінилися — перегляньте матеріал.'
-  if (value.includes('invalid') || value.includes('withdraw') || value.includes('evidence') || value.includes('conflict')) return 'Є недійсна або відкликана фактична основа.'
+  if (value.includes('invalid') || value.includes('withdraw') || value.includes('evidence') || value.includes('conflict')) return 'Потрібно перевірити джерельні посилання або узгодити зміни.'
   if (value.includes('unimplemented') || value.includes('not_implemented') || value.includes('unsupported') || value.includes('not_available')) return 'Цей формат ще не можна експортувати.'
   if (value.includes('preview') || value.includes('render') || value.includes('overflow')) return 'Потрібно підготувати коректне серверне прев’ю всіх кадрів.'
   if (value.includes('asset') || value.includes('frame')) return 'Не готове потрібне зображення або кадр.'
@@ -348,7 +348,7 @@ onBeforeUnmount(() => {
             <span
               v-if="item.contentMode === 'CREATIVE'"
               class="export-unverified"
-            >Авторський текст · без перевіреної основи</span>
+            >Авторський текст · без перевірки в джерелах</span>
           </p>
           <p
             v-if="!item.ready || !supported(item)"

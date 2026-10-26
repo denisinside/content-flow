@@ -148,8 +148,8 @@ describe('manual sources, immutable snapshots, and private originals', () => {
     await expect(processing.requireAccepted(owner.id)).resolves.toBeUndefined();
     expect((await request(foreign, 'GET', '/api/auth/external-processing')).body).toMatchObject({ accepted: false, acceptedAt: null });
 
-    const firstText = 'Український перший абзац. 😀\r\n\r\nSecond paragraph stays exact.';
-    const normalizedFirstText = firstText.replace(/\r\n/g, '\n');
+    const firstText = 'Український&nbsp;перший абзац. 😀\r\n<p>&nbsp;</p>\r\n<div> &#160; </div>\r\nSecond paragraph stays exact.';
+    const normalizedFirstText = 'Український перший абзац. 😀\n\nSecond paragraph stays exact.';
     const created = await request<{ material: Material; snapshot: Snapshot }>(owner, 'POST', `/api/v1/projects/${project.id}/materials`, {
       label: 'Manual source', purpose: 'FACTUAL_SOURCE', text: firstText,
     });
@@ -160,10 +160,12 @@ describe('manual sources, immutable snapshots, and private originals', () => {
     expect(firstSnapshot).toMatchObject({ sequence: 1, origin: 'MANUAL_TEXT', bytes: Buffer.byteLength(normalizedFirstText) });
 
     const versioned = await request<{ material: Material; snapshot: Snapshot }>(member, 'POST', `/api/v1/projects/${project.id}/materials/${materialId}/snapshots`, {
-      expectedRevision: created.body.material.revision, text: 'Edited paragraph.\n\nДругий абзац.',
+      expectedRevision: created.body.material.revision, text: 'Edited\u00A0paragraph.\n\nДругий&nbsp;абзац. 😀',
     });
     expect(versioned.response.status).toBe(201);
     expect(versioned.body.snapshot).toMatchObject({ sequence: 2, previousSnapshotId: firstSnapshot.id, origin: 'MANUAL_TEXT' });
+    expect((await request<{ snapshot: Snapshot }>(member, 'GET', `/api/v1/projects/${project.id}/materials/${materialId}/snapshots/${versioned.body.snapshot.id}`))
+      .body.snapshot.normalizedText).toBe('Edited paragraph.\n\nДругий абзац. 😀');
     const old = await request<{ snapshot: Snapshot }>(member, 'GET', `/api/v1/projects/${project.id}/materials/${materialId}/snapshots/${firstSnapshot.id}`);
     expect(old.body.snapshot.normalizedText).toBe(normalizedFirstText);
     expect(old.body.snapshot.bytes).toBe(Buffer.byteLength(old.body.snapshot.normalizedText!, 'utf8'));
@@ -185,7 +187,7 @@ describe('manual sources, immutable snapshots, and private originals', () => {
     })).response.status).toBe(409);
     expect((await request(member, 'GET', `/api/v1/projects/${project.id}/materials`)).body).toMatchObject({ materials: [expect.objectContaining({ id: materialId, included: false })] });
 
-    const markdownContent = Buffer.from('# Український документ\r\n\r\nОригінальні байти.\r\n');
+    const markdownContent = Buffer.from('# Український документ\r\n\r\nОригінальні&nbsp;байти.\r\n');
     const markdownBytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), markdownContent]);
     const form = new FormData();
     form.set('label', 'Uploaded notes');
@@ -198,6 +200,11 @@ describe('manual sources, immutable snapshots, and private originals', () => {
     expect(fileSnapshot).toMatchObject({ origin: 'LOCAL_FILE', originalAssetId: expect.any(String) });
     const fileDetails = await request<{ snapshot: Snapshot }>(member, 'GET', `/api/v1/projects/${project.id}/materials/${uploaded.body.material.id}/snapshots/${fileSnapshot.id}`);
     expect(fileDetails.body.snapshot.normalizedText).toBe('# Український документ\n\nОригінальні байти.\n');
+    const uploadedText = fileDetails.body.snapshot.normalizedText!;
+    for (const fragment of fileDetails.body.snapshot.fragments ?? []) {
+      const exact = uploadedText.slice(fragment.startOffset, fragment.endOffset);
+      expect(createHash('sha256').update(Buffer.from(exact, 'utf8')).digest('hex')).toBe(fragment.sha256);
+    }
     const sourceRows = await health.prisma.sourceSnapshot.findMany({ where: { projectId: project.id } });
     expect(sourceRows.every(row => !('bucket' in row) && !('objectKey' in row))).toBe(true);
     expect(JSON.stringify(uploaded.body)).not.toMatch(/bucket|objectKey|signedUrl|privateUrl/i);
@@ -244,7 +251,7 @@ describe('manual sources, immutable snapshots, and private originals', () => {
     const bomSource = await request<{ material: Material; snapshot: Snapshot }>(member, 'POST', `/api/v1/projects/${project.id}/materials/upload`, doubleBom);
     expect(bomSource.response.status).toBe(201);
     const bomDetails = await request<{ snapshot: Snapshot }>(member, 'GET', `/api/v1/projects/${project.id}/materials/${bomSource.body.material.id}/snapshots/${bomSource.body.snapshot.id}`);
-    expect(bomDetails.body.snapshot.normalizedText).toBe('\ufeffkept marker');
+    expect(bomDetails.body.snapshot.normalizedText).toBe(' kept marker');
 
     const storage = app.get(PrivateAssetStore);
     const raceBytes = Buffer.from('delayed storage fixture');

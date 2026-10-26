@@ -10,12 +10,14 @@ import { Button } from '@/components/ui/button'
 import ArticlePreview from './ArticlePreview.vue'
 import ArticleAnnotations from './ArticleAnnotations.vue'
 import GoogleDocsBinding from './GoogleDocsBinding.vue'
+import SourceMarkdown from './SourceMarkdown.vue'
 
 interface Content { title: string; document: JSONContent }
 interface Version { id: string; number: number; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string; status: string; sourceArticleRevision: number; sha256?: string; approvedAt?: string; withdrawnAt?: string; reviewCounter?: number; staleReasons?: string[]; blockingReasons?: string[]; eligible?: boolean; hasUnmapped?: boolean }
 interface Draft { baseVersionId?: string | null; sha256?: string; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string }
-interface Evidence { claimRevisionId: string; evidenceId: string; wording: string; quote: string; snapshotId: string; materialTitle: string }
-interface State { article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleEvidence: Evidence[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { contentMode: string } } | null; outline: { currentApprovedRevisionId: string | null } | null } }
+interface SourcePassage { passageId: string; packetId: string; snapshotId: string; fragmentId: string; startOffset: number; endOffset: number; quote: string; materialId: string; materialTitle: string }
+interface SourceRequest { id: string; stage: string; errorCategory: string | null; resultRefs?: { articleVersionId?: string } }
+interface State { article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleSourcePassages?: SourcePassage[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { contentMode: string } } | null; outline: { currentApprovedRevisionId: string | null; currentRevision?: { sourceEvidenceSetId?: string | null } } | null } }
 interface LanguageSuggestion { id: string; targetType: 'ARTICLE' | 'ADAPTATION'; sourceRevisionId: string; contentHash: string; locator: { field: 'TITLE' | 'BODY' | 'COVER_TEXT'; start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean; resultVersionId?: string | null }
 interface Job { id: string; status: string; operation: string; retryAllowed: boolean }
 const props = defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; archived?: boolean }>()
@@ -42,9 +44,16 @@ let contentsViewport: MediaQueryList | undefined
 let inspectorOpener: HTMLElement | null = null
 let inspectorReadingPosition = { left: 0, top: 0 }
 const candidate = ref<Version | null>(null)
-const selectedEvidence = ref<Evidence | null>(null)
+const selectedPassage = ref<SourcePassage | null>(null)
+const sourceRequest = ref<SourceRequest | null>(null)
+const passageOptions = ref<SourcePassage[]>([])
+const sourceText = ref('')
+const sourceError = ref('')
+const sourceActive = computed(() => !!sourceRequest.value && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(sourceRequest.value.stage))
+const sourceProgress = computed(() => sourceRequest.value?.stage === 'FAILED' && sourceRequest.value.errorCategory === 'NO_RELEVANT_SOURCE_EVIDENCE'
+  ? 'Для одного з розділів бракує корисних уривків серед перевірених. Уточніть план або додайте джерела. Попередній текст збережено.'
+  : ({ INDEXING: 'Готуємо джерела до пошуку…', SEARCHING: 'Добираємо докази для розділів…', READY: 'Докази готові. Починаємо написання…', GENERATING: 'Пишемо й перевіряємо розділи статті…', SUCCEEDED: 'Пропозиція статті готова до перегляду.', FAILED: 'Не вдалося підготувати статтю. Попередній текст збережено.', CANCELLED: 'Підготовку статті скасовано.' } as Record<string,string>)[sourceRequest.value?.stage ?? ''] ?? '')
 const annotationAnchor = ref<{ start: number; end: number; quote: string } | null>(null)
-const linkedWording = ref('')
 const importedText = ref('')
 const acknowledgeUnmapped = ref(false)
 const recovered = ref<{ content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; expectedRevision: number } | null>(null)
@@ -86,16 +95,20 @@ const articleNavigation = Extension.create({
   })],
 })
 const evidenceMark = Mark.create({ name: 'evidence', inclusive: false, addAttributes: () => ({ claimRevisionId: { default: null }, evidenceId: { default: null }, quote: { default: null } }), parseHTML: () => [], renderHTML: ({ HTMLAttributes }) => ['span', { class: 'article-evidence', 'data-evidence-id': HTMLAttributes.evidenceId, 'data-linked-wording': HTMLAttributes.quote, tabindex: 0, role: 'button', 'aria-label': 'Переглянути доказ для цього речення' }, 0] })
-const editor = useEditor({ injectCSS: false, extensions: [StarterKit.configure({ heading: { levels: [2, 3] }, code: false, codeBlock: false, horizontalRule: false, link: false, underline: false, trailingNode: false }), evidenceMark, articleNavigation], content: { type: 'doc', content: [{ type: 'paragraph' }] }, editorProps: { attributes: { 'aria-label': 'Текст статті', role: 'textbox', 'aria-multiline': 'true' }, handleDOMEvents: { click: (_view, event) => inspectEvidence(event), keydown: (_view, event) => (event.key === 'Enter' || event.key === ' ') && inspectEvidence(event) } }, onUpdate: () => changed() })
+const sourceEvidenceMark = Mark.create({ name: 'source_evidence', inclusive: false, excludes: 'evidence source_evidence',
+  addAttributes: () => ({ passageId: { default: null }, packetId: { default: null }, quote: { default: null } }), parseHTML: () => [],
+  renderHTML: ({ HTMLAttributes }) => ['span', { class: 'article-evidence', 'data-passage-id': HTMLAttributes.passageId,
+    'data-packet-id': HTMLAttributes.packetId, 'data-source-quote': HTMLAttributes.quote, tabindex: 0, role: 'button', 'aria-label': 'Переглянути уривок джерела' }, 0] })
+const editor = useEditor({ injectCSS: false, extensions: [StarterKit.configure({ heading: { levels: [2, 3] }, code: false, codeBlock: false, horizontalRule: false, link: false, underline: false, trailingNode: false }), evidenceMark, sourceEvidenceMark, articleNavigation], content: { type: 'doc', content: [{ type: 'paragraph' }] }, editorProps: { attributes: { 'aria-label': 'Текст статті', role: 'textbox', 'aria-multiline': 'true' }, handleDOMEvents: { click: (_view, event) => inspectEvidence(event), keydown: (_view, event) => (event.key === 'Enter' || event.key === ' ') && inspectEvidence(event) } }, onUpdate: () => changed() })
 const sections = computed(() => { void editEpoch.value; return editor.value ? articleSections(editor.value.state.doc) : [] })
 function canonicalNode(node: JSONContent): JSONContent {
-  return { type: node.type ?? 'doc', ...(node.type === 'heading' ? { attrs: { level: node.attrs?.level } } : {}), ...(node.text === undefined ? {} : { text: node.text }), ...(node.marks ? { marks: node.marks.map(mark => ({ type: mark.type, ...(mark.type === 'evidence' ? { attrs: { claimRevisionId: mark.attrs?.claimRevisionId, evidenceId: mark.attrs?.evidenceId, quote: mark.attrs?.quote } } : {}) })) } : {}), ...(node.content ? { content: node.content.map(canonicalNode) } : {}) }
+  return { type: node.type ?? 'doc', ...(node.type === 'heading' ? { attrs: { level: node.attrs?.level } } : {}), ...(node.text === undefined ? {} : { text: node.text }), ...(node.marks ? { marks: node.marks.map(mark => ({ type: mark.type, ...(mark.type === 'evidence' ? { attrs: { claimRevisionId: mark.attrs?.claimRevisionId, evidenceId: mark.attrs?.evidenceId, quote: mark.attrs?.quote } } : mark.type === 'source_evidence' ? { attrs: { passageId: mark.attrs?.passageId, packetId: mark.attrs?.packetId, quote: mark.attrs?.quote } } : {}) })) } : {}), ...(node.content ? { content: node.content.map(canonicalNode) } : {}) }
 }
 function payload() { return { content: { title: title.value, document: canonicalNode(editor.value?.getJSON() ?? { type: 'doc', content: [{ type: 'paragraph' }] }) }, contentMode: contentMode.value } }
 const serialized = computed(() => { void editEpoch.value; return JSON.stringify(payload()) })
 const dirty = computed(() => baseline.value !== serialized.value)
 const readonly = computed(() => !!props.archived || !state.value?.articleSelected)
-const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
+const activeJob = computed(() => sourceActive.value || jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
 const actionableJobs = computed(() => jobs.value.filter(job => !['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const completedJobs = computed(() => jobs.value.filter(job => ['SUCCEEDED', 'CANCELLED'].includes(job.status)))
 const proposals = computed(() => state.value?.article?.versions.filter(version => version.origin === 'AI' && version.status === 'PROPOSED' && version.id !== state.value?.article?.draft?.baseVersionId) ?? [])
@@ -182,7 +195,7 @@ function acceptLanguage() {
 function rejectLanguage(item: LanguageSuggestion) { if (!languageSourceCurrent.value) return; void mutateLanguage(`/${encodeURIComponent(item.id)}/reject`, { expectedRevision: state.value?.article?.revision }) }
 watch(() => annotationVersion.value.id, () => { void loadLanguageSuggestions() })
 function dependencyStatus(reasons: string[]) {
-  const labels: Record<string, string> = { WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', BRIEF_CHANGED: 'змінився бриф', MISSING_FACTUAL_BASIS: 'немає придатної фактичної основи', INVALID_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', INVALID_ORIGINAL_FACTUAL_BASIS: 'початкова фактична основа втратила придатність', FACTUAL_BASIS_CHANGED: 'змінилася фактична основа', OUTLINE_CHANGED: 'змінилася погоджена структура', INVALID_ORIGINAL_EVIDENCE: 'початкові докази статті втратили придатність' }
+  const labels: Record<string, string> = { WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', BRIEF_CHANGED: 'змінився бриф', OUTLINE_CHANGED: 'змінилася погоджена структура', INVALID_ORIGINAL_EVIDENCE: 'початкові докази статті втратили придатність' }
   return reasons.map(reason => labels[reason] ?? 'змінилися редакційні залежності').join('; ')
 }
 watch([readonly, languageBusy], ([isReadonly, reviewing]) => editor.value?.setEditable(!isReadonly && !reviewing))
@@ -247,11 +260,11 @@ async function request(path: string, body?: unknown) {
   if (response.status === 401) { emit('session-expired'); throw new Error('Сесію завершено.') }
   if (!response.ok) {
     if (response.status === 409) conflict.value = true
-    throw new Error(response.status === 409 ? 'Є нові зміни або змінилися редакційні залежності. Ваш текст залишився в редакторі.' : response.status === 503 ? 'AI-генерація тимчасово недоступна. Ви можете продовжувати редагування.' : response.status === 400 ? 'Перевірте текст, посилання на факти та актуальність брифу.' : 'Не вдалося виконати дію. Ваш текст залишився в редакторі; повторіть спробу.')
+    throw new Error(response.status === 409 ? 'Є нові зміни або змінилися редакційні залежності. Ваш текст залишився в редакторі.' : response.status === 503 ? 'AI-генерація тимчасово недоступна. Ви можете продовжувати редагування.' : response.status === 400 ? 'Перевірте текст, посилання на уривки джерел та актуальність брифу.' : 'Не вдалося виконати дію. Ваш текст залишився в редакторі; повторіть спробу.')
   }
   return response.json()
 }
-async function load(reset = false) { state.value = await request('/article') as State; if (reset) populate(state.value.article?.draft); editor.value?.setEditable(!readonly.value) }
+async function load(reset = false) { state.value = await request('/article') as State; passageOptions.value = state.value.eligibleSourcePassages ?? []; if (reset) populate(state.value.article?.draft); editor.value?.setEditable(!readonly.value) }
 async function save(): Promise<boolean> {
   clearTimeout(saveTimer)
   if (inFlight) { const ok = await inFlight; return ok && dirty.value ? save() : ok }
@@ -337,16 +350,54 @@ async function annotationCandidateCreated(versionId: string) {
     if (candidate.value) inspector.value = 'proposal'
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося оновити версію статті.' }
 }
+async function openSourcePassage(passageId: string, packetId: string, versionId?: string) {
+  sourceError.value = ''; sourceText.value = ''
+  try {
+    let passage = passageOptions.value.find(row => row.passageId === passageId && row.packetId === packetId)
+    if (!passage && versionId) {
+      const result = await request(`/article/${versionId}/source-passages`) as { passages: SourcePassage[] }
+      passage = result.passages.find(row => row.passageId === passageId && row.packetId === packetId)
+    }
+    if (!passage) throw new Error('Уривок недоступний у цій версії статті.')
+    selectedPassage.value = passage; inspector.value = 'evidence'
+    const result = await request(`/materials/${passage.materialId}/snapshots/${passage.snapshotId}`) as { snapshot: { normalizedText: string } }
+    if (selectedPassage.value !== passage) return
+    if (result.snapshot.normalizedText.slice(passage.startOffset,passage.endOffset) !== passage.quote) throw new Error('Посилання не відповідає збереженому джерелу.')
+    sourceText.value = result.snapshot.normalizedText
+  } catch (cause) { sourceError.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити джерело.' }
+}
+function linkSourcePassage(item: SourcePassage) {
+  const current = editor.value
+  if (!current || current.state.selection.empty) { error.value = 'Спочатку виділіть речення в статті.'; return }
+  current.chain().focus().unsetMark('evidence').unsetMark('source_evidence')
+    .setMark('source_evidence',{ passageId: item.passageId,packetId: item.packetId,quote: item.quote }).run()
+  selectedPassage.value = item
+}
+async function generateFromSources() {
+  commandKey ??= crypto.randomUUID(); busy.value = true; error.value = ''
+  try {
+    sourceRequest.value = (await request('/article/source-prepare',{ expectedRevision: expectedRevision.value,commandKey }) as { request: SourceRequest }).request
+    sessionStorage.setItem(`${recoveryKey}:source-request`,sourceRequest.value.id); commandKey = null
+    await poll()
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося почати підготовку статті.' }
+  finally { busy.value = false }
+}
+async function cancelSourceRequest() {
+  if (!sourceRequest.value || busy.value) return
+  busy.value = true
+  try { sourceRequest.value = (await request(`/source-writing/${sourceRequest.value.id}/cancel`,{}) as { request: SourceRequest }).request; sessionStorage.removeItem(`${recoveryKey}:source-request`) }
+  catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося скасувати підготовку.' }
+  finally { busy.value = false }
+}
 function format(kind: string) { const chain = editor.value?.chain().focus(); if (!chain) return; if (kind === 'bold') chain.toggleBold().run(); if (kind === 'italic') chain.toggleItalic().run(); if (kind === 'heading') chain.toggleHeading({ level: 2 }).run(); if (kind === 'list') chain.toggleBulletList().run() }
-function inspectEvidence(event: Event) { const target = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-evidence-id]'); if (!target) return false; const item = state.value?.eligibleEvidence.find(row => row.evidenceId === target.dataset.evidenceId); if (!item) return false; event.preventDefault(); selectedEvidence.value = item; linkedWording.value = target.dataset.linkedWording ?? ''; inspector.value = 'evidence'; return true }
-function linkEvidence(item: Evidence) { const current = editor.value; if (!current) return; const { from, to } = current.state.selection; const quote = current.state.doc.textBetween(from, to, '\n'); if (!quote.trim()) { error.value = 'Спочатку виділіть речення, яке підтверджує цей факт.'; return }; current.chain().focus().unsetMark('evidence').setMark('evidence', { claimRevisionId: item.claimRevisionId, evidenceId: item.evidenceId, quote }).run(); selectedEvidence.value = item; linkedWording.value = quote }
-async function generate() { if (!await save()) return; commandKey ??= crypto.randomUUID(); busy.value = true; try { await request('/article/generate', { expectedRevision: expectedRevision.value, commandKey }); commandKey = null; await poll() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося створити пропозицію.' } finally { busy.value = false } }
+function inspectEvidence(event: Event) { const source = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-passage-id]'); if (source?.dataset.passageId && source.dataset.packetId) { event.preventDefault(); void openSourcePassage(source.dataset.passageId, source.dataset.packetId); return true }; return false }
+async function generate() { if (!await save()) return; if (contentMode.value === 'FACTUAL') { await generateFromSources(); return }; commandKey ??= crypto.randomUUID(); busy.value = true; try { await request('/article/generate', { expectedRevision: expectedRevision.value, commandKey }); commandKey = null; await poll() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося створити пропозицію.' } finally { busy.value = false } }
 async function importReady() { if (!importedText.value.trim() || busy.value) return; busy.value = true; try { const content: Content = { title: title.value || props.projectTopic, document: { type: 'doc', content: importedText.value.split(/\n\s*\n/).filter(Boolean).map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) } }; state.value = await request('/article/import', { expectedRevision: expectedRevision.value, contentMode: contentMode.value, content }) as State; populate(state.value.article?.draft); sessionStorage.removeItem(recoveryKey); importedText.value = ''; inspector.value = null } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося додати статтю.' } finally { busy.value = false } }
-async function poll() { clearTimeout(pollTimer); if (disposed) return; try { const result = await request('/jobs') as { jobs: Job[] }; jobs.value = result.jobs.filter(job => job.operation === 'ARTICLE_GENERATION'); await load() } catch { /* Saving errors remain the primary action boundary. */ } finally { if (!disposed) pollTimer = setTimeout(() => void poll(), activeJob.value ? 2000 : 5000) } }
+async function poll() { clearTimeout(pollTimer); if (disposed) return; try { if (sourceActive.value && sourceRequest.value) { sourceRequest.value = (await request(`/source-writing/${sourceRequest.value.id}`) as { request: SourceRequest }).request; if (!sourceActive.value) sessionStorage.removeItem(`${recoveryKey}:source-request`) }; const result = await request('/jobs') as { jobs: Job[] }; jobs.value = result.jobs.filter(job => job.operation === 'ARTICLE_GENERATION'); await load() } catch { /* Saving errors remain the primary action boundary. */ } finally { if (!disposed) pollTimer = setTimeout(() => void poll(), activeJob.value ? 2000 : 5000) } }
 async function jobAction(job: Job, kind: 'retry' | 'cancel') { try { await request(`/jobs/${job.id}/${kind}`, {}); await poll() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Дія недоступна.' } }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { retain(); event.preventDefault(); event.returnValue = '' } }
 function endSession() { sessionEnded = true; disposed = true; controller.abort(); clearTimeout(saveTimer); clearTimeout(pollTimer); hydration = true; title.value = ''; editor.value?.commands.clearContent(false); recovered.value = null; state.value = null }
-onMounted(async () => { window.addEventListener('cf:article-session-ended', endSession); try { await load(true); const saved = sessionStorage.getItem(recoveryKey); if (saved) recovered.value = JSON.parse(saved) as typeof recovered.value; await poll() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити статтю.' } finally { loading.value = false }; window.addEventListener('beforeunload', beforeUnload) })
+onMounted(async () => { window.addEventListener('cf:article-session-ended', endSession); try { await load(true); const pending = sessionStorage.getItem(`${recoveryKey}:source-request`); if (pending) sourceRequest.value = { id: pending, stage: 'GENERATING', errorCategory: null }; const saved = sessionStorage.getItem(recoveryKey); if (saved) recovered.value = JSON.parse(saved) as typeof recovered.value; await poll() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити статтю.' } finally { loading.value = false }; window.addEventListener('beforeunload', beforeUnload) })
 onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTimeout(saveTimer); clearTimeout(pollTimer); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('cf:article-session-ended', endSession); editor.value?.destroy() })
 </script>
 
@@ -433,7 +484,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
         v-if="state.article?.draft?.origin === 'UNVERIFIED_IMPORTED'"
         class="article-notice"
       >
-        Готова стаття · Не перевірено. Перегляньте текст і підтвердіть посилання на факти перед погодженням.
+        Готова стаття · Не перевірено. Перегляньте текст і перевірте посилання на уривки джерел перед погодженням.
       </p>
       <p
         v-if="state.staleReasons.length"
@@ -510,6 +561,19 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           Google Документи
         </Button>
       </div>
+      <p
+        v-if="sourceRequest"
+        role="status"
+      >
+        {{ sourceProgress }} <Button
+          v-if="sourceActive"
+          variant="ghost"
+          :disabled="busy"
+          @click="cancelSourceRequest"
+        >
+          Скасувати підготовку статті
+        </Button>
+      </p>
       <div
         v-if="state.article || state.articleSelected"
         class="article-layout"
@@ -623,7 +687,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 type="checkbox"
                 true-value="FACTUAL"
                 false-value="CREATIVE"
-              > Матеріал на перевірених фактах</label><Button
+              > На основі джерел</label><Button
                 class="workspace-button workspace-button-primary"
                 :disabled="busy || saving || conflict || !!recovered || !title.trim()"
                 @click="action('/article/checkpoint')"
@@ -788,38 +852,64 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           />
           <template v-if="inspector === 'evidence'">
             <section
-              v-if="selectedEvidence"
+              v-if="selectedPassage"
               class="article-selected-evidence"
-              aria-label="Вибраний доказ"
+              aria-label="Уривок джерела"
             >
-              <h3>{{ selectedEvidence.materialTitle }}</h3>
-              <blockquote>{{ selectedEvidence.quote }}</blockquote>
-              <p v-if="linkedWording">
-                Спочатку прив’язане речення: «{{ linkedWording }}».
+              <h3>{{ selectedPassage.materialTitle }}</h3><blockquote>
+                <SourceMarkdown
+                  :text="selectedPassage.quote"
+                  compact
+                />
+              </blockquote>
+              <p
+                v-if="sourceError"
+                role="alert"
+              >
+                {{ sourceError }}
               </p>
+              <details v-if="sourceText">
+                <summary>Точне місце в джерелі</summary><div class="source-full-text">
+                  <SourceMarkdown
+                    :text="sourceText"
+                    :highlight="{ startOffset: selectedPassage.startOffset, endOffset: selectedPassage.endOffset }"
+                  />
+                </div>
+              </details>
             </section>
-            <p>Виділіть речення в статті та виберіть факт. Повторне прив’язування означає, що ви переглянули саме ці слова.</p><p v-if="!state.eligibleEvidence.length">
-              Немає придатних перевірених доказів. Перейдіть до фактів, щоб сформувати основу.
-            </p><section
-              v-for="item in state.eligibleEvidence"
-              :key="item.evidenceId"
+            <section
+              v-for="item in passageOptions"
+              :key="item.passageId"
               class="article-evidence-item"
             >
-              <h3>{{ item.materialTitle }}</h3><p>{{ item.wording }}</p><blockquote>{{ item.quote }}</blockquote><Button
-                class="workspace-button"
+              <h3>{{ item.materialTitle }}</h3><blockquote>
+                <SourceMarkdown
+                  :text="item.quote"
+                  compact
+                />
+              </blockquote>
+              <Button
                 variant="outline"
                 :disabled="readonly || contentMode !== 'FACTUAL'"
-                @click="linkEvidence(item)"
+                @mousedown.prevent
+                @click="linkSourcePassage(item)"
               >
-                Прив’язати виділення
+                Прив’язати виділення до уривка
               </Button>
-            </section><Button
+              <Button
+                variant="ghost"
+                @click="openSourcePassage(item.passageId,item.packetId)"
+              >
+                Відкрити джерело
+              </Button>
+            </section>
+            <p>Виділіть текст і прив’яжіть його до уривка джерела.</p><Button
               class="workspace-button"
               variant="ghost"
               :disabled="readonly"
-              @click="editor?.chain().focus().unsetMark('evidence').run()"
+              @click="editor?.chain().focus().unsetMark('source_evidence').run()"
             >
-              Прибрати посилання з виділення
+              Прибрати посилання на джерело
             </Button>
           </template>
           <template v-if="inspector === 'history'">
@@ -844,7 +934,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 <label v-if="version.hasUnmapped"><input
                   v-model="acknowledgeUnmapped"
                   type="checkbox"
-                > Переглянув твердження без посилань</label><Button
+                > Переглянув речення без посилань на джерела</label><Button
                   class="workspace-button workspace-button-primary"
                   :disabled="busy || dirty || conflict || !!version.blockingReasons?.length || !!state.mappingIssues.length || (version.hasUnmapped && !acknowledgeUnmapped)"
                   @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped })"
@@ -855,7 +945,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 <label v-if="version.hasUnmapped"><input
                   v-model="acknowledgeUnmapped"
                   type="checkbox"
-                > Переглянув твердження без посилань</label><Button
+                > Переглянув речення без посилань на джерела</label><Button
                   class="workspace-button workspace-button-primary"
                   :disabled="busy || dirty || conflict || !!version.blockingReasons?.length || (version.hasUnmapped && !acknowledgeUnmapped)"
                   @click="action(`/article/${version.id}/rereview`, { acknowledgeUnmapped, expectedRevision: state.article?.revision, expectedReviewCounter: version.reviewCounter ?? 0 })"
@@ -881,7 +971,13 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             </section>
           </template>
           <template v-if="inspector === 'proposal' && candidate">
-            <p>{{ candidate.origin === 'AI' ? 'Пропозиція AI · Не застосовано' : candidate.origin === 'UNVERIFIED_IMPORTED' ? 'Імпортована версія · Не застосовано' : 'Пропозиція правки · Не застосовано' }}</p><h3>{{ candidate.content.title }}</h3><h4>Поточний текст</h4><ArticlePreview :document="payload().content.document" /><h4>Запропонований текст</h4><ArticlePreview :document="candidate.content.document" /><p v-if="(candidate.origin === 'AI' && candidate.sourceArticleRevision !== expectedRevision) || dirty">
+            <p>{{ candidate.origin === 'AI' ? 'Пропозиція AI · Не застосовано' : candidate.origin === 'UNVERIFIED_IMPORTED' ? 'Імпортована версія · Не застосовано' : 'Пропозиція правки · Не застосовано' }}</p><h3>{{ candidate.content.title }}</h3><h4>Поточний текст</h4><ArticlePreview
+              :document="payload().content.document"
+              @source-citation="openSourcePassage"
+            /><h4>Запропонований текст</h4><ArticlePreview
+              :document="candidate.content.document"
+              @source-citation="(passageId, packetId) => openSourcePassage(passageId, packetId, candidate?.id)"
+            /><p v-if="(candidate.origin === 'AI' && candidate.sourceArticleRevision !== expectedRevision) || dirty">
               Чернетка змінилася після запуску. Цю пропозицію не можна застосувати до поточного тексту.
             </p><Button
               class="workspace-button workspace-button-primary"
@@ -1005,6 +1101,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 .article-inspector blockquote { border-left: 1px solid var(--rule); margin-inline: 0; padding-left: 12px; font-family: var(--serif); font-size: 19px; line-height: 1.55; }
 .article-inspector pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 380px; overflow: auto; }
 .article-inspector details summary { cursor: pointer; min-height: 44px; padding-block: 12px; }
+.source-full-text { max-height: 55vh; overflow: auto; overflow-wrap: anywhere; }
 .article-notice, .article-error { padding: 14px 0; line-height: 1.6; border-top: 1px solid var(--rule); }
 .article-error { color: var(--error); }
 .article-proposals, .article-job { margin-top: 18px; font-size: 14px; }

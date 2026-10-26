@@ -8,12 +8,14 @@ import { claimInputManifestSchema, claimsOutputSchema, claimWorkflowReleaseSchem
   type EditClaimInput, type EvidenceInput, type ClaimWorkflowRelease } from './contracts.js';
 
 const evidenceInclude = { snapshot: { select: { materialId: true, sequence: true, material: { select: { label: true } } } } } as const;
+const evidenceFragmentInclude = { snapshot: { include: { material: { select: { purpose: true } } } } } as const;
 const actorSelect = { displayName: true } satisfies Prisma.UserProfileSelect;
 const revisionInclude = { evidence: { include: evidenceInclude, orderBy: { id: 'asc' as const } },
   approver: { select: actorSelect }, rejector: { select: actorSelect }, withdrawer: { select: actorSelect } } as const;
 const claimInclude = { currentRevision: { include: revisionInclude } } as const;
 type ClaimRecord = Prisma.ClaimGetPayload<{ include: typeof claimInclude }>;
 type RevisionRecord = Prisma.ClaimRevisionGetPayload<{ include: typeof revisionInclude }>;
+type EvidenceFragment = Prisma.SourceFragmentGetPayload<{ include: typeof evidenceFragmentInclude }>;
 const conflictInclude = { participants: { include: { revision: { select: { wording: true } } } }, selectedEvidence: true,
   supersededBy: { select: { id: true } } } as const;
 type ConflictRecord = Prisma.ClaimConflictGetPayload<{ include: typeof conflictInclude }>;
@@ -63,7 +65,8 @@ export class FactualBasisService {
     if (!claim) throw new NotFoundException('Claim not found');
     return claim;
   }
-  private async checkEvidence(tx: Prisma.TransactionClient, projectId: string, inputs: readonly EvidenceInput[], frozenIds?: Set<string>): Promise<void> {
+  private async checkEvidence(tx: Prisma.TransactionClient, projectId: string, inputs: readonly EvidenceInput[], frozenIds?: Set<string>,
+    prefetched?: ReadonlyMap<string, EvidenceFragment>): Promise<void> {
     if (!inputs.some(row => row.relation === 'SUPPORTS')) throw new BadRequestException('A claim needs supporting factual evidence');
     const seen = new Set<string>();
     for (const input of inputs) {
@@ -71,8 +74,9 @@ export class FactualBasisService {
       if (seen.has(key)) throw new BadRequestException('Duplicate evidence');
       seen.add(key);
       if (frozenIds && !frozenIds.has(input.snapshotId)) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
-      const fragment = await tx.sourceFragment.findFirst({ where: { id: input.fragmentId, snapshotId: input.snapshotId, projectId },
-        include: { snapshot: { include: { material: { select: { purpose: true } } } } } });
+      const fragment = prefetched?.get(`${input.snapshotId}:${input.fragmentId}`) ?? (prefetched ? null : await tx.sourceFragment.findFirst({
+        where: { id: input.fragmentId, snapshotId: input.snapshotId, projectId },
+        include: evidenceFragmentInclude }));
       if (!fragment || (!frozenIds && fragment.snapshot.material.purpose !== 'FACTUAL_SOURCE')
         || input.startOffset < fragment.startOffset || input.endOffset > fragment.endOffset || input.startOffset >= input.endOffset
         || Buffer.from(input.quote, 'utf8').toString('utf8') !== input.quote
@@ -130,15 +134,29 @@ export class FactualBasisService {
     const conflicts = await tx.claimConflict.findMany({ where: { projectId, participants: { some: { claimId } }, supersededBy: { is: null } }, select: { resolvedAt: true, selectedRevisionId: true } });
     return conflicts.some(row => !row.resolvedAt || (!unresolvedOnly && row.selectedRevisionId !== revisionId));
   }
-  private async eligible(tx: Prisma.TransactionClient, revision: RevisionRecord, currentId: string | null): Promise<string[]> {
-    const reasons: string[] = [];
-    if (revision.id !== currentId) reasons.push('CLAIM_CHANGED');
-    if (revision.status !== 'APPROVED') reasons.push('NOT_APPROVED');
-    if (revision.withdrawnAt) reasons.push('WITHDRAWN');
-    if (!revision.evidence.some(row => row.relation === 'SUPPORTS' && !row.invalidatedAt)) reasons.push('MISSING_SUPPORT');
-    if (revision.evidence.some(row => row.invalidatedAt)) reasons.push('INVALID_EVIDENCE');
-    if (await this.conflictBlocks(tx, revision.projectId, revision.claimId, revision.id)) reasons.push('CONFLICT');
-    return reasons;
+  private async eligibleMany(tx: Prisma.TransactionClient, candidates: readonly { revision: RevisionRecord; currentId: string | null }[]): Promise<Map<string, string[]>> {
+    const conflicts = candidates.length ? await tx.claimConflictParticipant.findMany({ where: {
+      projectId: candidates[0]!.revision.projectId, claimId: { in: [...new Set(candidates.map(row => row.revision.claimId))] },
+      conflict: { supersededBy: { is: null } },
+    }, select: { claimId: true, conflict: { select: { resolvedAt: true, selectedRevisionId: true } } } }) : [];
+    const candidateByClaim = new Map(candidates.map(row => [row.revision.claimId, row.revision.id]));
+    const blocked = new Set<string>();
+    for (const row of conflicts) {
+      const currentRevisionId = candidateByClaim.get(row.claimId);
+      if (currentRevisionId && (!row.conflict.resolvedAt || row.conflict.selectedRevisionId !== currentRevisionId)) blocked.add(currentRevisionId);
+    }
+    const result = new Map<string, string[]>();
+    for (const { revision, currentId } of candidates) {
+      const reasons: string[] = [];
+      if (revision.id !== currentId) reasons.push('CLAIM_CHANGED');
+      if (revision.status !== 'APPROVED') reasons.push('NOT_APPROVED');
+      if (revision.withdrawnAt) reasons.push('WITHDRAWN');
+      if (!revision.evidence.some(row => row.relation === 'SUPPORTS' && !row.invalidatedAt)) reasons.push('MISSING_SUPPORT');
+      if (revision.evidence.some(row => row.invalidatedAt)) reasons.push('INVALID_EVIDENCE');
+      if (blocked.has(revision.id)) reasons.push('CONFLICT');
+      result.set(revision.id, reasons);
+    }
+    return result;
   }
   async review(userId: string, projectId: string, id: string, revisionId: string, action: 'approve' | 'reject' | 'withdraw', input: { expectedRevision: number; reason?: string | undefined }) {
     return this.command(userId, projectId, async tx => {
@@ -237,8 +255,9 @@ export class FactualBasisService {
     const relationalManifest = { schemaVersion: 'basis-v1', claims: [...basis.claims].sort((a, b) => a.claimRevisionId.localeCompare(b.claimRevisionId))
       .map(row => ({ claimId: row.claimId, claimRevisionId: row.claimRevisionId, evidenceIds: row.evidence.map(edge => edge.evidenceId).sort() })) };
     if (canonicalManifestHash(basis.manifest) !== basis.sha256 || canonicalManifestHash(relationalManifest) !== basis.sha256) reasons.add('BASIS_INTEGRITY');
+    const eligibility = await this.eligibleMany(tx, basis.claims.map(row => ({ revision: row.claimRevision, currentId: row.claim.currentRevisionId })));
     for (const row of basis.claims) {
-      for (const reason of await this.eligible(tx, row.claimRevision, row.claim.currentRevisionId)) reasons.add(reason);
+      for (const reason of eligibility.get(row.claimRevisionId) ?? []) reasons.add(reason);
       if (!row.evidence.length || row.evidence.some(edge => !row.claimRevision.evidence.some(evidence => evidence.id === edge.evidenceId && evidence.relation === 'SUPPORTS' && !evidence.invalidatedAt))) reasons.add('INVALID_EVIDENCE');
     }
     return { id: basis.id, sequence: basis.sequence, manifest: basis.manifest, sha256: basis.sha256, createdBy: basis.createdBy,
@@ -252,8 +271,9 @@ export class FactualBasisService {
   // pass a generation/approval check on a different database snapshot.
   async inspectBasis(tx: Prisma.TransactionClient, projectId: string, mode: 'FACTUAL' | 'CREATIVE') {
       const claims = await tx.claim.findMany({ where: { projectId, currentRevision: { status: 'APPROVED', withdrawnAt: null } }, include: claimInclude });
-      const eligibleClaims: ReturnType<typeof claimView>[] = [];
-      for (const claim of claims) if (claim.currentRevision && !(await this.eligible(tx, claim.currentRevision, claim.currentRevisionId)).length) eligibleClaims.push(claimView(claim));
+      const candidates = claims.flatMap(claim => claim.currentRevision ? [{ claim, revision: claim.currentRevision, currentId: claim.currentRevisionId }] : []);
+      const eligibility = await this.eligibleMany(tx, candidates.map(row => ({ revision: row.revision, currentId: row.currentId })));
+      const eligibleClaims = candidates.filter(row => !(eligibility.get(row.revision.id)?.length)).map(row => claimView(row.claim));
       const latest = await tx.factualBasisRevision.findFirst({ where: { projectId }, orderBy: { sequence: 'desc' }, select: { id: true } });
       const basis = latest ? await this.basisView(tx, latest.id) : null;
       return { mode, basis, eligibleClaims, missingBasis: mode === 'FACTUAL' && (!basis || !basis.valid), unverified: mode === 'CREATIVE',
@@ -268,16 +288,19 @@ export class FactualBasisService {
     return this.command(userId, projectId, async tx => {
       const selected = await tx.claimRevision.findMany({ where: { projectId, id: { in: input.claimRevisionIds } }, include: { ...revisionInclude, claim: { select: { currentRevisionId: true } } } });
       if (selected.length !== input.claimRevisionIds.length || new Set(selected.map(row => row.claimId)).size !== selected.length) throw new BadRequestException('Basis references must be exact revisions in this Project');
-      for (const revision of selected) if ((await this.eligible(tx, revision, revision.claim.currentRevisionId)).length) throw new ConflictException('Basis accepts only eligible approved current claims');
+      const eligibility = await this.eligibleMany(tx, selected.map(revision => ({ revision, currentId: revision.claim.currentRevisionId })));
+      if (selected.some(revision => (eligibility.get(revision.id)?.length ?? 0) > 0)) throw new ConflictException('Basis accepts only eligible approved current claims');
       const entries = selected.sort((a, b) => a.id.localeCompare(b.id)).map(row => ({ claimId: row.claimId, claimRevisionId: row.id,
         evidenceIds: row.evidence.filter(evidence => evidence.relation === 'SUPPORTS' && !evidence.invalidatedAt).map(evidence => evidence.id).sort() }));
       const manifest = { schemaVersion: 'basis-v1', claims: entries };
       const previous = await tx.factualBasisRevision.findFirst({ where: { projectId }, orderBy: { sequence: 'desc' }, select: { sequence: true } });
       const id = randomUUID();
       await tx.factualBasisRevision.create({ data: { id, projectId, sequence: (previous?.sequence ?? 0) + 1, manifest, sha256: canonicalManifestHash(manifest), createdBy: userId } });
-      for (const entry of entries) {
-        await tx.basisClaim.create({ data: { projectId, basisId: id, claimId: entry.claimId, claimRevisionId: entry.claimRevisionId } });
-        await tx.basisClaimEvidence.createMany({ data: entry.evidenceIds.map(evidenceId => ({ projectId, basisId: id, claimRevisionId: entry.claimRevisionId, evidenceId })) });
+      await tx.basisClaim.createMany({ data: entries.map(entry => ({ projectId, basisId: id, claimId: entry.claimId, claimRevisionId: entry.claimRevisionId })) });
+      const evidenceEdges = entries.flatMap(entry => entry.evidenceIds.map(evidenceId => ({ projectId, basisId: id,
+        claimRevisionId: entry.claimRevisionId, evidenceId })));
+      for (let offset = 0; offset < evidenceEdges.length; offset += 1000) {
+        await tx.basisClaimEvidence.createMany({ data: evidenceEdges.slice(offset, offset + 1000) });
       }
       return { basis: await this.basisView(tx, id) };
     });
@@ -304,25 +327,70 @@ export class FactualBasisService {
     const keys = new Set(output.claims.map(row => row.key));
     if (keys.size !== output.claims.length || output.conflicts.some(row => new Set(row.claimKeys).size !== row.claimKeys.length || row.claimKeys.some(key => !keys.has(key)))) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     const snapshotIds = new Set(frozen.snapshots.map(row => row.snapshotId));
+    const actualSnapshots = await tx.sourceSnapshot.findMany({ where: { projectId: job.projectId, id: { in: [...snapshotIds] } },
+      select: { id: true, materialId: true, sha256: true } });
+    const actualById = new Map(actualSnapshots.map(row => [row.id, row]));
     for (const snapshot of frozen.snapshots) {
-      const actual = await tx.sourceSnapshot.findFirst({ where: { projectId: job.projectId, id: snapshot.snapshotId, materialId: snapshot.materialId }, select: { sha256: true } });
-      if (!actual || actual.sha256 !== snapshot.sha256) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
+      const actual = actualById.get(snapshot.snapshotId);
+      if (!actual || actual.materialId !== snapshot.materialId || actual.sha256 !== snapshot.sha256) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     }
+
+    const evidencePairs = new Map<string, { snapshotId: string; fragmentId: string }>();
+    for (const claim of output.claims) for (const evidence of claim.evidence) {
+      const key = `${evidence.snapshotId}:${evidence.fragmentId}`;
+      evidencePairs.set(key, { snapshotId: evidence.snapshotId, fragmentId: evidence.fragmentId });
+    }
+    const fragmentRows = evidencePairs.size ? await tx.sourceFragment.findMany({
+      where: { projectId: job.projectId, snapshotId: { in: [...new Set([...evidencePairs.values()].map(row => row.snapshotId))] },
+        id: { in: [...new Set([...evidencePairs.values()].map(row => row.fragmentId))] } },
+      include: evidenceFragmentInclude,
+    }) : [];
+    const fragmentsByKey = new Map(fragmentRows.map(row => [`${row.snapshotId}:${row.id}`, row]));
+    const checkedEvidenceSets = new Set<string>();
     for (const claim of output.claims) {
       for (const evidence of claim.evidence) {
         const snapshot = frozen.snapshots.find(row => row.snapshotId === evidence.snapshotId);
-        if (!snapshot?.fragments.some(row => row.id === evidence.fragmentId && evidence.startOffset >= row.startOffset && evidence.endOffset <= row.endOffset)) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
+        if (!snapshot?.fragments.some(row => row.id === evidence.fragmentId && evidence.startOffset >= row.startOffset && evidence.endOffset <= row.endOffset)) {
+          throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
+        }
       }
-      try { await this.checkEvidence(tx, job.projectId, claim.evidence, snapshotIds); }
-      catch { throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED'); }
+      const canonicalEvidenceSet = JSON.stringify(claim.evidence.map(row => ({ snapshotId: row.snapshotId, fragmentId: row.fragmentId,
+        startOffset: row.startOffset, endOffset: row.endOffset, quote: row.quote, sha256: row.sha256, relation: row.relation }))
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
+      if (!checkedEvidenceSets.has(canonicalEvidenceSet)) {
+        try { await this.checkEvidence(tx, job.projectId, claim.evidence, snapshotIds, fragmentsByKey); }
+        catch { throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED'); }
+        checkedEvidenceSets.add(canonicalEvidenceSet);
+      }
     }
     const ids = new Map<string, { id: string; claimId: string }>();
+    const claimRows: Prisma.ClaimCreateManyInput[] = [];
+    const revisionRows: Prisma.ClaimRevisionCreateManyInput[] = [];
+    const evidenceRows: Prisma.ClaimEvidenceCreateManyInput[] = [];
     for (const input of output.claims) {
       const claimId = randomUUID();
-      await tx.claim.create({ data: { id: claimId, projectId: job.projectId, createdBy: job.requestedBy } });
-      const id = await this.append(tx, job.requestedBy, job.projectId, claimId, 1, input, { id: job.id, key: input.key });
-      await tx.claim.update({ where: { id: claimId }, data: { currentRevisionId: id } });
-      ids.set(input.key, { id, claimId });
+      const revisionId = randomUUID();
+      claimRows.push({ id: claimId, projectId: job.projectId, createdBy: job.requestedBy });
+      revisionRows.push({ id: revisionId, projectId: job.projectId, claimId, number: 1, wording: input.wording,
+        sha256: sha256(input.wording), jobId: job.id, providerClaimKey: input.key, createdBy: job.requestedBy });
+      evidenceRows.push(...input.evidence.map(evidence => ({ ...evidence, id: randomUUID(), projectId: job.projectId,
+        claimRevisionId: revisionId, capturedPurpose: 'FACTUAL_SOURCE' as const, createdBy: job.requestedBy })));
+      ids.set(input.key, { id: revisionId, claimId });
+    }
+    if (claimRows.length) await tx.claim.createMany({ data: claimRows });
+    if (revisionRows.length) await tx.claimRevision.createMany({ data: revisionRows });
+    for (let offset = 0; offset < evidenceRows.length; offset += 1000) {
+      await tx.claimEvidence.createMany({ data: evidenceRows.slice(offset, offset + 1000) });
+    }
+    const pointers = [...ids.values()].map(row => ({ claimId: row.claimId, revisionId: row.id }));
+    if (pointers.length) {
+      const linked = await tx.$executeRaw`
+        UPDATE contextflow."Claim" AS c
+        SET "currentRevisionId" = pointer."revisionId", "updatedAt" = GREATEST(c."updatedAt", CURRENT_TIMESTAMP)
+        FROM jsonb_to_recordset(${JSON.stringify(pointers)}::jsonb) AS pointer("claimId" uuid, "revisionId" uuid)
+        WHERE c."projectId" = ${job.projectId}::uuid AND c."id" = pointer."claimId"
+      `;
+      if (linked !== pointers.length) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     }
     const conflictIds: string[] = [];
     for (const conflict of output.conflicts) conflictIds.push(await this.addConflict(tx, job.requestedBy, job.projectId,

@@ -7,14 +7,20 @@ const safeText = (max: number) => z.string().max(max).refine(value => !/[\u0000-
 export const telegramInputModeSchema = z.enum(['DIRECT', 'ARTICLE_DERIVED']);
 export const adaptationFormatSchema = z.enum(['TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES']);
 export type AdaptationFormat = z.infer<typeof adaptationFormatSchema>;
-export const telegramContentSchema = z.object({ text: safeText(10000), mappings: z.array(z.object({
+const telegramMappingSchema = z.object({
   startOffset: z.number().int().nonnegative(), endOffset: z.number().int().positive(), quote: safeText(10000).min(1),
   claimRevisionId: z.uuid(), evidenceId: z.uuid(), field: z.enum(['text', 'cover']).optional(),
-}).strict()).max(100), cover: z.object({ text: safeText(200), instruction: safeText(2000) }).strict().optional() }).strict().superRefine((value, ctx) => {
+}).strict();
+const telegramSourceMappingSchema = z.object({ startOffset: z.number().int().nonnegative(), endOffset: z.number().int().positive(),
+  quote: safeText(10000).min(1), passageId: z.uuid(), packetId: z.uuid(), field: z.enum(['text', 'cover']).optional() }).strict();
+export const telegramContentSchema = z.object({ text: safeText(10000), mappings: z.array(telegramMappingSchema).max(100),
+  sourceMappings: z.array(telegramSourceMappingSchema).max(1000).optional(),
+  cover: z.object({ text: safeText(200), instruction: safeText(2000) }).strict().optional() }).strict().superRefine((value, ctx) => {
   for (const field of ['text', 'cover'] as const) {
     const target = field === 'text' ? value.text : value.cover?.text;
-    const sorted = value.mappings.filter(mapping => (mapping.field ?? 'text') === field)
-      .sort((a, b) => a.startOffset - b.startOffset);
+    const sorted = [...value.mappings.filter(mapping => (mapping.field ?? 'text') === field),
+      ...(value.sourceMappings ?? []).filter(mapping => (mapping.field ?? 'text') === field)]
+      .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
     let previousEnd = 0;
     for (const mapping of sorted) {
       if (!target || mapping.endOffset <= mapping.startOffset || mapping.endOffset > target.length || mapping.startOffset < previousEnd) {

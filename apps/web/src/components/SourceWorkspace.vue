@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import ImportJobs from './ImportJobs.vue'
 import SourceComparison from './SourceComparison.vue'
+import SourceMarkdown from './SourceMarkdown.vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
@@ -10,6 +11,11 @@ import { Textarea } from '@/components/ui/textarea'
 const TEXT_LIMIT = 200_000
 const FILE_LIMIT = 1_048_576
 const DOCUMENT_LIMIT = 10_485_760
+const fragmentsExpanded = ref(false)
+
+function trackFragmentDisclosure(event: Event) {
+  fragmentsExpanded.value = (event.currentTarget as HTMLDetailsElement).open
+}
 
 type Purpose = 'FACTUAL_SOURCE' | 'NOTES' | 'SUPPLIED_ARTICLE' | 'BRANDBOOK' | 'STYLE_SAMPLE'
 
@@ -1000,10 +1006,18 @@ onBeforeUnmount(() => {
                 Завантажити оригінал
               </Button>
             </div>
-            <pre
+            <SourceMarkdown
               v-if="!comparisonOpen"
-              class="source-plain-text"
-            >{{ selectedSnapshot.normalizedText }}</pre>
+              class="source-formatted-text"
+              :text="selectedSnapshot.normalizedText"
+            />
+            <details
+              v-if="!comparisonOpen"
+              class="source-raw-text"
+            >
+              <summary>Початкова розмітка</summary>
+              <pre>{{ selectedSnapshot.normalizedText }}</pre>
+            </details>
             <Button
               v-if="snapshots.length > 1 && !comparisonOpen"
               ref="comparisonButton"
@@ -1077,6 +1091,7 @@ onBeforeUnmount(() => {
               <details
                 v-if="selectedSnapshot.fragments.length"
                 class="source-fragments"
+                @toggle="trackFragmentDisclosure"
               >
                 <summary>Переглянути фрагменти</summary>
                 <p
@@ -1085,12 +1100,15 @@ onBeforeUnmount(() => {
                 >
                   Показано перші 1 000 фрагментів.
                 </p>
-                <ol>
+                <ol v-if="fragmentsExpanded">
                   <li
                     v-for="fragment in selectedSnapshot.fragments.slice(0, 1000)"
                     :key="fragment.id"
                   >
-                    <p>{{ selectedSnapshot.normalizedText.slice(fragment.startOffset, fragment.endOffset) }}</p>
+                    <SourceMarkdown
+                      :text="selectedSnapshot.normalizedText.slice(fragment.startOffset, fragment.endOffset)"
+                      compact
+                    />
                     <span>Фрагмент {{ fragment.ordinal }}</span>
                     <details class="source-fragment-locator">
                       <summary>Деталі фрагмента</summary>
@@ -1195,7 +1213,10 @@ onBeforeUnmount(() => {
 .source-state { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .source-reading-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; color: var(--muted); font-size: 12px; }
 .source-download { min-height: 32px; }
-.source-plain-text { margin: 28px 0; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--serif); font-size: 20px; line-height: 1.7; max-width: 72ch; }
+.source-formatted-text { margin: 28px 0; color: var(--ink); overflow-wrap: anywhere; font-family: var(--serif); font-size: 20px; line-height: 1.7; max-width: 72ch; }
+.source-raw-text { margin: 16px 0; color: var(--muted); font-size: 12px; }
+.source-raw-text summary { cursor: pointer; padding-block: 9px; }
+.source-raw-text pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); font-size: 13px; line-height: 1.6; }
 .source-history, .source-metadata { margin-top: 16px; border-top: 1px solid var(--rule); }
 .source-history summary, .source-metadata summary { padding: 11px 0; color: var(--ink); font-size: 12px; font-weight: 600; cursor: pointer; }
 .source-history summary span { color: var(--muted); font-weight: 400; }
@@ -1212,6 +1233,7 @@ onBeforeUnmount(() => {
 .source-fragments ol { margin: 0; padding-left: 22px; }
 .source-fragments li { padding: 10px 0; border-top: 1px solid var(--rule); }
 .source-fragments li > p { margin: 0 0 5px; color: var(--ink); font-family: var(--serif); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.source-fragments li > .source-markdown { margin: 0 0 5px; font-size: 14px; }
 .source-fragments li > span { color: var(--muted); font-size: 12px; }
 .source-fragment-locator { margin-top: 5px; }
 .source-fragment-locator > summary { color: var(--muted); font-size: 12px; cursor: pointer; }
@@ -1234,7 +1256,7 @@ onBeforeUnmount(() => {
   .source-form-row { grid-template-columns: minmax(0, 1fr); }
   .source-reader-heading { align-items: flex-start; flex-direction: column; }
   .source-reader-heading .source-button { width: auto; }
-  .source-plain-text { font-size: 18px; }
+  .source-formatted-text { font-size: 18px; }
   .source-metadata dl { grid-template-columns: 105px minmax(0, 1fr); }
   .source-button, .source-mode button, .source-item-open, .source-include, .source-history button { min-height: 44px; }
   .source-add > summary, .source-history summary, .source-metadata summary, .source-fragments > summary, .source-fragment-locator > summary { min-height: 44px; }

@@ -36,6 +36,16 @@ export type { EvidenceInput, CreateClaimInput, EditClaimInput, ClaimInputManifes
 export { DifyClaimProvider, ClaimProviderError, claimWorkflowRelease, claimWorkflowSettings, CLAIMS_CONTRACT } from './claims/provider.js';
 export { FactualBasisService } from './claims/factual-basis.service.js';
 export { createClaimJobHandler } from './claims/jobs-handler.js';
+export { SourceEvidenceService } from './evidence/evidence.service.js';
+export { createSourceEvidenceJobHandlers } from './evidence/jobs-handler.js';
+export { indexSourceEvidenceInput, searchSourceEvidenceInput, embeddingRequestSchema, embeddingOutputSchema,
+  validateEmbeddingOutput, embeddingRequestHash } from './evidence/contracts.js';
+export { DifyEmbeddingProvider, EmbeddingProviderError, embeddingWorkflowRelease, embeddingWorkflowSettings } from './evidence/embedding-provider.js';
+export { relevanceInputSchema, relevanceOutputSchema, relevanceInputHash, validateRelevanceOutput,
+  RELEVANCE_LIMITS } from './evidence/relevance-contracts.js';
+export type { RelevanceInput, RelevanceOutput, RelevanceCandidate } from './evidence/relevance-contracts.js';
+export { DifySourceRelevanceProvider, SourceRelevanceProviderError, sourceRelevanceWorkflowRelease,
+  sourceRelevanceWorkflowSettings } from './evidence/relevance-provider.js';
 export { ContentMode, EditorialOrigin } from './generated/prisma/enums.js';
 export { EditorialService, canonicalBriefHash } from './editorial/editorial.service.js';
 export { saveBriefInput, manualOutlineInput, reviewOutlineInput, generateOutlineInput, outlineContentSchema,
@@ -97,3 +107,14 @@ export { GoogleDocSyncService } from './google-docs/google-doc-sync.service.js';
 export { createGoogleDocSyncHandler } from './google-docs/google-doc-sync-handler.js';
 export { GoogleDocSyncPoller } from './google-docs/google-doc-sync-poller.js';
 export { PrivateObjectCleanup, PrivateObjectCleanupPoller } from './lifecycle/private-object-cleanup.js';
+export { SourceGroundingService } from './evidence/source-grounding.service.js';
+export { SourcePreparationService, SourcePreparationPoller } from './evidence/preparation.service.js';
+export { SourceArticlePreparationService, SourceArticlePreparationPoller } from './evidence/article-preparation.service.js';
+export { createSourceWritingJobHandler } from './evidence/writing-jobs-handler.js';
+export { sourceWritingWorkflowRelease, sourceWritingWorkflowSettings, DifySourceWritingProvider, SourceWritingProviderError } from './evidence/writing-provider.js';
+export { sourceWritingInputSchema, sourceWritingOutputSchema, validateSourceWritingOutput } from './evidence/writing-contracts.js';
+export { BriefProposalService } from './editorial/brief-proposal.service.js';
+export { createBriefProposalJobHandler } from './editorial/brief-proposal-jobs-handler.js';
+export { briefProposalCommandSchema, briefProposalWorkflowInputSchema, briefProposalOutputSchema, validateBriefProposalOutput } from './editorial/brief-proposal-contracts.js';
+export type { BriefProposalFields, BriefProposalCommand, BriefProposalWorkflowInput, BriefProposalWorkflowOutput } from './editorial/brief-proposal-contracts.js';
+export { briefProposalWorkflowRelease, briefProposalWorkflowSettings } from './editorial/brief-proposal-provider.js';

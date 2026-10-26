@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "contextflow-dify-release-v1",
+  "operation": "SOURCE_RELEVANCE",
+  "releaseId": "source-relevance-2026-10-24.1",
+  "contractVersion": "source-relevance-v1",
+  "modelProtocolVersion": "source-relevance-compact-model-v1",
+  "promptTemplateVersion": "source-relevance-prompt-v2",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "a678af92f915af6a7c8138ed72099dc6bfc711764fb9db88d4680f6d7e8d2e1f",
+  "workflowDslFile": "source-relevance-v1.yml",
+  "workflowDslSha256": "ccbac3a09e06bef2c7899e5a2b95d3c34a299ce259081bc31a2523c97e7077bd",
+  "runtimeFile": "scripts/dify/source_relevance_runtime.py",
+  "runtimeSha256": "732245f5d0d5c9f345dfc429bcbd7aaea5503538fab82f04b39f61a358b54c53",
+  "target": {
+    "difyVersion": "1.17.1",
+    "graphonVersion": "0.7.0",
+    "dslVersion": "0.7.0"
+  },
+  "relevanceLimits": {
+    "maxCandidates": 60,
+    "candidateBytes": 60000,
+    "inputBytes": 100000,
+    "maxPassages": 20,
+    "outputBytes": 40000
+  },
+  "apiBaseEnv": "DIFY_API_BASE_URL",
+  "apiKeyEnv": "DIFY_SOURCE_RELEVANCE_API_KEY",
+  "publishedWorkflowIdEnv": "DIFY_SOURCE_RELEVANCE_PUBLISHED_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_SOURCE_RELEVANCE_CONFIG_SHA256",
+  "inputVariable": "source_relevance_request_json",
+  "outputVariable": "source_relevance_json",
+  "responseMode": "streaming",
+  "provider": "dify",
+  "model": {
+    "provider": "langgenius/gemini/google",
+    "name": "gemini-3.8-flash",
+    "mode": "chat",
+    "completionParams": {
+      "max_output_tokens": 4096,
+      "thinking_level": "Low",
+      "include_thoughts": false,
+      "media_resolution": "Default",
+      "grounding": false,
+      "url_context": false,
+      "code_execution": false,
+      "service_tier": "standard"
+    }
+  },
+  "configDigest": "40153b6847d3f6a6da168afd7b5ec930492c35458582a8aec32aba3e431582c0"
+}

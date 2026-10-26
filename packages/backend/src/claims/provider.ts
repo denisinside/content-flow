@@ -9,7 +9,7 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_SSE_BYTES = 128 * 1024 * 1024;
 const MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024;
 const MAX_INPUT_BYTES = 350000;
-const MAX_CLAIMS_BYTES = 500000;
+const MAX_CLAIMS_BYTES = 1024 * 1024;
 const MAX_REPORT_BYTES = 256 * 1024;
 const extractionReportSchema = z.object({ schemaVersion: z.literal('claims-extraction-report-v1'),
   status: z.enum(['ready', 'needs_human']) }).passthrough();
@@ -38,17 +38,17 @@ type ReleaseArtifact = {
 // Deployment explicitly attests that this published UUID contains the pinned
 // configuration digest; a workflow ID alone cannot prove release settings.
 const release: ReleaseArtifact = {
-  schemaVersion: 'contextflow-dify-release-v1', operation: 'CLAIM_EXTRACTION', releaseId: 'claim-extraction-2026-10-09.2',
-  configDigest: 'a34514efc6cd79d5dda73f210afc8ddaa413119a971bf092980773ea566036bf', publishedWorkflowIdEnv: 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',
+  schemaVersion: 'contextflow-dify-release-v1', operation: 'CLAIM_EXTRACTION', releaseId: 'claim-extraction-2026-10-14.3',
+  configDigest: '48dcd646373cd896776ed639778ca72d3c5a54ccb88df1623693c31379bc8fda', publishedWorkflowIdEnv: 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_CLAIM_EXTRACTION_CONFIG_SHA256',
   apiBaseEnv: 'DIFY_API_BASE_URL', apiKeyEnv: 'DIFY_CLAIM_EXTRACTION_API_KEY', contractVersion: CLAIMS_CONTRACT,
-  promptTemplateVersion: 'claims-extraction-review-prompt-v2', promptTemplateFile: 'prompt.md', inputVariable: 'sources_json',
+  promptTemplateVersion: 'claims-extraction-review-prompt-v5', promptTemplateFile: 'prompt.md', inputVariable: 'sources_json',
   outputVariable: 'claims_json', responseMode: 'streaming', provider: 'dify',
   model: { provider: 'langgenius/gemini/google', name: 'gemini-3.8-flash', mode: 'chat', completionParams: {
     max_output_tokens: 8192, thinking_level: 'Low', include_thoughts: false, media_resolution: 'Default',
     grounding: false, url_context: false, code_execution: false, service_tier: 'standard' } },
   workflowDslFile: 'claim-extraction-v1.yml',
-  workflowDslSha256: '29da9294feceb81d645a77f87ceee6b4870dea1ba511e20a6af3246d5904248f',
+  workflowDslSha256: 'd9f0fcb609134b11d436121fb883ace4fe6a60ba43bd3ca39405e4988a5e74a7',
 };
 
 export type ClaimWorkflowSettings = ClaimWorkflowRelease & { apiKey: string };

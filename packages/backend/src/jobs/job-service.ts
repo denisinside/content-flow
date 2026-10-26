@@ -85,33 +85,53 @@ export class DurableJobService {
   async cancel(userId: string, projectId: string, id: string): Promise<Job> {
     await this.get(userId, projectId, id);
     return this.prisma.$transaction(async tx => {
-      const job = await this.lock(tx, id);
+      let job = await this.lock(tx, id);
       if (!job || job.projectId !== projectId) throw new NotFoundException('Job not found');
       const membership = await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
         JOIN contextflow."Workspace" w ON w."id" = p."workspaceId"
         JOIN contextflow."WorkspaceMember" m ON m."workspaceId" = p."workspaceId"
         WHERE p."id" = ${projectId}::uuid AND p."trashedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId" = ${userId}::uuid AND m."leftAt" IS NULL FOR SHARE OF p, w, m`;
       if (!membership.length) throw new NotFoundException('Project not found');
+      job = await this.searchActionTarget(tx, job);
       if (['SUCCEEDED', 'FAILED', 'CANCELLED', 'OUTCOME_UNKNOWN'].includes(job.status)) return job;
       const now = new Date();
-      const activeAttempts = await tx.jobAttempt.findMany({ where: { jobId: id, finishedAt: null }, select: { id: true, providerSubmittedAt: true } });
+      const activeAttempts = await tx.jobAttempt.findMany({ where: { jobId: job.id, finishedAt: null }, select: { id: true, providerSubmittedAt: true } });
       for (const attempt of activeAttempts) await tx.aIExecution.updateMany({ where: { attemptId: attempt.id, status: 'RUNNING' }, data: {
         status: attempt.providerSubmittedAt ? 'OUTCOME_UNKNOWN' : 'FAILED', finishedAt: now, errorCategory: 'CANCELLED' } });
-      await tx.jobAttempt.updateMany({ where: { jobId: id, finishedAt: null }, data: { finishedAt: now, errorCategory: 'CANCELLED' } });
-      return tx.job.update({ where: { id }, data: { status: 'CANCELLED', cancelRequestedAt: now, progressStage: 'CANCELLED',
+      await tx.jobAttempt.updateMany({ where: { jobId: job.id, finishedAt: null }, data: { finishedAt: now, errorCategory: 'CANCELLED' } });
+      return tx.job.update({ where: { id: job.id }, data: { status: 'CANCELLED', cancelRequestedAt: now, progressStage: 'CANCELLED',
         fencingToken: { increment: 1 }, errorCategory: 'CANCELLED', updatedAt: now } });
     });
   }
   async retry(userId: string, projectId: string, id: string): Promise<Job> {
     await this.get(userId, projectId, id);
     return this.prisma.$transaction(async tx => {
-      const job = await this.lock(tx, id);
+      let job = await this.lock(tx, id);
       if (!job || job.projectId !== projectId) throw new NotFoundException('Job not found');
       await this.assertEffects(tx, projectId, userId, job.operation !== 'EXPORT_BUILD');
+      job = await this.searchActionTarget(tx, job);
       if (!retryAllowed(job)) throw new ConflictException('This job cannot be safely retried; explicitly start a new run');
-      return tx.job.update({ where: { id }, data: { status: 'QUEUED', nextAttemptAt: new Date(), publishedAt: null,
+      return tx.job.update({ where: { id: job.id }, data: { status: 'QUEUED', nextAttemptAt: new Date(), publishedAt: null,
         errorCategory: null, progressStage: 'WAITING', updatedAt: new Date() } });
     });
+  }
+
+  /** A completed retrieval stage may still own an active relevance stage. */
+  private async searchActionTarget(tx: Prisma.TransactionClient, parent: Job): Promise<Job> {
+    if (parent.operation !== 'EVIDENCE_SEARCH' || parent.contractVersion !== 'evidence-search-v2' || parent.status !== 'SUCCEEDED') return parent;
+    const refs = parent.resultRefs as { relevanceJobId?: unknown } | null;
+    if (!refs?.relevanceJobId) return parent;
+    if (typeof refs.relevanceJobId !== 'string' || !/^[a-f0-9-]{36}$/u.test(refs.relevanceJobId)) {
+      throw new ConflictException('Evidence search stage identity is invalid');
+    }
+    const child = await this.lock(tx, refs.relevanceJobId);
+    const input = child?.inputManifest as { parentJobId?: unknown; parentInputHash?: unknown } | null;
+    if (!child || child.projectId !== parent.projectId || child.requestedBy !== parent.requestedBy
+      || child.operation !== 'EVIDENCE_SEARCH' || child.contractVersion !== 'evidence-relevance-v1'
+      || input?.parentJobId !== parent.id || input.parentInputHash !== parent.inputHash) {
+      throw new ConflictException('Evidence search stage does not match its frozen parent');
+    }
+    return child;
   }
 
   async claim(id: string, ordinal: number, owner: string): Promise<{ job: Job; attempt: JobAttempt } | null> {
@@ -180,7 +200,8 @@ export class DurableJobService {
       const current = await this.owned(tx, job, attempt);
       // Claim commits serialize with review/basis edits before acquiring shared
       // ancestry locks, avoiding concurrent shared-to-exclusive lock upgrades.
-      if (job.operation === 'VISUAL_BACKGROUND_GENERATION' || job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION' || job.operation === 'ARTICLE_GENERATION' || job.operation === 'TELEGRAM_GENERATION' || job.operation === 'EXPORT_BUILD' || job.operation === 'GOOGLE_DOCS_SYNC') {
+      if (job.operation === 'VISUAL_BACKGROUND_GENERATION' || job.operation === 'SOURCE_EMBEDDING' || job.operation === 'EVIDENCE_SEARCH' || job.operation === 'SOURCE_WRITING'
+        || job.operation === 'CLAIM_EXTRACTION' || job.operation === 'OUTLINE_GENERATION' || job.operation === 'ARTICLE_GENERATION' || job.operation === 'TELEGRAM_GENERATION' || job.operation === 'EXPORT_BUILD' || job.operation === 'GOOGLE_DOCS_SYNC' || job.operation === 'BRIEF_PROPOSAL') {
         await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id" = ${job.projectId}::uuid FOR UPDATE`;
       }
       await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD');

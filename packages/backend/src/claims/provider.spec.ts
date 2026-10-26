@@ -11,7 +11,7 @@ const run = { workflow_run_id: runId, data: { workflow_id: workflowId, status: '
   extraction_report: readyReport,
 } } };
 const env = { NODE_ENV: 'test', DIFY_API_BASE_URL: 'http://127.0.0.1:8080/v1', DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID: workflowId,
-  DIFY_CLAIM_EXTRACTION_CONFIG_SHA256: 'a34514efc6cd79d5dda73f210afc8ddaa413119a971bf092980773ea566036bf',
+  DIFY_CLAIM_EXTRACTION_CONFIG_SHA256: '48dcd646373cd896776ed639778ca72d3c5a54ccb88df1623693c31379bc8fda',
   DIFY_CLAIM_EXTRACTION_API_KEY: 'synthetic-test-key' };
 const source = [{ snapshotId: 'a11081a2-114a-4ce9-91d8-21241a03b70c', materialId: 'c21081a2-114a-4ce9-91d8-21241a03b70c',
   sha256: 'a'.repeat(64), fragments: [{ id: 'd21081a2-114a-4ce9-91d8-21241a03b70c', startOffset: 0, endOffset: 6, sha256: 'b'.repeat(64), text: 'Kyiv is a city' }] }];
@@ -106,6 +106,34 @@ describe('Dify claim workflow boundary', () => {
     expect(order).toEqual(['intent', 'post']);
   });
 
+  it('accepts 500 proposed claims above the previous byte cap on stream and reconciliation', async () => {
+    const quote = 'я'.repeat(480);
+    const fragment = source[0]!.fragments[0]!;
+    const output = { schemaVersion: CLAIMS_CONTRACT, claims: Array.from({ length: 500 }, (_, index) => ({
+      key: `b${Math.floor(index / 20) + 1}-c${index % 20 + 1}`, wording: `Synthetic requirement ${index + 1}.`,
+      evidence: [{ snapshotId: source[0]!.snapshotId, fragmentId: fragment.id, startOffset: 0, endOffset: quote.length,
+        quote, sha256: createHash('sha256').update(quote).digest('hex'), relation: 'SUPPORTS' }],
+    })), conflicts: [] };
+    const serialized = JSON.stringify(output);
+    expect(Buffer.byteLength(serialized)).toBeGreaterThan(500000);
+    expect(Buffer.byteLength(serialized)).toBeLessThan(1024 * 1024);
+    expect(serialized.length).toBeLessThanOrEqual(400000);
+    const inputs = [{ ...source[0]!, fragments: [{ ...fragment, text: quote, endOffset: quote.length,
+      sha256: createHash('sha256').update(quote).digest('hex') }] }];
+    const outputs = { claims_json: serialized, extraction_report: readyReport };
+    for (const mode of ['stream', 'resume'] as const) {
+      const reply = mode === 'stream' ? stream([event({ event: 'workflow_finished', workflow_run_id: runId,
+        data: { ...run.data, outputs } })]) : response(JSON.stringify({ id: runId, workflow_id: workflowId,
+        status: 'succeeded', outputs }), 'application/json');
+      const provider = new DifyClaimProvider(vi.fn().mockResolvedValue(reply));
+      const result = mode === 'stream'
+        ? await provider.execute(claimWorkflowSettings(env), runId, inputs, new AbortController().signal, vi.fn(), vi.fn())
+        : await provider.resume(claimWorkflowSettings(env), runId, new AbortController().signal);
+      expect(result.output.claims).toHaveLength(500);
+      expect(result.output.claims[499]?.evidence[0]?.quote).toBe(quote);
+    }
+  });
+
   it('rejects malformed/oversized output and a wrong returned workflow ID', async () => {
     const malformed = { ...run, data: { ...run.data, outputs: { ...run.data.outputs, claims_json: { schemaVersion: CLAIMS_CONTRACT, claims: [{ key: 'x', surprise: true }], conflicts: [] } } } };
     const provider = new DifyClaimProvider(vi.fn().mockResolvedValue(stream([event({ event: 'workflow_started', workflow_run_id: runId }),
@@ -181,7 +209,7 @@ describe('Dify claim workflow boundary', () => {
     const provider = new DifyClaimProvider(vi.fn().mockResolvedValue(stream([metadata,
       event({ event: 'workflow_finished', workflow_run_id: runId, data: run.data })])));
     expect((await provider.execute(claimWorkflowSettings(env), runId, source, new AbortController().signal, vi.fn(), vi.fn())).output.claims).toEqual([]);
-    const outputs = { ...run.data.outputs, claims_json: ' '.repeat(500001) };
+    const outputs = { ...run.data.outputs, claims_json: ' '.repeat(1024 * 1024 + 1) };
     const largeCandidate = new DifyClaimProvider(vi.fn().mockResolvedValue(stream([
       event({ event: 'workflow_finished', workflow_run_id: runId, data: { ...run.data, outputs } })])));
     await expect(largeCandidate.execute(claimWorkflowSettings(env), runId, source, new AbortController().signal, vi.fn(), vi.fn()))

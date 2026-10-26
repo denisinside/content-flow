@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
+import SourceMarkdown from './SourceMarkdown.vue'
 
 type ScriptFormat = 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES'
 interface Mapping { startOffset: number; endOffset: number; quote: string; claimRevisionId: string; evidenceId: string }
-interface Frame { id: string; purpose: string; text: string; visualHint: string; transition: string; mappings: Mapping[] }
+interface SourceMapping { startOffset: number;endOffset: number;quote: string;passageId: string;packetId: string }
+interface Frame { id: string; purpose: string; text: string; visualHint: string; transition: string; mappings: Mapping[];sourceMappings?: SourceMapping[] }
 interface ScriptRevision { id: string; number: number; status?: 'PROPOSED' | 'APPROVED' | 'WITHDRAWN'; approvedAt?: string | null; withdrawnAt?: string | null; content: { frames: Frame[] }; parentAdaptationRevisionId: string; reviewCounter: number; staleReasons?: string[]; blockingReasons?: string[]; eligible?: boolean; hasUnmapped?: boolean }
 interface AdaptationRevision { id: string; number: number; approvedAt: string | null; withdrawnAt: string | null }
 interface State {
+  eligibleSourcePassages?: { passageId: string;packetId: string;quote: string;snapshotId: string }[]
   format: ScriptFormat
   formatSelected: boolean
   adaptation: { id: string; revision: number; currentApprovedRevisionId: string | null; revisions: AdaptationRevision[] } | null
@@ -115,6 +118,7 @@ function editFrameText(frame: Frame, value: string) {
   const oldChangedEnd = old.length - suffix
   const delta = value.length - old.length
   frame.text = value
+  if (frame.sourceMappings) frame.sourceMappings = frame.sourceMappings.flatMap(map => map.endOffset <= prefix ? [map] : map.startOffset >= oldChangedEnd ? [{ ...map,startOffset: map.startOffset+delta,endOffset: map.endOffset+delta }] : [])
   frame.mappings = frame.mappings.flatMap(mapping => {
     if (mapping.endOffset <= prefix) return value.slice(mapping.startOffset, mapping.endOffset) === mapping.quote ? [mapping] : []
     if (mapping.startOffset >= oldChangedEnd) {
@@ -123,6 +127,15 @@ function editFrameText(frame: Frame, value: string) {
     }
     return []
   })
+  changed()
+}
+function insertSourcePassage(passage: { passageId: string;packetId: string;quote: string }) {
+  const frame = frames.value[selectedFrame.value]
+  if (!frame || passage.quote.length > 3000) return
+  const startOffset = frame.text.length+(frame.text ? 1 : 0), next = frame.text+(frame.text ? '\n' : '')+passage.quote
+  if (next.length > 3000) { error.value = 'Уривок не вміщується в цей кадр. Створіть новий кадр.'; return }
+  editFrameText(frame,next)
+  frame.sourceMappings = [...(frame.sourceMappings ?? []),{ startOffset,endOffset: startOffset+passage.quote.length,quote: passage.quote,passageId: passage.passageId,packetId: passage.packetId }]
   changed()
 }
 async function request(path = '', body?: unknown) {
@@ -483,6 +496,27 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
               placeholder="Текст, який дизайнер розмістить у кадрі"
               @input="editFrameText(frames[selectedFrame]!, ($event.target as HTMLTextAreaElement).value)"
             /></label>
+            <details v-if="state?.eligibleSourcePassages?.length">
+              <summary>Докази для кадру</summary>
+              <section
+                v-for="passage in state.eligibleSourcePassages"
+                :key="passage.passageId"
+              >
+                <blockquote>
+                  <SourceMarkdown
+                    :text="passage.quote"
+                    compact
+                  />
+                </blockquote>
+                <Button
+                  variant="outline"
+                  :disabled="readonly || busy || passage.quote.length > 3000"
+                  @click="insertSourcePassage(passage)"
+                >
+                  Вставити уривок у кадр
+                </Button>
+              </section>
+            </details>
             <label class="script-field"><span>Візуальна підказка</span><textarea
               v-model="frames[selectedFrame]!.visualHint"
               maxlength="1000"

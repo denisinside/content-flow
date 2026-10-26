@@ -119,6 +119,29 @@ export class ExportService {
       || String(a.evidenceId).localeCompare(String(b.evidenceId)));
   }
 
+  private async passageSources(tx: Prisma.TransactionClient, project: string,
+    edges: readonly { spanId: string; packetId: string; sourceEvidenceSetId: string; quote: string; text: string; locator: string }[],
+    usedByRevisionId: string, originRole: string): Promise<Array<Record<string,unknown>>> {
+    const result: Array<Record<string,unknown>> = [];
+    for (const edge of edges) {
+      const span = await tx.sourceEvidenceSpan.findFirst({ where: { projectId: project,id: edge.spanId },
+        include: { snapshot: { include: { material: true } },fragment: true } });
+      const membership = await tx.sourceEvidenceSetPacket.findFirst({ where: { projectId: project,setId: edge.sourceEvidenceSetId,packetId: edge.packetId } });
+      const packetItem = await tx.sourceEvidencePacketItem.findFirst({ where: { projectId: project,packetId: edge.packetId,spanId: edge.spanId } });
+      if (!span || !membership || !packetItem || !span.quote.includes(edge.quote)
+        || span.snapshot.normalizedText.slice(span.startOffset,span.endOffset) !== span.quote) throw new ConflictException('Export source passage ancestry or quote is invalid');
+      result.push({ kind: 'source_passage',passageId: span.id,packetId: edge.packetId,sourceEvidenceSetId: edge.sourceEvidenceSetId,
+        quote: span.quote,evidenceSha256: span.sha256,citationQuote: edge.quote,
+        snapshotId: span.snapshotId,snapshotSequence: span.snapshot.sequence,snapshotSha256: span.snapshot.sha256,
+        snapshotOrigin: span.snapshot.origin,snapshotCreatedAt: span.snapshot.createdAt.toISOString(),
+        materialId: span.snapshot.materialId,materialLabel: span.snapshot.material.label,materialPurpose: span.snapshot.material.purpose,sourceUrl: span.snapshot.material.sourceUrl,
+        fragmentId: span.fragmentId,fragmentOrdinal: span.fragment.ordinal,fragmentStartOffset: span.fragment.startOffset,fragmentEndOffset: span.fragment.endOffset,fragmentSha256: span.fragment.sha256,
+        startOffset: span.startOffset,endOffset: span.endOffset,usedByRevisionId,originRole,
+        citationLocators: [{ revisionId: usedByRevisionId,locator: edge.locator,text: edge.text,quote: edge.quote }] });
+    }
+    return result;
+  }
+
   private async dependencySnapshot(tx: Prisma.TransactionClient, project: string, ids: {
     briefRevisionId: string | null; basisRevisionId: string | null; outlineRevisionId: string | null; workspaceId: string;
     workspaceStyleRevision: number; sourceSnapshotId?: string | null;
@@ -185,7 +208,11 @@ export class ExportService {
       workspaceId: version.workspaceId, workspaceStyleRevision: reviewed ? version.reviewedWorkspaceStyleRevision ?? version.workspaceStyleRevision : version.workspaceStyleRevision,
       sourceSnapshotId: version.sourceSnapshotId };
     const effective = await this.dependencySnapshot(tx, project, ids);
+    const sourceEvidence = version.sourceEvidenceSetId ? await this.articles.inspectSourceEvidence(tx,project,version) : null;
+    const assembly = version.sourceEvidenceSetId ? await tx.sourceArticleAssembly.findFirst({ where: { projectId: project,articleVersionId: version.id } }) : null;
+    if (assembly && canonicalManifestHash(assembly.manifestJson) !== assembly.sha256) throw new ConflictException('Article assembly receipt hash is invalid');
     return { kind: 'ARTICLE', revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: version.contentMode, origin: version.origin,
+      ...(sourceEvidence ? { evidenceMode: 'source-passages-v1',sourceEvidence,assembly: assembly ? { manifest: assembly.manifestJson,sha256: assembly.sha256 } : null } : {}),
       approval: { actorId: version.approvedBy, approvedAt: iso(version.approvedAt), withdrawnBy: version.withdrawnBy, withdrawnAt: iso(version.withdrawnAt) },
       reviewCounter: version.reviewCounter, originalInputs: { briefRevisionId: version.briefRevisionId, briefSha256: brief?.sha256 ?? null,
         basisRevisionId: version.basisRevisionId, basisSha256: basis?.sha256 ?? null, outlineRevisionId: version.outlineRevisionId,
@@ -220,7 +247,9 @@ export class ExportService {
       effectiveSourceArticle ? this.articleProvenance(tx, project, effectiveSourceArticle) : null,
       originalSourceArticle ? this.articleProvenance(tx, project, originalSourceArticle) : null,
     ]);
+    const sourceEvidence = version.sourceEvidenceSetId ? await this.telegram.inspectSourceEvidence(tx,project,version) : null;
     return { kind: format, revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: version.contentMode,
+      ...(sourceEvidence ? { evidenceMode: 'source-passages-v1',sourceEvidence } : {}),
       inputMode: version.inputMode, includeLink: version.includeLink,
       approval: { actorId: version.approvedBy, approvedAt: iso(version.approvedAt), withdrawnBy: version.withdrawnBy, withdrawnAt: iso(version.withdrawnAt) },
       reviewCounter: version.reviewCounter, originalInputs: { briefRevisionId: version.briefRevisionId, briefSha256: brief.sha256,
@@ -285,7 +314,10 @@ export class ExportService {
       frames: frameReceipts });
     const usedEvidence = new Set(content.frames.flatMap(frame => frame.layers.flatMap(layer => layer.type === 'text'
       ? layer.mappings.map(mapping => `${mapping.claimRevisionId}:${mapping.evidenceId}`) : [])));
-    const parentSources = parent.sources.filter(source => usedEvidence.has(`${String(source.claimRevisionId)}:${String(source.evidenceId)}`));
+    const usedPassages = new Set(content.frames.flatMap(frame => frame.layers.flatMap(layer => layer.type === 'text'
+      ? (layer.sourceMappings ?? []).map(mapping => `${mapping.packetId}:${mapping.passageId}`) : [])));
+    const parentSources = parent.sources.filter(source => source.kind === 'source_passage'
+      ? usedPassages.has(`${String(source.packetId)}:${String(source.passageId)}`) : usedEvidence.has(`${String(source.claimRevisionId)}:${String(source.evidenceId)}`));
     const parentProvenance = { parentKind: revision.parentKind, parentRevisionId: revision.parentRevisionId, parentRevisionHash: revision.parentRevisionHash,
       parentReviewCounter: revision.parentReviewCounter, selectedParent: withoutUsedSourceLists(parent.manifest) };
     const sources = parentSources.map(source => ({ ...source, usedByRevisionId: revision.id,
@@ -340,7 +372,9 @@ export class ExportService {
         ...(effectiveSource && effectiveSource.id !== originalSource?.id
           ? await this.evidenceSources(tx, project, effectiveSource.claims, version.id, `REVIEWED_SOURCE_ARTICLE_FOR_${parentFormat}`) : []),
       ];
-      const sources = [...scriptSources, ...captionSources, ...parentSources];
+      const sourcePassages = await this.passageSources(tx,project,await tx.scriptRevisionSourceCitation.findMany({ where: { projectId: project,revisionId: version.id } }),version.id,`SELECTED_${format}`);
+      const captionPassages = await this.passageSources(tx,project,await tx.adaptationRevisionSourceCitation.findMany({ where: { projectId: project,revisionId: caption.id } }),version.id,'PARENT_CAPTION');
+      const sources = [...scriptSources,...sourcePassages, ...captionSources,...captionPassages, ...parentSources];
       const usedSources = await this.allSources([sources]);
       return { format, title: formatTitle(format), revisionId: version.id, number: version.number, reviewCounter: version.reviewCounter,
         contentMode: caption.contentMode, sha256: version.sha256,
@@ -359,7 +393,8 @@ export class ExportService {
       const inspection = await this.articles.inspectVersion(tx, project, version);
       if (!inspection.eligible) throw new ConflictException(`Article needs review: ${[...inspection.staleReasons, ...inspection.blockingReasons].join(', ')}`);
       const provenance = await this.articleProvenance(tx, project, version);
-      const sources = await this.evidenceSources(tx, project, version.claims, version.id, 'SELECTED_ARTICLE');
+      const sources = [...await this.evidenceSources(tx, project, version.claims, version.id, 'SELECTED_ARTICLE'),
+        ...await this.passageSources(tx,project,await tx.articleVersionSourceCitation.findMany({ where: { projectId: project,articleVersionId: version.id } }),version.id,'SELECTED_ARTICLE')];
       return { format, title: titleOf(format, version.content), revisionId: version.id, number: version.number,
         reviewCounter: version.reviewCounter, contentMode: version.contentMode, sha256: version.sha256,
         manifest: { format, revisionId: version.id, number: version.number, sha256: version.sha256, contentMode: version.contentMode,
@@ -373,7 +408,8 @@ export class ExportService {
     const inspection = await this.telegram.inspectRevision(tx, project, version);
     if (!inspection.eligible) throw new ConflictException(`${format} output needs review: ${[...inspection.staleReasons, ...inspection.blockingReasons].join(', ')}`);
     const provenance = await this.adaptationProvenance(tx, project, version, format);
-    const ownSources = await this.evidenceSources(tx, project, version.claims, version.id, `SELECTED_${format}`);
+    const ownSources = [...await this.evidenceSources(tx, project, version.claims, version.id, `SELECTED_${format}`),
+      ...await this.passageSources(tx,project,await tx.adaptationRevisionSourceCitation.findMany({ where: { projectId: project,revisionId: version.id } }),version.id,`SELECTED_${format}`)];
     const originalSource = version.inputMode === 'ARTICLE_DERIVED' && version.sourceArticleVersionId
       ? await tx.articleVersion.findFirst({ where: { projectId: project, id: version.sourceArticleVersionId }, include: { claims: true } }) : null;
     const effectiveSourceId = version.reviewCounter > 0 ? version.reviewedSourceArticleVersionId : version.sourceArticleVersionId;
@@ -528,10 +564,14 @@ export class ExportService {
   private async allSources(groups: Array<Array<Record<string, unknown>>>) {
     const byKey = new Map<string, Record<string, unknown> & { usedBy: Array<{ revisionId: string; role: string }> }>();
     for (const source of groups.flat()) {
-      const key = `${String(source.claimRevisionId)}:${String(source.evidenceId)}`;
+      const key = source.kind === 'source_passage' ? `source:${String(source.packetId)}:${String(source.passageId)}` : `${String(source.claimRevisionId)}:${String(source.evidenceId)}`;
       const existing = byKey.get(key);
       const usage = { revisionId: String(source.usedByRevisionId), role: String(source.originRole) };
       if (existing) {
+        if (Array.isArray(source.citationLocators)) {
+          const current = Array.isArray(existing.citationLocators) ? existing.citationLocators as unknown[] : [];
+          existing.citationLocators = [...current,...source.citationLocators.filter(locator => !current.some(item => canonicalManifestHash(item) === canonicalManifestHash(locator)))];
+        }
         if (!existing.usedBy.some(row => row.revisionId === usage.revisionId && row.role === usage.role)) existing.usedBy.push(usage);
         if (Array.isArray(source.frameLocators)) {
           const current = Array.isArray(existing.frameLocators) ? existing.frameLocators as Array<Record<string, unknown>> : [];

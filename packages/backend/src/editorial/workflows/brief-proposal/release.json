@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "contextflow-dify-release-v1",
+  "operation": "BRIEF_PROPOSAL",
+  "releaseId": "brief-proposal-2026-10-24.1",
+  "contractVersion": "brief-proposal-v1",
+  "promptTemplateVersion": "brief-proposal-prompt-v1",
+  "promptTemplateFile": "prompt.md",
+  "promptSha256": "8005416c4ff8fe05d0b0dee2bf4cb57e21a54ba6fc98b7f164e700c89081c028",
+  "workflowDslFile": "brief-proposal-v1.yml",
+  "runtimeFile": "packages/backend/src/editorial/workflows/brief-proposal/runtime.py",
+  "runtimeSha256": "23fd6269d074ac04877fc910d22d4685925cf59dfbd5ad552ea8f5c75ed291bb",
+  "target": {
+    "difyVersion": "1.17.1",
+    "graphonVersion": "0.7.0",
+    "dslVersion": "0.7.0"
+  },
+  "limits": {
+    "inputBytes": 120000,
+    "sources": 20,
+    "aggregateExcerptBytes": 60000,
+    "outputBytes": 128000,
+    "modelResponseBytes": 64000,
+    "assumptions": 10
+  },
+  "apiBaseEnv": "DIFY_API_BASE_URL",
+  "apiKeyEnv": "DIFY_BRIEF_PROPOSAL_API_KEY",
+  "publishedWorkflowIdEnv": "DIFY_BRIEF_PROPOSAL_PUBLISHED_WORKFLOW_ID",
+  "configDigestEnv": "DIFY_BRIEF_PROPOSAL_CONFIG_SHA256",
+  "inputVariable": "brief_request_json",
+  "outputVariable": "brief_proposal_json",
+  "responseMode": "streaming",
+  "provider": "dify",
+  "model": {
+    "provider": "langgenius/gemini/google",
+    "name": "gemini-3.8-flash",
+    "mode": "chat",
+    "completionParams": {
+      "max_output_tokens": 4096,
+      "thinking_level": "Low",
+      "include_thoughts": false,
+      "media_resolution": "Default",
+      "grounding": false,
+      "url_context": false,
+      "code_execution": false,
+      "service_tier": "standard"
+    }
+  },
+  "workflowDslSha256": "cea2f2f6859df45b14c373a30c0c021fffec45ba6b335a07ee1b453582907669",
+  "configDigest": "7e3ef0e41259725272df074366d5756fbea890e98895c20ca60ca9ce9d49544f"
+}

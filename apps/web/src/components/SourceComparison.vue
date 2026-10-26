@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
+import SourceMarkdown from './SourceMarkdown.vue'
 
 interface Copy { id: string; sequence: number; normalizedText: string; createdAt: string }
 const props = defineProps<{ projectId: string; materialId: string; snapshots: { id: string; sequence: number }[]; currentSnapshotId: string | null }>()
@@ -99,7 +100,17 @@ onBeforeUnmount(() => { epoch += 1; controller?.abort() })
         {{ result.identical ? 'Текст обох копій однаковий. Кожна версія збережена окремо.' : 'Текст копій відрізняється. Перегляньте обидві збережені версії.' }}
       </p>
       <div class="comparison-copies">
-        <div><h5>Версія {{ result.left.sequence }}</h5><pre>{{ result.left.normalizedText }}</pre></div><div><h5>Версія {{ result.right.sequence }}</h5><pre>{{ result.right.normalizedText }}</pre></div>
+        <div>
+          <h5>Версія {{ result.left.sequence }}</h5><SourceMarkdown
+            class="comparison-copy"
+            :text="result.left.normalizedText"
+          />
+        </div><div>
+          <h5>Версія {{ result.right.sequence }}</h5><SourceMarkdown
+            class="comparison-copy"
+            :text="result.right.normalizedText"
+          />
+        </div>
       </div>
     </template>
   </section>
@@ -116,7 +127,7 @@ onBeforeUnmount(() => { epoch += 1; controller?.abort() })
 .comparison-message { margin: 12px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .comparison-copies { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .comparison-copies h5 { margin: 0 0 8px; font-size: 12px; font-weight: 600; }
-.comparison-copies pre { margin: 0; padding: 13px; max-height: 55vh; overflow: auto; background: var(--document); border: 1px solid var(--rule); font-family: var(--serif); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comparison-copy { margin: 0; padding: 13px; max-height: 55vh; overflow: auto; background: var(--document); border: 1px solid var(--rule); font-size: 14px; line-height: 1.65; }
 .comparison-controls select:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
 @media (max-width: 900px) { .comparison-copies { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 520px) { .comparison-heading { flex-direction: column; gap: 4px; } }

@@ -1,9 +1,11 @@
 import { z } from 'zod';
 
-export type ArticleMark = { type: 'bold' | 'italic' | 'strike' } | { type: 'evidence'; attrs: { claimRevisionId: string; evidenceId: string; quote: string } };
+export type ArticleMark = { type: 'bold' | 'italic' | 'strike' } | { type: 'evidence'; attrs: { claimRevisionId: string; evidenceId: string; quote: string } }
+  | { type: 'source_evidence'; attrs: { passageId: string; packetId: string; quote: string } };
 export type ArticleNode = { type: 'doc' | 'paragraph' | 'heading' | 'bulletList' | 'orderedList' | 'listItem' | 'blockquote' | 'text' | 'hardBreak'; attrs?: { level: 2 | 3 }; text?: string; marks?: ArticleMark[]; content?: ArticleNode[] };
 const evidenceMark = z.object({ type: z.literal('evidence'), attrs: z.object({ claimRevisionId: z.uuid(), evidenceId: z.uuid(), quote: z.string().min(1).max(10000) }).strict() }).strict();
-const mark = z.union([evidenceMark, z.object({ type: z.enum(['bold', 'italic', 'strike']) }).strict()]);
+const sourceEvidenceMark = z.object({ type: z.literal('source_evidence'), attrs: z.object({ passageId: z.uuid(), packetId: z.uuid(), quote: z.string().min(1).max(10000) }).strict() }).strict();
+const mark = z.union([evidenceMark, sourceEvidenceMark, z.object({ type: z.enum(['bold', 'italic', 'strike']) }).strict()]);
 const node: z.ZodType<ArticleNode> = z.lazy(() => z.object({ type: z.enum(['doc', 'paragraph', 'heading', 'bulletList', 'orderedList', 'listItem', 'blockquote', 'text', 'hardBreak']), attrs: z.object({ level: z.union([z.literal(2), z.literal(3)]) }).strict().optional(), text: z.string().min(1).max(100000).optional(), marks: z.array(mark).max(4).optional(), content: z.array(node).max(1000).optional() }).strict()) as z.ZodType<ArticleNode>;
 const boundedJson = z.unknown().superRefine((value, ctx) => {
   const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }]; let count = 0;
@@ -15,14 +17,16 @@ const boundedJson = z.unknown().superRefine((value, ctx) => {
   if (Buffer.byteLength(JSON.stringify(value) ?? '') > 500000) ctx.addIssue({ code: 'custom', message: 'Article exceeds byte limit' });
 });
 export const articleContentSchema = boundedJson.pipe(z.object({ title: z.string().trim().min(1).max(500), document: node }).strict().superRefine((value, ctx) => {
-  let count = 0, evidenceNodes = 0;
+  let count = 0, evidenceNodes = 0,legacyEvidenceNodes = 0;
   function walk(current: ArticleNode, depth: number, parent?: ArticleNode['type']) {
     if (++count > 5000 || depth > 12) { ctx.addIssue({ code: 'custom', message: 'Article exceeds document limits' }); return; }
     const inline = current.type === 'text' || current.type === 'hardBreak';
     if ((current.type === 'doc') !== (depth === 0) || (current.type === 'text') !== (current.text !== undefined) || (current.type === 'heading') !== (current.attrs !== undefined)
       || (current.marks !== undefined && current.type !== 'text') || (inline && current.content !== undefined)) ctx.addIssue({ code: 'custom', message: 'Invalid article node shape' });
     if (current.marks && new Set(current.marks.map(row => row.type)).size !== current.marks.length) ctx.addIssue({ code: 'custom', message: 'Duplicate marks' });
-    if (current.marks?.some(row => row.type === 'evidence') && ++evidenceNodes > 200) ctx.addIssue({ code: 'custom', message: 'Article accepts at most 200 evidence spans' });
+    if (current.marks?.some(row => row.type === 'evidence') && current.marks.some(row => row.type === 'source_evidence')) ctx.addIssue({ code: 'custom', message: 'A text span cannot carry both claim and source evidence' });
+    if (current.marks?.some(row => row.type === 'evidence') && ++legacyEvidenceNodes > 200) ctx.addIssue({ code: 'custom',message: 'Article accepts at most 200 approved-claim evidence spans' });
+    if (current.marks?.some(row => row.type === 'evidence' || row.type === 'source_evidence') && ++evidenceNodes > 1000) ctx.addIssue({ code: 'custom', message: 'Article accepts at most 1000 evidence spans' });
     if (['doc', 'bulletList', 'orderedList', 'listItem', 'blockquote'].includes(current.type) && !current.content?.length) ctx.addIssue({ code: 'custom', message: 'Container cannot be empty' });
     if (current.type === 'listItem' && current.content?.[0]?.type !== 'paragraph') ctx.addIssue({ code: 'custom', message: 'List item starts with paragraph' });
     if (parent === 'paragraph' || parent === 'heading') { if (!inline) ctx.addIssue({ code: 'custom', message: 'Block requires inline content' }); }
@@ -35,23 +39,30 @@ export const articleContentSchema = boundedJson.pipe(z.object({ title: z.string(
 }));
 export type ArticleContent = z.infer<typeof articleContentSchema>;
 export type ArticleMapping = { claimRevisionId: string; evidenceId: string; quote: string; text: string; locator: string };
-export function articleDocumentDetails(content: ArticleContent): { plainText: string; mappings: ArticleMapping[]; hasUnmapped: boolean } {
-  const blocks: string[] = [], mappings: ArticleMapping[] = []; let hasUnmapped = content.title.trim().length > 0;
+export type ArticleSourceMapping = { passageId: string; packetId: string; quote: string; text: string; locator: string };
+export function articleDocumentDetails(content: ArticleContent): { plainText: string; mappings: ArticleMapping[]; sourceMappings: ArticleSourceMapping[]; hasUnmapped: boolean } {
+  const blocks: string[] = [], mappings: ArticleMapping[] = [], sourceMappings: ArticleSourceMapping[] = []; let hasUnmapped = content.title.trim().length > 0;
   function walk(current: ArticleNode, path: string) {
     if (current.type === 'paragraph' || current.type === 'heading') {
-      let block = '', active: ArticleMapping | undefined;
+      let block = '', activeClaim: ArticleMapping | undefined;
       for (const [index, child] of (current.content ?? []).entries()) {
         const text = child.type === 'hardBreak' ? '\n' : child.text ?? ''; block += text;
-        const evidence = child.marks?.find((row): row is Extract<ArticleMark, { type: 'evidence' }> => row.type === 'evidence');
-        if (!evidence) { active = undefined; if (text.trim()) hasUnmapped = true; continue; }
-        if (active && active.claimRevisionId === evidence.attrs.claimRevisionId && active.evidenceId === evidence.attrs.evidenceId && active.quote === evidence.attrs.quote) active.text += text;
-        else { active = { ...evidence.attrs, text, locator: `${path}.${index}` }; mappings.push(active); }
+        const claimEvidence = child.marks?.find((row): row is Extract<ArticleMark, { type: 'evidence' }> => row.type === 'evidence');
+        const sourceEvidence = child.marks?.find((row): row is Extract<ArticleMark, { type: 'source_evidence' }> => row.type === 'source_evidence');
+        if (claimEvidence && sourceEvidence) throw new Error('A text span cannot carry both claim and source evidence marks');
+        if (claimEvidence) {
+          if (activeClaim && activeClaim.claimRevisionId === claimEvidence.attrs.claimRevisionId && activeClaim.evidenceId === claimEvidence.attrs.evidenceId && activeClaim.quote === claimEvidence.attrs.quote) activeClaim.text += text;
+          else { activeClaim = { ...claimEvidence.attrs, text, locator: `${path}.${index}` }; mappings.push(activeClaim); }
+        } else if (sourceEvidence) {
+          activeClaim = undefined;
+          sourceMappings.push({ ...sourceEvidence.attrs, text, locator: `${path}.${index}` });
+        } else { activeClaim = undefined; if (text.trim()) hasUnmapped = true; }
       }
       blocks.push(block);
     } else for (const [index, child] of (current.content ?? []).entries()) walk(child, `${path}.${index}`);
   }
   walk(content.document, 'doc');
-  return { plainText: blocks.join('\n\n'), mappings, hasUnmapped };
+  return { plainText: blocks.join('\n\n'), mappings, sourceMappings, hasUnmapped };
 }
 const revision = z.number().int().min(0);
 export const saveArticleDraftInput = z.object({ expectedRevision: revision, contentMode: z.enum(['FACTUAL', 'CREATIVE']), content: articleContentSchema, refreshInputs: z.boolean().optional() }).strict();

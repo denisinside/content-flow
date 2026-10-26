@@ -18,7 +18,7 @@ const sourceText = 'У дослідженні взяли участь 12 меш�
 const digest = createHash('sha256').update(sourceText).digest('hex');
 const wording = 'У дослідженні взяли участь 12 мешканців міста.';
 
-export async function installM63Fixture(page: Page, emptySources = false, linkedEvidence = false, articleSelected = true, options: { longName?: boolean; member?: boolean; consent?: boolean; preferenceFailure?: boolean; switchable?: boolean; signedOut?: boolean; articleFailure?: 'conflict' | 'network'; sourceFailure?: boolean; telegramFailure?: boolean } = {}) {
+export async function installM63Fixture(page: Page, emptySources = false, linkedEvidence = false, articleSelected = true, options: { longName?: boolean; member?: boolean; consent?: boolean; preferenceFailure?: boolean; switchable?: boolean; signedOut?: boolean; articleFailure?: 'conflict' | 'network'; sourceFailure?: boolean; telegramFailure?: boolean; claimJob?: 'failed' | 'running'; jobsPollFailure?: boolean; jobSucceedsOnSecondPoll?: boolean } = {}) {
   const violations: string[] = [];
   const pageErrors: string[] = [];
   page.on('pageerror', error => pageErrors.push(error.message));
@@ -30,6 +30,13 @@ export async function installM63Fixture(page: Page, emptySources = false, linked
   let consent = options.consent ?? true;
   let preferenceFailure = options.preferenceFailure ?? false;
   let authenticated = !options.signedOut;
+  let jobsPollCount = 0;
+  const claimJob = (status: 'FAILED' | 'RUNNING' | 'SUCCEEDED') => ({
+    id: 'synthetic-claim-extraction-job', operation: 'CLAIM_EXTRACTION', status,
+    progressStage: status === 'FAILED' ? 'FAILED' : status === 'SUCCEEDED' ? 'COMPLETE' : 'PROCESSING',
+    attemptCount: status === 'FAILED' ? 3 : 1, maxAttempts: 3, retryAllowed: status === 'FAILED',
+    errorCategory: status === 'FAILED' ? 'TIMEOUT' : null, updatedAt: now,
+  });
   const material = { id: 'source-1', projectId, kind: 'TEXT', purpose: 'FACTUAL_SOURCE', label: 'Звіт про щоденні поїздки', included: true, revision: 1, currentSnapshotId: 'snapshot-1', createdAt: now, updatedAt: now };
   const snapshot = { id: 'snapshot-1', sequence: 1, origin: 'MANUAL_TEXT', createdAt: now, createdBy: 'Редактор', projectId, materialId: material.id, normalizedText: sourceText, sha256: digest, bytes: sourceText.length, previousSnapshotId: null, fragments: [{ id: 'fragment-1', ordinal: 0, startOffset: 0, endOffset: sourceText.length, sha256: digest }] };
   const evidence = { id: 'evidence-1', snapshotId: snapshot.id, fragmentId: 'fragment-1', startOffset: 0, endOffset: sourceText.length, quote: sourceText, sha256: digest, relation: 'SUPPORTS', materialId: material.id, materialLabel: material.label, snapshotSequence: 1, invalidatedAt: null, invalidatedBy: null, invalidationReason: null };
@@ -99,7 +106,13 @@ export async function installM63Fixture(page: Page, emptySources = false, linked
     }
     if (path === '/api/v1/projects') return json({ projects: [project], nextCursor: null });
     if (path === base) return json({ project });
-    if (path === `${base}/jobs`) return json({ jobs: [] });
+    if (path === `${base}/jobs` && request.method() === 'GET') {
+      jobsPollCount++;
+      if (options.jobsPollFailure && jobsPollCount === 1) return json({ error: 'FIXTURE_UNAVAILABLE' }, 503);
+      if (!options.claimJob) return json({ jobs: [] });
+      const status = options.jobSucceedsOnSecondPoll && jobsPollCount >= 2 ? 'SUCCEEDED' : options.claimJob === 'failed' ? 'FAILED' : 'RUNNING';
+      return json({ jobs: [claimJob(status)] });
+    }
     if (path === `${base}/materials` && request.method() === 'GET') return json({ materials });
     if (request.method() === 'GET' && path.startsWith(`${base}/materials/`)) {
       const parts = path.slice(`${base}/materials/`.length).split('/');

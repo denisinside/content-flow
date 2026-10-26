@@ -16,7 +16,7 @@ type Identity = { id: string; cookie: string };
 type Reply<T> = { response: Response; body: T };
 type Extracted = { job: { id: string; status: string; errorCategory: string | null } };
 const workflowId = 'b21081a2-114a-4ce9-91d8-21241a03b70c';
-const configDigest = 'a34514efc6cd79d5dda73f210afc8ddaa413119a971bf092980773ea566036bf';
+const configDigest = '48dcd646373cd896776ed639778ca72d3c5a54ccb88df1623693c31379bc8fda';
 const readyReport = JSON.stringify({ schemaVersion: 'claims-extraction-report-v1', status: 'ready' });
 const sourceText = 'Київ має населення 3 мільйони осіб.';
 const hash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
@@ -38,7 +38,7 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
   let projectId = '';
   let worker: DurableJobWorker;
   let sentSources: unknown[] = [];
-  let outputMode: 'valid' | 'forged' | 'foreign' | 'malformed' | 'blocked' | 'breakAfterId' | 'reviewBlocked' = 'valid';
+  let outputMode: 'valid' | 'forged' | 'foreign' | 'malformed' | 'blocked' | 'breakAfterId' | 'reviewBlocked' | 'large' | 'largeForgedLast' | 'empty' = 'valid';
   let lastRunId = '';
   let lastWorkflowOutput: unknown;
   let postStarted: (() => void) | undefined;
@@ -56,7 +56,14 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     const fragment = source.fragments[0]!;
     const wording = `Твердження: ${fragment.text}`;
     const quote = outputMode === 'forged' ? 'це вигадана цитата' : fragment.text;
-    const output: unknown = outputMode === 'malformed' ? { schemaVersion: 'claims-v1', claims: [{ key: 'claim-1', wording }], conflicts: [] }
+    const output: unknown = outputMode === 'empty' ? { schemaVersion: 'claims-v1', claims: [], conflicts: [] }
+      : outputMode === 'malformed' ? { schemaVersion: 'claims-v1', claims: [{ key: 'claim-1', wording }], conflicts: [] }
+      : outputMode === 'large' || outputMode === 'largeForgedLast' ? { schemaVersion: 'claims-v1', claims: Array.from({ length: 500 }, (_, index) => {
+        const quote = outputMode === 'largeForgedLast' && index === 499 ? 'підроблена цитата' : fragment.text;
+        return { key: `claim-${index}`, wording: `Синтетичне перевірене твердження ${index}: ${fragment.text}`,
+          evidence: [{ snapshotId: source.snapshotId, fragmentId: fragment.id, startOffset: fragment.startOffset, endOffset: fragment.endOffset,
+            quote, sha256: hash(quote), relation: 'SUPPORTS' }] };
+      }), conflicts: [] }
       : { schemaVersion: 'claims-v1', claims: [{ key: 'claim-1', wording,
         evidence: [{ snapshotId: outputMode === 'foreign' ? randomUUID() : source.snapshotId, fragmentId: fragment.id,
           startOffset: fragment.startOffset, endOffset: fragment.endOffset, quote, sha256: hash(quote), relation: 'SUPPORTS' }] }], conflicts: [] };
@@ -215,8 +222,17 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     expect(candidate.currentRevision?.evidence[0]).toMatchObject({ snapshotId: manifest.snapshots[0]?.snapshotId, relation: 'SUPPORTS', quote: sourceText });
     const execution = await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: job.job.id } });
     expect(execution).toMatchObject({ status: 'SUCCEEDED', provider: 'dify', providerRunId: expect.any(String), model: null,
-      releaseId: 'claim-extraction-2026-10-09.2', configDigest });
+      releaseId: 'claim-extraction-2026-10-14.3', configDigest });
     expect(JSON.stringify(execution.inputManifest)).not.toContain('synthetic-claim-key');
+  });
+
+  it('accepts an empty candidate set without issuing empty bulk writes or changing canonical claims', async () => {
+    outputMode = 'empty';
+    const before = await health.prisma.claim.count({ where: { projectId } });
+    const job = await startExtraction(); await run(job.job.id);
+    expect(await health.prisma.job.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'SUCCEEDED' });
+    expect(await health.prisma.claim.count({ where: { projectId } })).toBe(before);
+    expect(await health.prisma.claimRevision.count({ where: { projectId, jobId: job.job.id } })).toBe(0);
   });
 
   it('rejects malformed contracts, forged quotes and foreign IDs without inserting partial claims', async () => {
@@ -292,4 +308,39 @@ describe('Dify claims extraction over API, PostgreSQL and durable worker', () =>
     expect(await health.prisma.claim.count({ where: { projectId } })).toBe(2);
     expect(await health.prisma.aIExecution.findFirstOrThrow({ where: { jobId: submitted.job.id } })).toMatchObject({ status: 'OUTCOME_UNKNOWN', errorCategory: 'ACCESS_REVOKED' });
   });
+
+  it('rejects forged evidence on the final row of a 500-candidate output without partial inserts', async () => {
+    outputMode = 'largeForgedLast';
+    const before = await health.prisma.claim.count({ where: { projectId } });
+    const job = await startExtraction(owner); await run(job.job.id);
+    expect(await health.prisma.job.findUniqueOrThrow({ where: { id: job.job.id } }))
+      .toMatchObject({ status: 'FAILED', errorCategory: 'INVALID_CONTRACT', providerOutcome: 'KNOWN_SUCCEEDED' });
+    expect(await health.prisma.claim.count({ where: { projectId } })).toBe(before);
+    expect(await health.prisma.claimRevision.count({ where: { projectId, jobId: job.job.id } })).toBe(0);
+  });
+
+  it('atomically commits 500 synthetic proposals, keeps them unapproved, then freezes a valid 500-claim basis after review', async () => {
+    outputMode = 'large';
+    const job = await startExtraction(owner); await run(job.job.id);
+    expect(await health.prisma.job.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'SUCCEEDED' });
+    const proposals = await health.prisma.claim.findMany({ where: { projectId, currentRevision: { jobId: job.job.id } },
+      include: { currentRevision: { include: { evidence: true } } } });
+    expect(proposals).toHaveLength(500);
+    for (const proposal of proposals) {
+      expect(proposal.currentRevision).toMatchObject({ status: 'PROPOSED', approvedBy: null, approvedAt: null });
+      expect(proposal.currentRevision?.evidence).toHaveLength(1);
+      expect(proposal.currentRevision?.evidence[0]).toMatchObject({ relation: 'SUPPORTS', quote: sourceText, capturedPurpose: 'FACTUAL_SOURCE' });
+    }
+
+    for (const proposal of proposals) await facts.review(owner.id, projectId, proposal.id, proposal.currentRevisionId!, 'approve', { expectedRevision: 1 });
+    const revisionIds = proposals.map(proposal => proposal.currentRevisionId!);
+    const frozenInput = { claimRevisionIds: revisionIds };
+    expect(revisionIds).toHaveLength(500);
+    const frozenReply = await request<{ basis: { id: string; valid: boolean; manifest: unknown } }>(owner, 'POST', `/api/v1/projects/${projectId}/basis`, frozenInput);
+    expect(frozenReply.response.status, JSON.stringify(frozenReply.body)).toBe(201);
+    const frozen = frozenReply.body;
+    expect(frozen.basis).toMatchObject({ valid: true, manifest: { claims: expect.any(Array) } });
+    expect((frozen.basis.manifest as { claims: unknown[] }).claims).toHaveLength(500);
+    expect(await health.prisma.basisClaim.count({ where: { projectId, basisId: frozen.basis.id } })).toBe(500);
+  }, 180_000);
 });

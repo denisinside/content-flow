@@ -36,6 +36,11 @@ model UserProfile {
   createdAssets Asset[] @relation("AssetCreator")
   createdMaterials Material[] @relation("MaterialCreator")
   createdSnapshots SourceSnapshot[] @relation("SnapshotCreator")
+  createdSearchIndexes SourceSearchIndex[] @relation("SourceSearchIndexCreator")
+  createdEvidenceSpans SourceEvidenceSpan[] @relation("SourceEvidenceSpanCreator")
+  createdEvidencePackets SourceEvidencePacket[] @relation("SourceEvidencePacketCreator")
+  createdEvidenceSets SourceEvidenceSet[] @relation("SourceEvidenceSetCreator")
+  requestedSourceWritingRequests SourceWritingRequest[] @relation("SourceWritingRequestRequester")
   requestedJobs Job[] @relation("JobRequester")
   claims Claim[] @relation("ClaimCreator")
   claimRevisions ClaimRevision[] @relation("ClaimRevisionCreator")
@@ -223,6 +228,13 @@ model Project {
   assets Asset[]
   materials Material[]
   jobs Job[]
+  sourceSearchIndexes SourceSearchIndex[]
+  sourceSearchChunks SourceSearchChunk[]
+  sourceEvidenceSpans SourceEvidenceSpan[]
+  sourceEvidencePackets SourceEvidencePacket[]
+  sourceEvidenceSets SourceEvidenceSet[]
+  sourceWritingRequests SourceWritingRequest[]
+  sourceArticleAssemblies SourceArticleAssembly[]
   claims Claim[]
   claimConflicts ClaimConflict[]
   factualBases FactualBasisRevision[]
@@ -345,6 +357,9 @@ model SourceSnapshot {
   creator UserProfile @relation("SnapshotCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   fragments SourceFragment[]
+  searchIndexes SourceSearchIndex[]
+  searchChunks SourceSearchChunk[]
+  evidenceSpans SourceEvidenceSpan[]
   claimEvidence ClaimEvidence[]
   briefContexts BriefContextSnapshot[]
   articleDrafts ArticleDraft[]
@@ -370,6 +385,10 @@ enum JobOperation {
   TELEGRAM_GENERATION
   EXPORT_BUILD
   GOOGLE_DOCS_SYNC
+  SOURCE_EMBEDDING
+  EVIDENCE_SEARCH
+  SOURCE_WRITING
+  BRIEF_PROPOSAL
   @@schema("contextflow")
 }
 
@@ -453,6 +472,8 @@ model Job {
   adaptationRevisions AdaptationRevision[]
   exportRequest ExportRequest?
   googleDocSyncOperation GoogleDocSyncOperation?
+  sourceChunkEmbeddings SourceChunkEmbedding[]
+  sourceEvidencePacket SourceEvidencePacket?
   @@unique([projectId, id])
   @@unique([projectId, operation, commandKey])
   @@index([status, nextAttemptAt])
@@ -493,11 +514,213 @@ model SourceFragment {
   endOffset Int
   sha256 String @db.Char(64)
   claimEvidence ClaimEvidence[]
+  evidenceSpans SourceEvidenceSpan[]
 
   @@unique([projectId, id])
   @@unique([projectId, snapshotId, id])
   @@unique([projectId, snapshotId, ordinal])
   @@index([projectId, snapshotId, startOffset])
+  @@schema("contextflow")
+}
+
+model SourceSearchIndex {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotId String @db.Uuid
+  snapshot SourceSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotSha256 String @db.Char(64)
+  chunkerVersion String @db.VarChar(64)
+  model String @default("gemini-embedding-001") @db.VarChar(64)
+  dimensions Int @default(768)
+  configDigest String @db.Char(64)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("SourceSearchIndexCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  chunks SourceSearchChunk[]
+  @@unique([projectId, id])
+  @@unique([projectId, snapshotId, configDigest])
+  @@index([projectId, snapshotId, createdAt])
+  @@schema("contextflow")
+}
+
+model SourceSearchChunk {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  indexId String @db.Uuid
+  searchIndex SourceSearchIndex @relation(fields: [projectId, indexId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotId String @db.Uuid
+  snapshot SourceSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotSha256 String @db.Char(64)
+  ordinal Int
+  startOffset Int
+  endOffset Int
+  sha256 String @db.Char(64)
+  text String @db.VarChar(1536)
+  requiresEmbedding Boolean
+  searchVector Unsupported("tsvector") @default(dbgenerated())
+  embedding SourceChunkEmbedding?
+  @@unique([projectId, id])
+  @@unique([projectId, indexId, ordinal])
+  @@index([projectId, snapshotId, startOffset])
+  @@schema("contextflow")
+}
+
+model SourceChunkEmbedding {
+  projectId String @db.Uuid
+  chunkId String @db.Uuid
+  chunk SourceSearchChunk @relation(fields: [projectId, chunkId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  jobId String @db.Uuid
+  job Job @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  embedding Unsupported("vector(768)")
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@id([projectId, chunkId])
+  @@index([projectId, jobId])
+  @@schema("contextflow")
+}
+
+model SourceEvidenceSpan {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  snapshotId String @db.Uuid
+  snapshot SourceSnapshot @relation(fields: [projectId, snapshotId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  fragmentId String @db.Uuid
+  fragment SourceFragment @relation(fields: [projectId, snapshotId, fragmentId], references: [projectId, snapshotId, id], onDelete: Restrict, onUpdate: NoAction)
+  startOffset Int
+  endOffset Int
+  quote String @db.Text
+  sha256 String @db.Char(64)
+  snapshotSha256 String @db.Char(64)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("SourceEvidenceSpanCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  packetItems SourceEvidencePacketItem[]
+  @@unique([projectId, id])
+  @@unique([projectId, snapshotId, id])
+  @@index([projectId, snapshotId, startOffset])
+  @@schema("contextflow")
+}
+
+model SourceEvidencePacket {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  jobId String @unique @db.Uuid
+  job Job @relation(fields: [projectId, jobId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  query String @db.Text
+  manifestJson Json
+  sha256 String @db.Char(64)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("SourceEvidencePacketCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  items SourceEvidencePacketItem[]
+  evidenceSets SourceEvidenceSetPacket[]
+  @@unique([projectId, id])
+  @@unique([projectId, jobId])
+  @@schema("contextflow")
+}
+
+model SourceEvidencePacketItem {
+  projectId String @db.Uuid
+  packetId String @db.Uuid
+  packet SourceEvidencePacket @relation(fields: [projectId, packetId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  spanId String @db.Uuid
+  span SourceEvidenceSpan @relation(fields: [projectId, spanId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  ordinal Int
+  outlineCitations OutlineRevisionSourceCitation[]
+  articleCitations ArticleVersionSourceCitation[]
+  adaptationCitations AdaptationRevisionSourceCitation[]
+  scriptCitations ScriptRevisionSourceCitation[]
+  @@id([projectId, packetId, ordinal])
+  @@unique([projectId, packetId, spanId])
+  @@schema("contextflow")
+}
+
+model SourceEvidenceSet {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"SourceEvidenceSet_project_fkey")
+  briefRevisionId String @db.Uuid
+  briefRevision BriefRevision @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"SourceEvidenceSet_brief_fkey")
+  manifestJson Json
+  sha256 String @db.Char(64)
+  createdBy String @db.Uuid
+  creator UserProfile @relation("SourceEvidenceSetCreator",fields:[createdBy],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"SourceEvidenceSet_creator_fkey")
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  sealed Boolean @default(false)
+  packets SourceEvidenceSetPacket[]
+  outlineRevisions OutlineRevision[]
+  outlineCitations OutlineRevisionSourceCitation[]
+  articleDrafts ArticleDraft[]
+  articleVersions ArticleVersion[] @relation("ArticleVersionSourceEvidenceSet")
+  reviewedArticleVersions ArticleVersion[] @relation("ArticleVersionReviewedSourceEvidenceSet")
+  adaptationDrafts AdaptationDraft[]
+  adaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionSourceEvidenceSet")
+  reviewedAdaptationRevisions AdaptationRevision[] @relation("AdaptationRevisionReviewedSourceEvidenceSet")
+  articleCitations ArticleVersionSourceCitation[]
+  adaptationCitations AdaptationRevisionSourceCitation[]
+  scriptCitations ScriptRevisionSourceCitation[]
+  @@unique([projectId,id])
+  @@index([projectId,briefRevisionId,createdAt])
+  @@schema("contextflow")
+}
+
+model SourceEvidenceSetPacket {
+  projectId String @db.Uuid
+  setId String @db.Uuid
+  sourceEvidenceSet SourceEvidenceSet @relation(fields:[projectId,setId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"SourceEvidenceSetPacket_set_fkey")
+  packetId String @db.Uuid
+  packet SourceEvidencePacket @relation(fields:[projectId,packetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"SourceEvidenceSetPacket_packet_fkey")
+  packetHash String @db.Char(64)
+  ordinal Int
+  outlineCitations OutlineRevisionSourceCitation[]
+  articleCitations ArticleVersionSourceCitation[]
+  adaptationCitations AdaptationRevisionSourceCitation[]
+  scriptCitations ScriptRevisionSourceCitation[]
+  @@id([projectId,setId,packetId])
+  @@unique([projectId,setId,ordinal])
+  @@unique([projectId,setId,packetId,packetHash])
+  @@schema("contextflow")
+}
+
+model SourceWritingRequest {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"SourceWritingRequest_project_fkey")
+  requestedBy String @db.Uuid
+  requester UserProfile @relation("SourceWritingRequestRequester",fields:[requestedBy],references:[id],onDelete:Restrict,onUpdate:NoAction,map:"SourceWritingRequest_requester_fkey")
+  commandKey String @db.VarChar(128)
+  task String @db.VarChar(16)
+  stage String @db.VarChar(16)
+  inputManifestJson Json
+  inputHash String @db.Char(64)
+  stageDataJson Json @default("{}")
+  revision Int @default(1)
+  errorCategory String? @db.VarChar(64)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @db.Timestamptz(3)
+  nextCheckAt DateTime? @db.Timestamptz(3)
+  articleAssembly SourceArticleAssembly?
+  @@unique([projectId,id])
+  @@unique([projectId,commandKey])
+  @@index([stage,nextCheckAt,projectId])
+  @@schema("contextflow")
+}
+
+model SourceArticleAssembly {
+  articleVersionId String @id @db.Uuid
+  projectId String @db.Uuid
+  project Project @relation(fields:[projectId],references:[id],onDelete:Restrict,onUpdate:NoAction)
+  version ArticleVersion @relation(fields:[projectId,articleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  requestId String @unique @db.Uuid
+  request SourceWritingRequest @relation(fields:[projectId,requestId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  manifestJson Json
+  sha256 String @db.Char(64)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  @@unique([projectId,articleVersionId])
+  @@unique([projectId,requestId])
   @@schema("contextflow")
 }
 
@@ -1215,6 +1438,7 @@ model BriefRevision {
   adaptationDrafts AdaptationDraft[]
   adaptationRevisions AdaptationRevision[]
   reviewedAdaptationRevisions AdaptationRevision[] @relation("AdaptationReviewedBrief")
+  sourceEvidenceSets SourceEvidenceSet[]
   @@unique([projectId, id])
   @@unique([projectId, briefId, id])
   @@unique([briefId, number])
@@ -1272,6 +1496,10 @@ model OutlineRevision {
   briefRevision BriefRevision @relation(fields: [projectId, briefRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
   basisRevisionId String? @db.Uuid
   basisRevision FactualBasisRevision? @relation(fields: [projectId, basisRevisionId], references: [projectId, id], onDelete: Restrict, onUpdate: NoAction)
+  sourceEvidenceSetId String? @db.Uuid
+  sourceEvidenceSet SourceEvidenceSet? @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"OutlineRevision_sourceEvidenceSet_fkey")
+  sourceEvidenceSealed Boolean @default(false)
+  sourceCitations OutlineRevisionSourceCitation[]
   contentMode ContentMode
   content Json
   sha256 String @db.Char(64)
@@ -1330,6 +1558,8 @@ model ArticleDraft {
   briefRevision BriefRevision? @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  basisRevisionId String? @db.Uuid
   basisRevision FactualBasisRevision? @relation(fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+  sourceEvidenceSetId String? @db.Uuid
+  sourceEvidenceSet SourceEvidenceSet? @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"ArticleDraft_sourceEvidenceSet_fkey")
  outlineRevisionId String? @db.Uuid
   outlineRevision OutlineRevision? @relation(fields:[projectId,outlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  workspaceId String @db.Uuid
@@ -1372,6 +1602,8 @@ model ArticleVersion {
  briefRevision BriefRevision? @relation("ArticleVersionBrief",fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  basisRevisionId String? @db.Uuid
  basisRevision FactualBasisRevision? @relation("ArticleVersionBasis",fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String? @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet? @relation("ArticleVersionSourceEvidenceSet",fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"ArticleVersion_sourceEvidenceSet_fkey")
  outlineRevisionId String? @db.Uuid
  outlineRevision OutlineRevision? @relation("ArticleVersionOutline",fields:[projectId,outlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  workspaceId String @db.Uuid
@@ -1391,6 +1623,7 @@ model ArticleVersion {
  approver UserProfile? @relation("ArticleApprover",fields:[approvedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  approvedAt DateTime? @db.Timestamptz(3)
  claimsSealed Boolean @default(false)
+ sourceEvidenceSealed Boolean @default(false)
  acknowledgedUnmapped Boolean @default(false)
  withdrawnBy String? @db.Uuid
  withdrawer UserProfile? @relation("ArticleWithdrawer",fields:[withdrawnBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
@@ -1401,6 +1634,8 @@ model ArticleVersion {
  reviewedBriefRevision BriefRevision? @relation("ArticleVersionReviewedBrief", fields:[projectId,reviewedBriefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  reviewedBasisRevisionId String? @db.Uuid
  reviewedBasisRevision FactualBasisRevision? @relation("ArticleVersionReviewedBasis", fields:[projectId,reviewedBasisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedSourceEvidenceSetId String? @db.Uuid
+ reviewedSourceEvidenceSet SourceEvidenceSet? @relation("ArticleVersionReviewedSourceEvidenceSet",fields:[projectId,reviewedSourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"ArticleVersion_reviewedSourceEvidenceSet_fkey")
  reviewedOutlineRevisionId String? @db.Uuid
  reviewedOutlineRevision OutlineRevision? @relation("ArticleVersionReviewedOutline", fields:[projectId,reviewedOutlineRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  reviewedWorkspaceStyleRevision Int?
@@ -1409,6 +1644,8 @@ model ArticleVersion {
  reviewer UserProfile? @relation("ArticleReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  reviewedAt DateTime? @db.Timestamptz(3)
  claims ArticleVersionClaim[]
+ sourceCitations ArticleVersionSourceCitation[]
+ sourceAssembly SourceArticleAssembly?
   exportItems ExportItem[] @relation("ExportArticleVersion")
  sourceAdaptations AdaptationRevision[] @relation("AdaptationArticleSource")
  reviewedSourceAdaptations AdaptationRevision[] @relation("AdaptationReviewedArticle")
@@ -1430,6 +1667,80 @@ model ArticleVersionClaim {
  quote String @db.VarChar(10000)
  linkedText String @db.Text
  @@id([articleVersionId,locator])
+ @@schema("contextflow")
+}
+
+model OutlineRevisionSourceCitation {
+ projectId String @db.Uuid
+ revisionId String @db.Uuid
+ revision OutlineRevision @relation(fields:[projectId,revisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"OutlineRevisionSourceCitation_set_fkey")
+ packetId String @db.Uuid
+ spanId String @db.Uuid
+ setPacket SourceEvidenceSetPacket @relation(fields:[projectId,sourceEvidenceSetId,packetId],references:[projectId,setId,packetId],onDelete:Restrict,onUpdate:NoAction,map:"OutlineRevisionSourceCitation_set_packet_fkey")
+ packetItem SourceEvidencePacketItem @relation(fields:[projectId,packetId,spanId],references:[projectId,packetId,spanId],onDelete:Restrict,onUpdate:NoAction,map:"OutlineRevisionSourceCitation_packet_item_fkey")
+ sectionIndex Int
+ locator String @db.VarChar(240)
+ text String @db.Text
+ quote String @db.Text
+ @@id([revisionId,sectionIndex,packetId,spanId])
+ @@index([projectId,sourceEvidenceSetId,packetId,spanId])
+ @@schema("contextflow")
+}
+
+model ArticleVersionSourceCitation {
+ projectId String @db.Uuid
+ articleVersionId String @db.Uuid
+ articleVersion ArticleVersion @relation(fields:[projectId,articleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"ArticleVersionSourceCitation_set_fkey")
+ packetId String @db.Uuid
+ spanId String @db.Uuid
+ setPacket SourceEvidenceSetPacket @relation(fields:[projectId,sourceEvidenceSetId,packetId],references:[projectId,setId,packetId],onDelete:Restrict,onUpdate:NoAction,map:"ArticleVersionSourceCitation_set_packet_fkey")
+ packetItem SourceEvidencePacketItem @relation(fields:[projectId,packetId,spanId],references:[projectId,packetId,spanId],onDelete:Restrict,onUpdate:NoAction,map:"ArticleVersionSourceCitation_packet_item_fkey")
+ locator String @db.VarChar(240)
+ text String @db.Text
+ quote String @db.Text
+ @@id([articleVersionId,locator])
+ @@index([projectId,sourceEvidenceSetId,packetId,spanId])
+ @@schema("contextflow")
+}
+
+model AdaptationRevisionSourceCitation {
+ projectId String @db.Uuid
+ revisionId String @db.Uuid
+ revision AdaptationRevision @relation(fields:[projectId,revisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"AdaptationRevisionSourceCitation_set_fkey")
+ packetId String @db.Uuid
+ spanId String @db.Uuid
+ setPacket SourceEvidenceSetPacket @relation(fields:[projectId,sourceEvidenceSetId,packetId],references:[projectId,setId,packetId],onDelete:Restrict,onUpdate:NoAction,map:"AdaptationRevisionSourceCitation_set_packet_fkey")
+ packetItem SourceEvidencePacketItem @relation(fields:[projectId,packetId,spanId],references:[projectId,packetId,spanId],onDelete:Restrict,onUpdate:NoAction,map:"AdaptationRevisionSourceCitation_packet_item_fkey")
+ locator String @db.VarChar(240)
+ text String @db.Text
+ quote String @db.Text
+ @@id([revisionId,locator])
+ @@index([projectId,sourceEvidenceSetId,packetId,spanId])
+ @@schema("contextflow")
+}
+
+model ScriptRevisionSourceCitation {
+ projectId String @db.Uuid
+ revisionId String @db.Uuid
+ revision ScriptRevision @relation(fields:[projectId,revisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"ScriptRevisionSourceCitation_set_fkey")
+ packetId String @db.Uuid
+ spanId String @db.Uuid
+ setPacket SourceEvidenceSetPacket @relation(fields:[projectId,sourceEvidenceSetId,packetId],references:[projectId,setId,packetId],onDelete:Restrict,onUpdate:NoAction,map:"ScriptRevisionSourceCitation_set_packet_fkey")
+ packetItem SourceEvidencePacketItem @relation(fields:[projectId,packetId,spanId],references:[projectId,packetId,spanId],onDelete:Restrict,onUpdate:NoAction,map:"ScriptRevisionSourceCitation_packet_item_fkey")
+ frameId String @db.Uuid
+ locator String @db.VarChar(240)
+ text String @db.Text
+ quote String @db.Text
+ @@id([revisionId,frameId,locator])
+ @@index([projectId,sourceEvidenceSetId,packetId,spanId])
  @@schema("contextflow")
 }
 
@@ -1518,6 +1829,8 @@ model AdaptationDraft {
  briefRevision BriefRevision @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  basisRevisionId String? @db.Uuid
  basisRevision FactualBasisRevision? @relation("AdaptationDraftBasis",fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String? @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet? @relation(fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"AdaptationDraft_sourceEvidenceSet_fkey")
  sourceArticleVersionId String? @db.Uuid
  sourceArticleVersion ArticleVersion? @relation("AdaptationDraftArticleSource",fields:[projectId,sourceArticleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  workspaceId String @db.Uuid
@@ -1550,6 +1863,8 @@ model AdaptationRevision {
  briefRevision BriefRevision @relation(fields:[projectId,briefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  basisRevisionId String? @db.Uuid
  basisRevision FactualBasisRevision? @relation("AdaptationRevisionBasis",fields:[projectId,basisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ sourceEvidenceSetId String? @db.Uuid
+ sourceEvidenceSet SourceEvidenceSet? @relation("AdaptationRevisionSourceEvidenceSet",fields:[projectId,sourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"AdaptationRevision_sourceEvidenceSet_fkey")
  sourceArticleVersionId String? @db.Uuid
  sourceArticleVersion ArticleVersion? @relation("AdaptationArticleSource",fields:[projectId,sourceArticleVersionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  reviewedSourceArticleVersionId String? @db.Uuid
@@ -1567,6 +1882,7 @@ model AdaptationRevision {
  aiExecutionId String? @db.Uuid
  execution AIExecution? @relation(fields:[projectId,aiExecutionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  claimsSealed Boolean @default(false)
+ sourceEvidenceSealed Boolean @default(false)
  approvedBy String? @db.Uuid
  approver UserProfile? @relation("AdaptationApprover",fields:[approvedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  approvedAt DateTime? @db.Timestamptz(3)
@@ -1580,12 +1896,15 @@ model AdaptationRevision {
  reviewedBriefRevision BriefRevision? @relation("AdaptationReviewedBrief",fields:[projectId,reviewedBriefRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
  reviewedBasisRevisionId String? @db.Uuid
  reviewedBasisRevision FactualBasisRevision? @relation("AdaptationRevisionReviewedBasis",fields:[projectId,reviewedBasisRevisionId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction)
+ reviewedSourceEvidenceSetId String? @db.Uuid
+ reviewedSourceEvidenceSet SourceEvidenceSet? @relation("AdaptationRevisionReviewedSourceEvidenceSet",fields:[projectId,reviewedSourceEvidenceSetId],references:[projectId,id],onDelete:Restrict,onUpdate:NoAction,map:"AdaptationRevision_reviewedSourceEvidenceSet_fkey")
  reviewedWorkspaceStyleRevision Int?
  reviewedStyle WorkspaceStyleRevision? @relation("AdaptationRevisionReviewedStyle",fields:[workspaceId,reviewedWorkspaceStyleRevision],references:[workspaceId,revision],onDelete:Restrict,onUpdate:NoAction)
  reviewedBy String? @db.Uuid
  reviewer UserProfile? @relation("AdaptationReviewer",fields:[reviewedBy],references:[id],onDelete:Restrict,onUpdate:NoAction)
  reviewedAt DateTime? @db.Timestamptz(3)
  claims AdaptationRevisionClaim[]
+ sourceCitations AdaptationRevisionSourceCitation[]
   visualDraftSources VisualCompositionDraft[] @relation("VisualDraftAdaptationParent")
   visualRevisionSources VisualCompositionRevision[] @relation("VisualRevisionAdaptationParent")
  exportItems ExportItem[] @relation("ExportAdaptationRevision")
@@ -1659,6 +1978,8 @@ model ScriptRevision {
  withdrawnAt DateTime? @db.Timestamptz(3)
  withdrawalReason String? @db.VarChar(2000)
  claimsSealed Boolean @default(false)
+ sourceEvidenceSealed Boolean @default(false)
+ sourceCitations ScriptRevisionSourceCitation[]
  reviewCounter Int @default(0)
  origin EditorialOrigin
  jobId String? @unique @db.Uuid

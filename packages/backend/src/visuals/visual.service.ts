@@ -99,13 +99,13 @@ export class VisualService {
       const content = telegramContentSchema.parse(parent.content);
       const cover = content.cover;
       if (!cover) throw new ConflictException('Approved cover adaptation has no cover text');
-      return [{ id: randomUUID(), sourceFrameId: null, purpose: 'Обкладинка', text: cover.text,
+      return [{ id: randomUUID(), sourceFrameId: null, purpose: 'Обкладинка', text: cover.text,sourceMappings: (content.sourceMappings ?? []).filter(map => map.field === 'cover').map(map => ({ ...map,linkedText: cover.text.slice(map.startOffset,map.endOffset) })),
         mappings: content.mappings.filter(map => map.field === 'cover').map(mapping => ({ startOffset: mapping.startOffset, endOffset: mapping.endOffset,
           quote: mapping.quote, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId })) }];
     }
     const content = scriptContentSchema.parse(parent.content);
     if (!content.frames.length) throw new ConflictException('Approved script has no frames');
-    return content.frames.map(frame => ({ id: frame.id, sourceFrameId: frame.id, purpose: frame.purpose, text: frame.text, mappings: frame.mappings }));
+    return content.frames.map(frame => ({ id: frame.id, sourceFrameId: frame.id, purpose: frame.purpose, text: frame.text, mappings: frame.mappings,sourceMappings: (frame.sourceMappings ?? []).map(map => ({ ...map,linkedText: frame.text.slice(map.startOffset,map.endOffset) })) }));
   }
   private async buildInitial(tx: Prisma.TransactionClient, project: string, format: VisualFormat, parent: ParentSource, defaults: VisualDefaults): Promise<VisualComposition> {
     const sourceFrames = this.parentFrames(parent);
@@ -113,7 +113,7 @@ export class VisualService {
     const templateId: VisualFrame['templateId'] = 'editorial';
     const frames = sourceFrames.map((source, index) => {
       const mappings = source.mappings.map(({ startOffset, endOffset, quote, claimRevisionId, evidenceId }) => ({ startOffset, endOffset, quote, claimRevisionId, evidenceId }));
-      const frame = makeFrame({ id: source.id, text: source.text, purpose: source.purpose, mappings }, height, templateId, defaults);
+      const frame = makeFrame({ id: source.id, text: source.text, purpose: source.purpose, mappings,...(source.sourceMappings.length ? { sourceMappings: source.sourceMappings.map(({ startOffset,endOffset,quote,passageId,packetId,linkedText }) => ({ startOffset,endOffset,quote,passageId,packetId,linkedText })) } : {}) }, height, templateId, defaults);
       frame.sourceFrameId = source.sourceFrameId;
       if (parent.kind === 'ADAPTATION') frame.sourceFrameId = null;
       if (index === 0 && defaults.logo) { /* makeFrame includes the frozen brand logo resource */ }
@@ -133,7 +133,7 @@ export class VisualService {
     return content.frames.some(frame => frame.layers.some(layer => {
       if (layer.type !== 'text') return false;
       let cursor = 0;
-      for (const mapping of [...layer.mappings].sort((a, b) => a.startOffset - b.startOffset)) {
+      for (const mapping of [...layer.mappings,...(layer.sourceMappings ?? [])].sort((a, b) => a.startOffset - b.startOffset)) {
         if (layer.text.slice(cursor, mapping.startOffset).trim()) return true;
         cursor = mapping.endOffset;
       }
@@ -341,6 +341,7 @@ export class VisualService {
         else if (!frame.sourceFrameId || !allowed.has(frame.sourceFrameId)) frame.sourceFrameId = null;
         const parentMappings = frame.sourceFrameId ? allowed.get(frame.sourceFrameId) : coverMappings;
         for (const layer of frame.layers) if (layer.type === 'text') {
+          if (layer.sourceMappings) { const sourceAllowed = this.parentPassageMappings(parent); const target = frame.sourceFrameId ? sourceAllowed.get(frame.sourceFrameId) : parent.kind === 'ADAPTATION' ? sourceAllowed.values().next().value : undefined; layer.sourceMappings = layer.sourceMappings.filter(map => target?.has(`${map.passageId}:${map.packetId}:${map.quote}:${map.linkedText}`)); }
           layer.mappings = layer.mappings.filter(mapping => parentMappings?.has(`${mapping.claimRevisionId}:${mapping.evidenceId}:${mapping.quote}`));
         }
       }
@@ -396,13 +397,16 @@ export class VisualService {
     const frames = this.parentFrames(parent);
     return new Map(frames.map(frame => [frame.id, new Set(frame.mappings.map(mapping => `${mapping.claimRevisionId}:${mapping.evidenceId}:${mapping.quote}`))]));
   }
+  private parentPassageMappings(parent: ParentSource) { return new Map(this.parentFrames(parent).map(frame => [frame.id,new Set(frame.sourceMappings.map(map => `${map.passageId}:${map.packetId}:${map.quote}:${map.linkedText}`))])); }
   private assertMappings(content: VisualComposition, parent: ParentSource) {
-    const allowed = this.sourceMappings(parent);
+    const allowed = this.sourceMappings(parent),passages = this.parentPassageMappings(parent);
     for (const frame of content.frames) for (const layer of frame.layers) if (layer.type === 'text') {
       if (parent.kind === 'ADAPTATION' && frame.sourceFrameId !== null) throw new BadRequestException('Visual cover text source does not match its approved parent');
       if (parent.kind === 'SCRIPT' && frame.sourceFrameId !== null && !allowed.has(frame.sourceFrameId)) throw new BadRequestException('Visual frame source does not match its approved parent');
       const parentMappings = frame.sourceFrameId ? allowed.get(frame.sourceFrameId) : parent.kind === 'ADAPTATION' ? allowed.values().next().value : undefined;
-      if (parent.kind === 'SCRIPT' && !frame.sourceFrameId && layer.mappings.length) throw new BadRequestException('New visual text cannot inherit evidence mappings');
+      const passageAllowed = frame.sourceFrameId ? passages.get(frame.sourceFrameId) : parent.kind === 'ADAPTATION' ? passages.values().next().value : undefined;
+      for (const map of layer.sourceMappings ?? []) if (!passageAllowed?.has(`${map.passageId}:${map.packetId}:${map.quote}:${map.linkedText}`) || layer.text.slice(map.startOffset,map.endOffset) !== map.linkedText) throw new BadRequestException('Visual source citation differs from its approved parent');
+      if (parent.kind === 'SCRIPT' && !frame.sourceFrameId && (layer.mappings.length || layer.sourceMappings?.length)) throw new BadRequestException('New visual text cannot inherit evidence mappings');
       for (const mapping of layer.mappings) if (!parentMappings?.has(`${mapping.claimRevisionId}:${mapping.evidenceId}:${mapping.quote}`)) {
         throw new BadRequestException('Visual evidence mapping is outside its approved parent frame');
       }

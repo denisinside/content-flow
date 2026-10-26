@@ -1,0 +1,47 @@
+{
+  "configDigest": "d6b74609adb0e83fdb04110ee14976eadec2c033964289b9190822fe5763973c",
+  "contract": {
+    "input": "embedding_request_json: source-embedding-request-v1",
+    "maxGoogleResponseUtf8Bytes": 400000,
+    "maxOutputChars": 400000,
+    "maxOutputUtf8Bytes": 1048576,
+    "maxRequestUtf8Bytes": 64000,
+    "maxTextChars": 4000,
+    "maxTextUtf8Bytes": 1536,
+    "maxTexts": 16,
+    "maxTotalTextUtf8Bytes": 64000,
+    "output": "embedding_json: source-embedding-v1"
+  },
+  "limits": {
+    "difyTracePrivacy": "Dify may retain workflow inputs, HTTP request bodies and output vectors in run history; restrict access and retention there. The Google key is supplied through the Dify secret environment variable and custom API-key authorization header.",
+    "modelMaximumTokensPerText": 2048,
+    "textBoundRationale": "The workflow uses a conservative 1536 UTF-8 byte cap per text and disables Google truncation; it does not tokenize locally, so any provider token-limit rejection fails the run visibly."
+  },
+  "provider": {
+    "apiKeyEnvironmentVariable": "GOOGLE_EMBEDDING_API_KEY",
+    "autoTruncate": false,
+    "dimensions": 768,
+    "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents",
+    "model": "gemini-embedding-001",
+    "name": "Google Gemini API via Dify HTTP Request",
+    "references": [
+      "https://ai.google.dev/api/embeddings",
+      "https://ai.google.dev/api/batch-api#EmbedContentRequest",
+      "https://ai.google.dev/gemini-api/docs/models/gemini-embedding-001"
+    ],
+    "requestFieldCompatibility": "Send matching taskType and outputDimensionality both at EmbedContentRequest top level and in embedContentConfig; keep autoTruncate=false in embedContentConfig. The top-level fields are deprecated but remain in Google's batch request schema and are required by this release's tested wire shape.",
+    "taskTypes": {
+      "DOCUMENT": "RETRIEVAL_DOCUMENT",
+      "QUERY": "RETRIEVAL_QUERY"
+    }
+  },
+  "releaseId": "source-embedding-2026-10-20.1",
+  "schemaVersion": "contextflow-dify-release-v1",
+  "target": {
+    "difyVersion": "1.17.1",
+    "dslVersion": "0.7.0",
+    "graphonVersion": "0.7.0"
+  },
+  "workflowDslSha256": "d0e26baab3343b7208fd49172f71917eed33aa186a1b477c5841d7947c56b378",
+  "workflowName": "contentflow-source-embedding-v1"
+}

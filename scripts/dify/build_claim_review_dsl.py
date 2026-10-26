@@ -15,8 +15,8 @@ from build_article_generation_dsl import Builder, EditorialDumper, object_schema
 ROOT = Path(__file__).resolve().parents[2]
 DIRECTORY = base.WORKFLOW_DIR
 RUNTIME = ROOT / 'scripts/dify/claim_extraction_runtime.py'
-RELEASE_ID = 'claim-extraction-2026-10-09.2'
-PROMPT_VERSION = 'claims-extraction-review-prompt-v2'
+RELEASE_ID = 'claim-extraction-2026-10-14.3'
+PROMPT_VERSION = 'claims-extraction-review-prompt-v5'
 ROLES = ['Shared rules', 'Extractor', 'Evidence reviewer', 'Batch editor',
          'Deduplicator', 'Conflict reviewer', 'Final auditor', 'Global editor']
 
@@ -31,24 +31,28 @@ def schemas():
         'quote': string(1000, 1), 'instruction': string(1000, 1), 'acceptance': string(1000, 1)})
     coverage = array(object_schema({'fragmentId': string(36, 36),
         'disposition': {'type': 'string', 'enum': ['covered', 'no_factual_claims']},
-        'claimKeys': array(string(64, 1), 100)}), 240)
+        'claimKeys': array(string(64, 1), 500)}), 32)
+    batch_coverage = array(object_schema({'batchId': string(3, 2), 'batchHash': string(64, 64)}), 30)
     conflict = object_schema({'claimKeys': array(string(64, 1), 10, 2), 'rationale': string(2000, 1)})
     version = string(64, 64)
-    return {'draft': object_schema({'claims': array(claim, 30)}),
-        'batch_patch': object_schema({'versionHash': version, 'claims': array(claim, 30)}),
+    return {'draft': object_schema({'claims': array(claim, 20)}),
+        'batch_patch': object_schema({'versionHash': version, 'claims': array(claim, 20)}),
         'review': object_schema({'versionHash': version, 'issues': array(issue, 40), 'coverage': coverage}),
+        'final_review': object_schema({'versionHash': version, 'issues': array(issue, 40), 'batchCoverage': batch_coverage}),
         'merge': object_schema({'versionHash': version,
-            'groups': array(object_schema({'claimKeys': array(string(64, 1), 100, 1)}), 100)}),
+            'groups': array(object_schema({'claimKeys': array(string(64, 1), 500, 2)}), 250)}),
         'conflict': object_schema({'versionHash': version, 'conflicts': array(conflict, 100)}),
-        'global_patch': object_schema({'versionHash': version, 'claims': array(claim, 100),
+        'global_patch': object_schema({'versionHash': version,
+            'updates': array(claim, 40), 'additions': array(claim, 40),
+            'removals': array(string(64, 1), 40),
             'conflicts': array(conflict, 100)})}
 
 
 class ClaimsBuilder(Builder):
     def __init__(self):
         self.document = base.build_baseline_document()
-        self.document['app'].update(name='contentflow-claim-extraction-reviewed-v2',
-            description='Frozen fragments → bounded extraction/review → deduplication → conflict analysis → complete audit. Proposed claims only.')
+        self.document['app'].update(name='contentflow-claim-extraction-reviewed-v4',
+            description='Frozen fragments → bounded extraction/review with structural retries → deduplication → conflict analysis → complete audit. Proposed claims only.')
         self.nodes, self.edges, self.types = [], [], {}
         parts = re.split(r'^# (.+)\n', (DIRECTORY / 'prompt.md').read_text(encoding='utf-8'), flags=re.MULTILINE)
         self.roles = {parts[i]: parts[i + 1].strip() for i in range(1, len(parts), 2)}
@@ -64,6 +68,13 @@ class ClaimsBuilder(Builder):
             result['raw'] = [raw, 'text']
         return result
 
+    def llm(self, ident, role, schema, request, x, y, parent, request_variable='request_json'):
+        node_id = super().llm(ident, role, schema, request, x, y, parent)
+        if request_variable != 'request_json':
+            node = next(node for node in self.nodes if node['id'] == node_id)
+            node['data']['prompt_config']['jinja2_variables'][0]['value_selector'] = [request, request_variable]
+        return node_id
+
     def code(self, ident, operation, title, inputs, x, y, parent=None, gate=False):
         payload = '{' + ', '.join(repr(key) + ': ' + key for key in inputs if key != 'container_done') + '}'
         prefix = "    if container_done != 1:\n        raise ValueError('CLAIMS_LOOP_EXHAUSTED')\n" if gate else ''
@@ -73,7 +84,7 @@ class ClaimsBuilder(Builder):
             call = '    result = json.loads(runtime_main(' + repr(operation) + ', json.dumps(' + payload + ", ensure_ascii=False))['result_json'])\n"
         wrapper = '\ndef main(' + ', '.join(inputs) + '):\n' + prefix + call + '''    def encode(value):
         text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        if len(text.encode('utf-8')) > 350000:
+        if len(text) > 400000 or len(text.encode('utf-8')) > 1024 * 1024:
             raise ValueError('CLAIMS_CODE_OUTPUT_LIMIT')
         return text
     return {
@@ -98,12 +109,14 @@ class ClaimsBuilder(Builder):
             'required': True, 'max_length': 350000, 'options': []}]}, 80, 220)
         self.code('prepare', 'prepare', 'Перевірити джерела і розподілити пакети', {'sources_json': ['start', 'sources_json']}, 430, 220)
         self.edge('start', 'prepare')
-        self.loop('batches', 'Пакети: витяг → докази та пропуски → правки', 'prepare', 90, 800, 100, 3700, 900)
+        self.loop('batches', 'Пакети: витяг → докази та пропуски → правки', 'prepare', 92, 800, 100, 3700, 900)
         self.edge('prepare', 'batches')
         self.code('batch-request', 'batch_request', 'Поточний пакет джерел', self.inputs('batches'), 130, 180, 'batches')
         self.edge('batches-start', 'batch-request', parent='batches')
+        self.conditional('batch-review-only', 'Повторити лише перевірку?', ['batch-request', 'mode'], 'review_retry', 490, 20, 'batches')
+        self.edge('batch-request', 'batch-review-only', parent='batches')
         self.conditional('batch-mode', 'Витяг чи виправлення?', ['batch-request', 'mode'], 'patch', 490, 180, 'batches')
-        self.edge('batch-request', 'batch-mode', parent='batches')
+        self.edge('batch-review-only', 'batch-mode', 'false', 'batches')
         for raw, role, schema, code, operation, y, handle in [
             ('batch-editor', 'Batch editor', 'batch_patch', 'batch-patched', 'batch_patch', 20, 'true'),
             ('extractor', 'Extractor', 'draft', 'batch-drafted', 'batch_draft', 420, 'false')]:
@@ -118,12 +131,34 @@ class ClaimsBuilder(Builder):
             self.edge(source, 'batch-merge', parent='batches')
         self.code('batch-review-request', 'batch_review_request', 'Кандидати і всі фрагменти пакета',
             {'sources_json': ['start', 'sources_json'], 'state_json': ['batch-merge', 'output']}, 1930, 200, 'batches')
-        self.llm('evidence-reviewer', 'Evidence reviewer', 'review', 'batch-review-request', 2290, 200, 'batches')
-        self.code('batch-verdict', 'batch_review', 'Перевірити аудит доказів і повноти', self.inputs('batch-review-request', 'evidence-reviewer'), 2650, 200, 'batches')
-        self.code('batch-advance', 'advance', 'Зберегти пакет або повторити правку', self.inputs('batch-verdict'), 3010, 200, 'batches')
-        self.assign('batch-save', 'batch-advance', 'batches', 3370, 200)
-        for source, target in [('batch-merge', 'batch-review-request'), ('batch-review-request', 'evidence-reviewer'),
-            ('evidence-reviewer', 'batch-verdict'), ('batch-verdict', 'batch-advance'), ('batch-advance', 'batch-save')]:
+        self.edge('batch-merge', 'batch-review-request', parent='batches')
+        self.code('batch-review-request-retry', 'batch_review_request', 'Ті самі кандидати для перевірки',
+            {'sources_json': ['start', 'sources_json'], 'state_json': ['batch-request', 'state_json']}, 850, 20, 'batches')
+        self.edge('batch-review-only', 'batch-review-request-retry', 'true', 'batches')
+        self.node('batch-review-input', 'variable-aggregator', {'title': 'Пакет для рев’ю', 'output_type': 'string',
+            'variables': [['batch-review-request', 'request_json'], ['batch-review-request-retry', 'request_json']],
+            'advanced_settings': {'group_enabled': False, 'groups': []}}, 2290, 200, 'batches')
+        self.node('batch-review-state', 'variable-aggregator', {'title': 'Незмінний стан перевірки', 'output_type': 'string',
+            'variables': [['batch-review-request', 'state_json'], ['batch-review-request-retry', 'state_json']],
+            'advanced_settings': {'group_enabled': False, 'groups': []}}, 2290, 460, 'batches')
+        for source in ['batch-review-request', 'batch-review-request-retry']:
+            self.edge(source, 'batch-review-input', parent='batches')
+            self.edge(source, 'batch-review-state', parent='batches')
+        self.llm('evidence-reviewer', 'Evidence reviewer', 'review', 'batch-review-input', 2650, 200, 'batches', 'output')
+        self.code('batch-verdict', 'batch_review', 'Перевірити аудит доказів і повноти',
+            {'sources_json': ['start', 'sources_json'], 'state_json': ['batch-review-state', 'output'],
+             'raw': ['evidence-reviewer', 'text']}, 3010, 200, 'batches')
+        self.conditional('batch-review-retry', 'Лише повторна перевірка?', ['batch-verdict', 'mode'], 'review_retry', 3370, 200, 'batches')
+        self.code('batch-advance', 'advance', 'Зберегти пакет або повторити правку', self.inputs('batch-verdict'), 3730, 200, 'batches')
+        self.assign('batch-save', 'batch-advance', 'batches', 4090, 200)
+        self.assign('batch-retry-save', 'batch-verdict', 'batches', 3730, 500)
+        self.edge('batch-review-input', 'evidence-reviewer', parent='batches')
+        self.edge('evidence-reviewer', 'batch-verdict', parent='batches')
+        self.edge('batch-review-state', 'batch-verdict', parent='batches')
+        self.edge('batch-verdict', 'batch-review-retry', parent='batches')
+        self.edge('batch-review-retry', 'batch-advance', 'false', 'batches')
+        self.edge('batch-review-retry', 'batch-retry-save', 'true', 'batches')
+        for source, target in [('batch-advance', 'batch-save')]:
             self.edge(source, target, parent='batches')
         self.code('batch-gate', 'gate', 'Пакети завершені', {'state_json': ['batches', 'state_json'],
             'container_done': ['batches', 'done']}, 4660, 200, gate=True)
@@ -140,17 +175,22 @@ class ClaimsBuilder(Builder):
         for source, target in [('merge-request', 'deduplicator'), ('deduplicator', 'merged'), ('merged', 'conflict-request'),
             ('conflict-request', 'conflict-reviewer'), ('conflict-reviewer', 'conflicts')]:
             self.edge(source, target)
-        self.loop('audit', 'Фінальний аудит усіх фактів та джерел', 'conflicts', 3, 7540, 100, 3010, 850)
+        self.loop('audit', 'Фінальний аудит усіх фактів та джерел', 'conflicts', 5, 7540, 100, 3010, 850)
         self.edge('conflicts', 'audit')
         self.code('global-request', 'global_request', 'Поточні факти, суперечності та повні джерела', self.inputs('audit'), 130, 180, 'audit')
-        self.llm('final-auditor', 'Final auditor', 'review', 'global-request', 490, 180, 'audit')
+        self.llm('final-auditor', 'Final auditor', 'final_review', 'global-request', 490, 180, 'audit')
         self.code('global-verdict', 'global_review', 'Зафіксувати аудит актуальної версії', self.inputs('global-request', 'final-auditor'), 850, 180, 'audit')
         self.code('audit-decision', 'decision', 'Готовність або ліміт виправлень', self.inputs('global-verdict'), 1210, 180, 'audit')
+        self.conditional('audit-review-retry', 'Повторити лише глобальну перевірку?', ['audit-decision', 'mode'], 'review_retry', 1570, 20, 'audit')
         self.conditional('audit-done', 'Перевірку завершено?', ['audit-decision', 'done'], '1', 1570, 180, 'audit', True)
         for source, target in [('audit-start', 'global-request'), ('global-request', 'final-auditor'),
-            ('final-auditor', 'global-verdict'), ('global-verdict', 'audit-decision'), ('audit-decision', 'audit-done')]:
+            ('final-auditor', 'global-verdict'), ('global-verdict', 'audit-decision'),
+            ('audit-decision', 'audit-review-retry')]:
             self.edge(source, target, parent='audit')
         self.assign('audit-pass-save', 'audit-decision', 'audit', 1930, 20)
+        self.assign('audit-retry-save', 'audit-decision', 'audit', 1930, 520)
+        self.edge('audit-review-retry', 'audit-retry-save', 'true', 'audit')
+        self.edge('audit-review-retry', 'audit-done', 'false', 'audit')
         self.llm('global-editor', 'Global editor', 'global_patch', 'audit-decision', 1930, 350, 'audit')
         self.code('global-patched', 'global_patch', 'Перевірити адресні виправлення', self.inputs('audit-decision', 'global-editor'), 2290, 350, 'audit')
         self.assign('audit-patch-save', 'global-patched', 'audit', 2650, 350)
@@ -198,9 +238,11 @@ def write_document(output):
             'workflowDslFile': output.name, 'workflowDslSha256': hashlib.sha256(output.read_bytes()).hexdigest(),
             'runtimeFile': 'scripts/dify/claim_extraction_runtime.py', 'runtimeSha256': hashlib.sha256(RUNTIME.read_bytes()).hexdigest(),
             'target': {'difyVersion': '1.17.1', 'graphonVersion': '0.7.0', 'dslVersion': '0.7.0'},
-            'extractionLimits': {'maxBatches': 30, 'batchFragments': 8, 'batchBytes': 40000,
-                'batchRepairs': 2, 'globalRepairs': 2, 'maxClaims': 100, 'maxModelCalls': 200,
-                'maxStateBytes': 350000, 'deadlineMs': 3600000},
+            'extractionLimits': {'maxBatches': 30, 'batchFragments': 32, 'batchBytes': 40000,
+                'batchRepairs': 2, 'globalRepairs': 2, 'reviewRetries': 2, 'batchClaimCeiling': 20,
+                'maxClaims': 500, 'maxGlobalPatchOperations': 40, 'maxModelCalls': 200,
+                'maxSourceInputBytes': 350000, 'maxStateBytes': 1048576, 'maxModelRequestBytes': 1048576,
+                'maxFinalOutputBytes': 1048576, 'maxCodeOutputChars': 400000, 'deadlineMs': 3600000},
             'reportVariable': 'extraction_report', 'reportSchemaVersion': 'claims-extraction-report-v1',
             'apiBaseEnv': 'DIFY_API_BASE_URL', 'apiKeyEnv': 'DIFY_CLAIM_EXTRACTION_API_KEY',
             'publishedWorkflowIdEnv': 'DIFY_CLAIM_EXTRACTION_PUBLISHED_WORKFLOW_ID',

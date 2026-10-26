@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import type { Prisma, PrismaClient, Job, ArticleDraft, ArticleVersion, ArticleOrigin, ContentMode } from '../generated/prisma/client.js';
 import { FactualBasisService } from '../claims/factual-basis.service.js';
+import { SourceGroundingService } from '../evidence/source-grounding.service.js';
 import { DurableJobService, canonicalManifestHash } from '../jobs/job-service.js';
 import { JobFailure } from '../jobs/contracts.js';
 import { EXTERNAL_PROCESSING_NOTICE } from '../external-processing-notice.js';
@@ -11,7 +12,9 @@ import { articleContentSchema, articleDocumentDetails, articleInputManifestSchem
   type saveArticleDraftInput, type importArticleInput, type reviewArticleInput } from './article-contracts.js';
 
 function json<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
-type Inputs = Pick<ArticleDraft, 'briefRevisionId' | 'basisRevisionId' | 'outlineRevisionId' | 'workspaceId' | 'workspaceStyleRevision' | 'sourceSnapshotId' | 'contentMode' | 'origin'>;
+type Inputs = Pick<ArticleDraft, 'briefRevisionId' | 'basisRevisionId' | 'sourceEvidenceSetId' | 'outlineRevisionId' | 'workspaceId' | 'workspaceStyleRevision' | 'sourceSnapshotId' | 'contentMode' | 'origin'>;
+type ArticleMappingDetails = ReturnType<typeof articleDocumentDetails> & { issues: { locator: string; claimRevisionId?: string; evidenceId?: string; passageId?: string; reason: string }[] };
+export type SourceArticleInputs = Pick<Inputs, 'briefRevisionId' | 'basisRevisionId' | 'sourceEvidenceSetId' | 'outlineRevisionId' | 'workspaceId' | 'workspaceStyleRevision' | 'sourceSnapshotId' | 'contentMode' | 'origin'>;
 export type FrozenGoogleArticleInputs = {
   sourceVersionId: string | null;
   expectedArticleRevision: number;
@@ -19,17 +22,21 @@ export type FrozenGoogleArticleInputs = {
   origin: ArticleOrigin;
   briefRevisionId: string | null;
   basisRevisionId: string | null;
+  sourceEvidenceSetId: string | null;
   outlineRevisionId: string | null;
   workspaceId: string;
   workspaceStyleRevision: number;
   sourceSnapshotId: string | null;
 };
-function inputData(value: Inputs): Inputs { return { briefRevisionId: value.briefRevisionId, basisRevisionId: value.basisRevisionId, outlineRevisionId: value.outlineRevisionId, workspaceId: value.workspaceId, workspaceStyleRevision: value.workspaceStyleRevision, sourceSnapshotId: value.sourceSnapshotId, contentMode: value.contentMode, origin: value.origin }; }
+function inputData(value: Inputs): Inputs { return { briefRevisionId: value.briefRevisionId, basisRevisionId: value.basisRevisionId, sourceEvidenceSetId: value.sourceEvidenceSetId, outlineRevisionId: value.outlineRevisionId, workspaceId: value.workspaceId, workspaceStyleRevision: value.workspaceStyleRevision, sourceSnapshotId: value.sourceSnapshotId, contentMode: value.contentMode, origin: value.origin }; }
 const briefInclude = { requiredClaims: true, contextSnapshots: true, style: true } as const;
 // Up to 30 sections with bounded author/reviewer passes run in the worker.
 export const ARTICLE_GENERATION_DEADLINE_MS = 3_600_000;
 export class ArticleService {
-  constructor(readonly prisma: PrismaClient, private readonly jobs: DurableJobService, private readonly facts: FactualBasisService) {}
+  private readonly grounding: SourceGroundingService;
+  constructor(readonly prisma: PrismaClient, private readonly jobs: DurableJobService, private readonly facts: FactualBasisService) {
+    this.grounding = new SourceGroundingService();
+  }
   private async lock(tx: Prisma.TransactionClient, user: string, project: string, write = true) {
     const rows = write ? await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR UPDATE OF p FOR SHARE OF w,m`
       : await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
@@ -49,25 +56,36 @@ export class ArticleService {
   private async currentInputs(tx: Prisma.TransactionClient, project: string, mode: 'FACTUAL' | 'CREATIVE', origin: Inputs['origin'], sourceSnapshotId: string | null = null): Promise<Inputs> {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
     const brief = await tx.brief.findUnique({ where: { projectId: project }, include: { currentRevision: true } });
-    const basis = mode === 'FACTUAL' ? (await this.facts.inspectBasis(tx, project, mode)).basis : null;
     const outline = await tx.outline.findUnique({ where: { projectId: project }, include: { currentRevision: true } });
     const currentBrief = brief?.currentRevision?.contentMode === mode ? brief.currentRevision : null;
-    return { contentMode: mode, origin, briefRevisionId: currentBrief?.id ?? null, basisRevisionId: basis?.id ?? null,
-      outlineRevisionId: currentBrief && outline?.currentRevision?.briefRevisionId === currentBrief.id && outline.currentRevision.approvedAt && !outline.currentRevision.withdrawnAt ? outline.currentRevision.id : null,
+    const currentOutline = currentBrief && outline?.currentRevision?.briefRevisionId === currentBrief.id && outline.currentRevision.approvedAt && !outline.currentRevision.withdrawnAt ? outline.currentRevision : null;
+    const sourceEvidenceSetId = mode === 'FACTUAL' && currentOutline?.sourceEvidenceSealed ? currentOutline.sourceEvidenceSetId : null;
+    return { contentMode: mode, origin, briefRevisionId: currentBrief?.id ?? null, basisRevisionId: null, sourceEvidenceSetId,
+      outlineRevisionId: currentOutline?.id ?? null,
       workspaceId: p.workspaceId, workspaceStyleRevision: p.workspace.styleRevision, sourceSnapshotId };
   }
   private async mappings(tx: Prisma.TransactionClient, project: string, content: ArticleContent, inputs: Inputs, ancestryOnly = false) {
-    const details = articleDocumentDetails(content), issues: { locator: string; claimRevisionId: string; evidenceId: string; reason: string }[] = [];
+    const details = articleDocumentDetails(content), issues: { locator: string; claimRevisionId?: string; evidenceId?: string; passageId?: string; reason: string }[] = [];
+    const grounding = inputs.sourceEvidenceSetId && inputs.briefRevisionId
+      ? await this.grounding.inspectSet(tx, project, inputs.sourceEvidenceSetId, inputs.briefRevisionId, false) : null;
     for (const mapping of details.mappings) {
       const evidence = await tx.claimEvidence.findFirst({ where: { id: mapping.evidenceId, claimRevisionId: mapping.claimRevisionId, projectId: project } });
       if (!evidence) throw new BadRequestException('Article evidence must belong to its exact claim and project');
-      let reason = mapping.text !== mapping.quote ? 'WORDING_CHANGED' : inputs.contentMode === 'CREATIVE' ? 'CREATIVE_MAPPING' : null;
+      let reason = inputs.contentMode === 'CREATIVE' ? 'CREATIVE_MAPPING' : !grounding && mapping.text !== mapping.quote ? 'WORDING_CHANGED' : null;
       if (!ancestryOnly) {
-        const edge = inputs.basisRevisionId ? await tx.basisClaimEvidence.findFirst({ where: { projectId: project, basisId: inputs.basisRevisionId, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId } }) : null;
-        if (!reason && !edge) reason = 'OUTSIDE_BASIS';
+        const requiredClaim = grounding?.requiredClaims.find(claim => claim.claimRevisionId === mapping.claimRevisionId);
+        const requiredEvidence = requiredClaim?.evidence.some(row => row.evidenceId === mapping.evidenceId && row.quote === mapping.quote) ?? false;
+        const edge = !grounding && inputs.basisRevisionId ? await tx.basisClaimEvidence.findFirst({ where: { projectId: project, basisId: inputs.basisRevisionId, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId } }) : null;
+        if (!reason && (grounding ? !requiredEvidence : !edge)) reason = grounding ? 'OUTSIDE_REQUIRED_CLAIMS' : 'OUTSIDE_BASIS';
         if (!reason && (evidence.invalidatedAt || evidence.relation !== 'SUPPORTS')) reason = 'INVALID_EVIDENCE';
       }
       if (reason) issues.push({ locator: mapping.locator, claimRevisionId: mapping.claimRevisionId, evidenceId: mapping.evidenceId, reason });
+    }
+    for (const mapping of details.sourceMappings) {
+      const passage = grounding?.passages.find(item => item.id === mapping.passageId && item.packetId === mapping.packetId);
+      if (inputs.contentMode !== 'FACTUAL' || !passage || !passage.quote.includes(mapping.quote) || !mapping.text.trim()) {
+        issues.push({ locator: mapping.locator, passageId: mapping.passageId, reason: inputs.contentMode !== 'FACTUAL' ? 'CREATIVE_SOURCE_MAPPING' : grounding ? 'INVALID_SOURCE_PASSAGE' : 'MISSING_SOURCE_EVIDENCE_SET' });
+      }
     }
     return { ...details, issues };
   }
@@ -75,16 +93,58 @@ export class ArticleService {
     const current = await this.currentInputs(tx, project, inputs.contentMode, inputs.origin, inputs.sourceSnapshotId), reasons: string[] = [];
     if (current.workspaceStyleRevision !== inputs.workspaceStyleRevision) reasons.push('WORKSPACE_STYLE_CHANGED');
     if (current.briefRevisionId !== inputs.briefRevisionId) reasons.push('BRIEF_CHANGED');
-    if (inputs.contentMode === 'FACTUAL') {
-      if (!inputs.basisRevisionId) reasons.push('MISSING_FACTUAL_BASIS');
+    if (inputs.contentMode === 'FACTUAL' && inputs.sourceEvidenceSetId) {
+      if (!inputs.briefRevisionId) reasons.push('MISSING_SOURCE_BRIEF');
       else {
-        const captured = await this.facts.inspectBasisRevision(tx, project, inputs.basisRevisionId);
-        if (!captured.valid) reasons.push('INVALID_FACTUAL_BASIS');
-        if (current.basisRevisionId !== inputs.basisRevisionId) reasons.push('FACTUAL_BASIS_CHANGED');
+        try { await this.grounding.inspectSet(tx, project, inputs.sourceEvidenceSetId, inputs.briefRevisionId, true); }
+        catch { reasons.push('INVALID_SOURCE_EVIDENCE_SET'); }
       }
+    } else if (inputs.contentMode === 'FACTUAL') {
+      reasons.push('SOURCE_EVIDENCE_REQUIRED');
     }
     if (inputs.outlineRevisionId && current.outlineRevisionId !== inputs.outlineRevisionId) reasons.push('OUTLINE_CHANGED');
     return reasons;
+  }
+  private async sourceCitationIntegrity(tx: Prisma.TransactionClient, project: string, version: ArticleVersion, detail: ArticleMappingDetails) {
+    if (!version.sourceEvidenceSetId) return !version.sourceEvidenceSealed && !detail.sourceMappings.length;
+    if (!version.sourceEvidenceSealed || !detail.sourceMappings.length) return false;
+    const citations = await tx.articleVersionSourceCitation.findMany({ where: { projectId: project, articleVersionId: version.id }, orderBy: { locator: 'asc' } });
+    const expected = detail.sourceMappings.map(({ passageId, packetId, quote, text, locator }) => ({ spanId: passageId, packetId, quote, text, locator })).sort((a,b) => a.locator.localeCompare(b.locator));
+    const actual = citations.map(({ spanId, packetId, quote, text, locator }) => ({ spanId, packetId, quote, text, locator })).sort((a,b) => a.locator.localeCompare(b.locator));
+    return citations.length === expected.length && citations.every(row => row.sourceEvidenceSetId === version.sourceEvidenceSetId)
+      && canonicalManifestHash(actual) === canonicalManifestHash(expected);
+  }
+  /** Read-only export boundary: returns validated selected-set passages and their exact article locators. */
+  async inspectSourceEvidence(tx: Prisma.TransactionClient, project: string, version: ArticleVersion) {
+    if (!version.sourceEvidenceSetId || !version.briefRevisionId) return null;
+    const grounding = await this.grounding.inspectSet(tx, project, version.sourceEvidenceSetId, version.briefRevisionId, false);
+    const detail = await this.mappings(tx, project, articleContentSchema.parse(version.content), version);
+    if (detail.issues.length || !await this.sourceCitationIntegrity(tx, project, version, detail)) throw new ConflictException('Article source citations failed integrity checks');
+    const citations = await tx.articleVersionSourceCitation.findMany({ where: { projectId: project, articleVersionId: version.id }, orderBy: { locator: 'asc' } });
+    return { sourceEvidenceSetId: grounding.id, sourceEvidenceSetHash: grounding.sha256, passages: citations.map(row => {
+      const passage = grounding.passages.find(item => item.id === row.spanId && item.packetId === row.packetId);
+      if (!passage) throw new ConflictException('Article citation is outside its frozen source set');
+      return { passageId: row.spanId, packetId: row.packetId, snapshotId: passage.snapshotId, sourceQuote: passage.quote,
+        articleLocator: row.locator, articleText: row.text, quote: row.quote };
+    }) };
+  }
+  private async passageViews(tx: Prisma.TransactionClient, project: string, setId: string, briefId: string) {
+    const set = await this.grounding.inspectSet(tx,project,setId,briefId,false);
+    const sources = await tx.sourceSnapshot.findMany({ where: { projectId: project,id: { in: set.snapshots.map(row => row.snapshotId) } },
+      select: { id: true,materialId: true,material: { select: { label: true } } } });
+    return set.passages.map(({ id,packetId,snapshotId,fragmentId,startOffset,endOffset,quote }) => {
+      const source = sources.find(row => row.id === snapshotId);
+      if (!source) throw new ConflictException('Source passage ancestry failed');
+      return { passageId: id,packetId,snapshotId,fragmentId,startOffset,endOffset,quote,materialId: source.materialId,materialTitle: source.material.label };
+    });
+  }
+  sourcePassages(user: string, project: string, versionId: string) {
+    return this.command(user,project,async tx => {
+      const version = await tx.articleVersion.findFirst({ where: { projectId: project,id: versionId } });
+      if (!version) throw new NotFoundException('Article version not found');
+      return { passages: version.sourceEvidenceSetId && version.briefRevisionId
+        ? await this.passageViews(tx,project,version.sourceEvidenceSetId,version.briefRevisionId) : [] };
+    },false);
   }
   private async state(tx: Prisma.TransactionClient, project: string) {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
@@ -93,18 +153,20 @@ export class ArticleService {
     const outline = await tx.outline.findUnique({ where: { projectId: project }, include: { currentRevision: true, revisions: { orderBy: { number: 'desc' } } } });
     const style = await tx.workspaceStyleRevision.findUniqueOrThrow({ where: { workspaceId_revision: { workspaceId: p.workspaceId, revision: p.workspace.styleRevision } } });
     const mode = article?.draft?.contentMode ?? brief?.currentRevision?.contentMode ?? 'CREATIVE';
-    const prerequisites = await this.facts.inspectBasis(tx, project, mode);
-    const basis = (await this.facts.inspectBasis(tx, project, 'FACTUAL')).basis;
-    const evidence = basis ? await tx.basisClaimEvidence.findMany({ where: { projectId: project, basisId: basis.id }, include: { evidence: { include: { claimRevision: true, snapshot: { include: { material: true } } } } } }) : [];
+    const prerequisites = { sourceEvidenceRequired: mode === 'FACTUAL' };
     const detail = article?.draft ? await this.mappings(tx, project, articleContentSchema.parse(article.draft.content), article.draft) : null;
     const staleReasons = article?.draft ? await this.stale(tx, project, article.draft) : [];
     const versions = [];
     for (const version of article?.versions ?? []) versions.push({ ...json(version), ...await this.inspectVersion(tx, project, version), status: version.withdrawnAt ? 'WITHDRAWN' : version.approvedAt ? 'APPROVED' : 'PROPOSED' });
+    const selectedSource = article?.draft?.sourceEvidenceSetId ? article.draft : article?.versions.find(row => row.sourceEvidenceSetId) ?? outline?.currentRevision;
+    const eligibleSourcePassages = selectedSource?.sourceEvidenceSetId && selectedSource.briefRevisionId
+      ? await this.passageViews(tx,project,selectedSource.sourceEvidenceSetId,selectedSource.briefRevisionId) : [];
     return { article: article ? { id: article.id, revision: article.revision, draft: json(article.draft), currentApprovedVersionId: article.currentApprovedVersionId,
       versions } : null,
       articleSelected: p.formats.includes('ARTICLE'), editorial: { brief: brief ? { id: brief.id, revision: brief.revision, currentRevision: json(brief.currentRevision), history: json(brief.revisions) } : null,
         outline: outline ? { ...json(outline), revisions: outline.revisions.map(row => ({ ...json(row), status: row.withdrawnAt ? 'WITHDRAWN' : row.approvedAt ? 'APPROVED' : 'PROPOSED' })) } : null, style: json(style), prerequisites, articleSelected: p.formats.includes('ARTICLE') },
-      eligibleEvidence: evidence.map(row => ({ claimRevisionId: row.claimRevisionId, evidenceId: row.evidenceId, wording: row.evidence.claimRevision.wording, quote: row.evidence.quote, snapshotId: row.evidence.snapshotId, materialTitle: row.evidence.snapshot.material.label })),
+      eligibleEvidence: [],
+      eligibleSourcePassages,
       mappingIssues: detail?.issues ?? [], hasUnmapped: detail?.hasUnmapped ?? false, staleReasons };
   }
   get(user: string, project: string) { return this.command(user, project, tx => this.state(tx, project), false); }
@@ -138,12 +200,49 @@ export class ArticleService {
   }
   private async append(tx: Prisma.TransactionClient, project: string, articleId: string, user: string, content: ArticleContent, inputs: Inputs, sourceArticleRevision: number, jobId?: string, executionId?: string) {
     const latest = await tx.articleVersion.findFirst({ where: { articleId }, orderBy: { number: 'desc' } });
-    const version = await tx.articleVersion.create({ data: { id: randomUUID(), articleId, projectId: project, number: (latest?.number ?? 0) + 1, content: json(content), plainText: articleDocumentDetails(content).plainText,
+    const details = articleDocumentDetails(content);
+    const version = await tx.articleVersion.create({ data: { id: randomUUID(), articleId, projectId: project, number: (latest?.number ?? 0) + 1, content: json(content), plainText: details.plainText,
       sha256: canonicalManifestHash(content), ...inputData(inputs), sourceArticleRevision, createdBy: user, ...(jobId ? { jobId } : {}), ...(executionId ? { aiExecutionId: executionId } : {}) } });
-    const mappings = articleDocumentDetails(content).mappings;
+    const mappings = details.mappings;
     if (mappings.length) await tx.articleVersionClaim.createMany({ data: mappings.map(({ text, ...mapping }) => ({ ...mapping, linkedText: text, projectId: project, articleVersionId: version.id })) });
-    await tx.articleVersion.update({ where: { id: version.id }, data: { claimsSealed: true } });
+    if (inputs.sourceEvidenceSetId && details.sourceMappings.length) await tx.articleVersionSourceCitation.createMany({ data: details.sourceMappings.map(({ passageId, packetId, ...mapping }) => ({
+      projectId: project, articleVersionId: version.id, sourceEvidenceSetId: inputs.sourceEvidenceSetId!, packetId, spanId: passageId, ...mapping,
+    })) });
+    await tx.articleVersion.update({ where: { id: version.id }, data: { claimsSealed: true,
+      ...(inputs.sourceEvidenceSetId && details.sourceMappings.length ? { sourceEvidenceSealed: true } : {}) } });
     return version;
+  }
+  /** Append an unapproved candidate produced by the source-writing coordinator. Caller holds Project authorization. */
+  async appendSourceCandidate(tx: Prisma.TransactionClient, user: string, project: string, content: ArticleContent,
+    sourceInputs: SourceArticleInputs, expectedArticleRevision: number, jobId?: string, executionId?: string): Promise<{ articleVersionId: string }> {
+    await this.lock(tx, user, project);
+    const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
+    const article = await this.article(tx, project, expectedArticleRevision);
+    if (!p.formats.includes('ARTICLE') || sourceInputs.contentMode !== 'FACTUAL' || !sourceInputs.sourceEvidenceSetId
+      || sourceInputs.basisRevisionId !== null || !sourceInputs.briefRevisionId || !sourceInputs.outlineRevisionId
+      || sourceInputs.workspaceId !== p.workspaceId || sourceInputs.workspaceStyleRevision !== p.workspace.styleRevision) {
+      throw new ConflictException('Source article inputs do not match the current factual Article task');
+    }
+    const [brief, outline] = await Promise.all([
+      tx.briefRevision.findFirst({ where: { id: sourceInputs.briefRevisionId, projectId: project }, include: briefInclude }),
+      tx.outlineRevision.findFirst({ where: { id: sourceInputs.outlineRevisionId, projectId: project } }),
+    ]);
+    const currentBrief = await tx.brief.findUnique({ where: { projectId: project }, select: { currentRevisionId: true } });
+    const currentOutline = await tx.outline.findUnique({ where: { projectId: project }, select: { currentRevisionId: true, currentApprovedRevisionId: true } });
+    if (!brief || brief.contentMode !== 'FACTUAL' || brief.requiredClaims.length || currentBrief?.currentRevisionId !== brief.id || !outline || !outline.approvedAt || outline.withdrawnAt
+      || !outline.sourceEvidenceSetId || !outline.sourceEvidenceSealed
+      || outline.briefRevisionId !== brief.id || currentOutline?.currentRevisionId !== outline.id || currentOutline.currentApprovedRevisionId !== outline.id) {
+      throw new ConflictException('Source article requires the current approved factual outline');
+    }
+    const grounding = await this.grounding.inspectSet(tx, project, sourceInputs.sourceEvidenceSetId, brief.id, true);
+    const inputs: Inputs = { ...sourceInputs, origin: 'AI', sourceSnapshotId: null };
+    const parsed = articleContentSchema.parse(content), detail = await this.mappings(tx, project, parsed, inputs);
+    if (!detail.plainText.trim() || !detail.sourceMappings.length || detail.issues.length
+      || grounding.requiredClaims.some(required => !detail.mappings.some(mapping => mapping.claimRevisionId === required.claimRevisionId))) {
+      throw new ConflictException('Source article needs text grounded in this source set and every required approved claim');
+    }
+    const version = await this.append(tx, project, article.id, user, parsed, inputs, article.revision, jobId, executionId);
+    return { articleVersionId: version.id };
   }
   // Annotation service holds the same authorized Project lock in this transaction.
   // Accepted suggestions create candidates; draft and approval pointers stay intact.
@@ -172,7 +271,7 @@ export class ArticleService {
     if (sourceVersionId) {
       if (!article) throw new NotFoundException('Article version not found');
       const source = await tx.articleVersion.findFirst({ where: { id: sourceVersionId, projectId: project, articleId: article.id } });
-      if (!source || !source.claimsSealed || canonicalManifestHash(source.content) !== source.sha256) throw new ConflictException('Selected article version failed integrity checks');
+      if (!source || !source.claimsSealed || source.sourceEvidenceSetId && !source.sourceEvidenceSealed || canonicalManifestHash(source.content) !== source.sha256) throw new ConflictException('Selected article version failed integrity checks');
       inputs = inputData(source);
     } else if (article?.draft) {
       inputs = inputData(article.draft);
@@ -193,7 +292,7 @@ export class ArticleService {
     if (!p.formats.includes('ARTICLE')) throw new ConflictException('Select Article before syncing Google Docs');
     if (frozen.workspaceId !== p.workspaceId || frozen.expectedArticleRevision < 0) throw new ConflictException('Frozen Article inputs do not match this Project');
     const frozenInputs: Inputs = { contentMode: frozen.contentMode, origin: frozen.origin, briefRevisionId: frozen.briefRevisionId,
-      basisRevisionId: frozen.basisRevisionId, outlineRevisionId: frozen.outlineRevisionId, workspaceId: frozen.workspaceId,
+      basisRevisionId: frozen.basisRevisionId, sourceEvidenceSetId: frozen.sourceEvidenceSetId ?? null, outlineRevisionId: frozen.outlineRevisionId, workspaceId: frozen.workspaceId,
       workspaceStyleRevision: frozen.workspaceStyleRevision, sourceSnapshotId: frozen.sourceSnapshotId };
     if (frozen.sourceSnapshotId && !await tx.sourceSnapshot.findFirst({ where: { id: frozen.sourceSnapshotId, projectId: project } })) {
       throw new ConflictException('Frozen source snapshot is unavailable for this Project');
@@ -202,7 +301,7 @@ export class ArticleService {
     if (frozen.sourceVersionId) {
       const articleForSource = await tx.article.findUnique({ where: { projectId: project } });
       const source = articleForSource ? await tx.articleVersion.findFirst({ where: { id: frozen.sourceVersionId, projectId: project, articleId: articleForSource.id } }) : null;
-      if (!source || !source.claimsSealed || canonicalManifestHash(source.content) !== source.sha256 || !articleContentSchema.safeParse(source.content).success || !this.sameInputs(source, frozenInputs)) {
+      if (!source || !source.claimsSealed || source.sourceEvidenceSetId && !source.sourceEvidenceSealed || canonicalManifestHash(source.content) !== source.sha256 || !articleContentSchema.safeParse(source.content).success || !this.sameInputs(source, frozenInputs)) {
         throw new ConflictException('Selected article version or its frozen inputs failed integrity checks');
       }
     }
@@ -210,7 +309,7 @@ export class ArticleService {
     const parsed = articleContentSchema.parse(content);
     const stripEvidence = (node: ArticleContent['document']): ArticleContent['document'] => ({
       ...node,
-      ...(node.marks ? { marks: node.marks.filter(mark => mark.type !== 'evidence') } : {}),
+      ...(node.marks ? { marks: node.marks.filter(mark => mark.type !== 'evidence' && mark.type !== 'source_evidence') } : {}),
       ...(node.content ? { content: node.content.map(stripEvidence) } : {}),
     });
     const imported = articleContentSchema.parse({ ...parsed, document: stripEvidence(parsed.document) });
@@ -248,20 +347,20 @@ export class ArticleService {
       return this.state(tx, project);
     });
   }
-  private sameInputs(a: Inputs, b: Inputs) { return ['briefRevisionId', 'basisRevisionId', 'outlineRevisionId', 'workspaceId', 'workspaceStyleRevision', 'sourceSnapshotId', 'contentMode', 'origin'].every(key => a[key as keyof Inputs] === b[key as keyof Inputs]); }
+  private sameInputs(a: Inputs, b: Inputs) { return ['briefRevisionId', 'basisRevisionId', 'sourceEvidenceSetId', 'outlineRevisionId', 'workspaceId', 'workspaceStyleRevision', 'sourceSnapshotId', 'contentMode', 'origin'].every(key => a[key as keyof Inputs] === b[key as keyof Inputs]); }
   // Caller holds the authorized Project lock. Receipt freshness and factual
   // safety are separate: a receipt can acknowledge changed parents, never
   // invalid original evidence or a terminally withdrawn required approval.
   async inspectVersion(tx: Prisma.TransactionClient, project: string, version: ArticleVersion) {
     if (version.projectId !== project) throw new NotFoundException('Article version not found');
     const current = await this.currentInputs(tx, project, version.contentMode, version.origin, version.sourceSnapshotId);
-    const tupleMatches = (candidate: Pick<Inputs, 'briefRevisionId' | 'basisRevisionId' | 'outlineRevisionId' | 'workspaceStyleRevision'>) =>
+    const tupleMatches = (candidate: Pick<Inputs, 'briefRevisionId' | 'basisRevisionId' | 'sourceEvidenceSetId' | 'outlineRevisionId' | 'workspaceStyleRevision'>) =>
       candidate.briefRevisionId === current.briefRevisionId && candidate.workspaceStyleRevision === current.workspaceStyleRevision
-      && (version.contentMode !== 'FACTUAL' || candidate.basisRevisionId === current.basisRevisionId)
+      && (version.contentMode !== 'FACTUAL' || (version.sourceEvidenceSetId ? candidate.sourceEvidenceSetId === version.sourceEvidenceSetId : candidate.basisRevisionId === current.basisRevisionId))
       && (!version.outlineRevisionId || candidate.outlineRevisionId === current.outlineRevisionId);
     const receipt = version.reviewedAt && version.reviewCounter > 0 && tupleMatches({ briefRevisionId: version.reviewedBriefRevisionId,
-      basisRevisionId: version.reviewedBasisRevisionId, outlineRevisionId: version.reviewedOutlineRevisionId, workspaceStyleRevision: version.reviewedWorkspaceStyleRevision ?? -1 });
-    const staleReasons = receipt || tupleMatches(version) ? [] : (await this.stale(tx, project, version)).filter(reason => !['INVALID_FACTUAL_BASIS', 'MISSING_FACTUAL_BASIS'].includes(reason));
+      basisRevisionId: version.reviewedBasisRevisionId, sourceEvidenceSetId: version.reviewedSourceEvidenceSetId, outlineRevisionId: version.reviewedOutlineRevisionId, workspaceStyleRevision: version.reviewedWorkspaceStyleRevision ?? -1 });
+    const staleReasons = receipt || tupleMatches(version) ? [] : await this.stale(tx, project, version);
     const blockingReasons: string[] = [];
     if (canonicalManifestHash(version.content) !== version.sha256) blockingReasons.push('CONTENT_INTEGRITY');
     if (version.withdrawnAt) blockingReasons.push('APPROVAL_WITHDRAWN');
@@ -269,19 +368,22 @@ export class ArticleService {
     if (!detail.plainText.trim()) blockingReasons.push('EMPTY_CONTENT');
     if (detail.issues.length) blockingReasons.push('INVALID_EVIDENCE_MAPPING');
     if (version.contentMode === 'FACTUAL') {
-      if (!version.basisRevisionId) blockingReasons.push('MISSING_FACTUAL_BASIS');
-      else if (!(await this.facts.inspectBasisRevision(tx, project, version.basisRevisionId)).valid) blockingReasons.push('INVALID_FACTUAL_BASIS');
-      if (!current.basisRevisionId || !(await this.facts.inspectBasisRevision(tx, project, current.basisRevisionId)).valid) blockingReasons.push('CURRENT_FACTUAL_BASIS_BLOCKED');
+      if (version.sourceEvidenceSetId) {
+        if (version.origin === 'AI') {
+          const assembly = await tx.sourceArticleAssembly.findFirst({ where: { projectId: project,articleVersionId: version.id } });
+          if (!assembly || canonicalManifestHash(assembly.manifestJson) !== assembly.sha256) blockingReasons.push('SOURCE_ASSEMBLY_INTEGRITY');
+        }
+        if (!version.sourceEvidenceSealed || !detail.sourceMappings.length) blockingReasons.push('SOURCE_EVIDENCE_UNSEALED');
+        else if (!await this.sourceCitationIntegrity(tx, project, version, detail)) blockingReasons.push('SOURCE_CITATION_INTEGRITY');
+        if (!current.briefRevisionId) blockingReasons.push('CURRENT_SOURCE_BRIEF_MISSING');
+        try { await this.grounding.inspectSet(tx, project, version.sourceEvidenceSetId, version.briefRevisionId ?? '', true); }
+        catch { blockingReasons.push('SOURCE_EVIDENCE_CHANGED'); }
+      } else blockingReasons.push('SOURCE_EVIDENCE_REQUIRED');
     }
     if (version.outlineRevisionId) {
       const original = await tx.outlineRevision.findFirst({ where: { projectId: project, id: version.outlineRevisionId } });
       if (!original?.approvedAt || original.withdrawnAt) blockingReasons.push('OUTLINE_APPROVAL_WITHDRAWN');
       if (!current.outlineRevisionId) blockingReasons.push('CURRENT_OUTLINE_MISSING');
-    }
-    const reviewedInputs = receipt ? { ...version, ...current } : version;
-    if (reviewedInputs.briefRevisionId) {
-      const required = await tx.briefRequiredClaim.findMany({ where: { projectId: project, briefRevisionId: reviewedInputs.briefRevisionId } });
-      if (required.some(row => !detail.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) blockingReasons.push('REQUIRED_FACTS_MISSING');
     }
     return { staleReasons, blockingReasons, hasUnmapped: detail.hasUnmapped, eligible: !!version.approvedAt && !staleReasons.length && !blockingReasons.length };
   }
@@ -296,17 +398,19 @@ export class ArticleService {
       const currentInputs = await this.currentInputs(tx, project, version.contentMode, version.origin, version.sourceSnapshotId);
       // A supplied/manual version without an outline never acquires that
       // optional dependency merely because an outline was later approved.
-      const current = { ...currentInputs, outlineRevisionId: version.outlineRevisionId ? currentInputs.outlineRevisionId : null };
+      const current = { ...currentInputs, sourceEvidenceSetId: version.sourceEvidenceSetId, basisRevisionId: version.sourceEvidenceSetId ? null : currentInputs.basisRevisionId,
+        outlineRevisionId: version.outlineRevisionId ? currentInputs.outlineRevisionId : null };
       if (!!current.briefRevisionId !== !!version.briefRevisionId || !!current.outlineRevisionId !== !!version.outlineRevisionId) throw new ConflictException('Changed parent shape needs a new article version');
       const mappings = await this.mappings(tx, project, articleContentSchema.parse(version.content), current);
-      if (mappings.issues.length) throw new ConflictException('Current factual basis must support every retained mapping');
-      if (current.briefRevisionId) {
-        const required = await tx.briefRequiredClaim.findMany({ where: { projectId: project, briefRevisionId: current.briefRevisionId } });
-        if (required.some(row => !mappings.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) throw new ConflictException('Unchanged article omits current required facts');
+      if (mappings.issues.length) throw new ConflictException('Current source passages must support every retained mapping');
+      if (version.sourceEvidenceSetId) {
+        const sourceInputs = { ...current, sourceEvidenceSetId: version.sourceEvidenceSetId, basisRevisionId: null };
+        const sourceMappings = await this.mappings(tx, project, articleContentSchema.parse(version.content), sourceInputs);
+        if (sourceMappings.issues.length || !await this.sourceCitationIntegrity(tx, project, version, sourceMappings)) throw new ConflictException('Source citations must remain valid for re-review');
       }
       if (mappings.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge unmapped wording during re-review');
       await tx.articleVersion.update({ where: { id: version.id }, data: { reviewCounter: { increment: 1 }, reviewedBriefRevisionId: current.briefRevisionId,
-        reviewedBasisRevisionId: current.basisRevisionId, reviewedOutlineRevisionId: version.outlineRevisionId ? current.outlineRevisionId : null,
+        reviewedBasisRevisionId: current.basisRevisionId, reviewedSourceEvidenceSetId: version.sourceEvidenceSetId, reviewedOutlineRevisionId: version.outlineRevisionId ? current.outlineRevisionId : null,
         reviewedWorkspaceStyleRevision: current.workspaceStyleRevision, reviewedBy: user, reviewedAt: new Date() } });
       await tx.article.update({ where: { id: article.id }, data: { revision: { increment: 1 } } });
       return this.state(tx, project);
@@ -318,10 +422,7 @@ export class ArticleService {
     const detail = await this.mappings(tx, project, articleContentSchema.parse(version.content), version);
     if (!detail.plainText.trim()) throw new ConflictException('Article requires a nonempty body before review');
     if (detail.issues.length) throw new ConflictException('Relink or remove invalid article evidence mappings');
-    if (version.briefRevisionId) {
-      const required = await tx.briefRequiredClaim.findMany({ where: { briefRevisionId: version.briefRevisionId } });
-      if (required.some(row => !detail.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) throw new ConflictException('Article omits required facts');
-    }
+    if (version.sourceEvidenceSetId && !await this.sourceCitationIntegrity(tx, project, version, detail)) throw new ConflictException('Article source citations are not sealed to its content');
     return detail;
   }
   review(user: string, project: string, versionId: string, action: 'apply' | 'approve' | 'withdraw', input: z.infer<typeof reviewArticleInput>) {
@@ -375,11 +476,10 @@ export class ArticleService {
       const outline = await tx.outline.findUnique({ where: { projectId: project }, include: { currentRevision: true } });
       const b = brief?.currentRevision, o = outline?.currentRevision;
       if (!b || !o || outline?.currentApprovedRevisionId !== o.id || !o.approvedAt || o.withdrawnAt || o.briefRevisionId !== b.id || b.workspaceStyleRevision !== p.workspace.styleRevision || canonicalBriefHash(b) !== b.sha256 || canonicalManifestHash(o.content) !== o.sha256) throw new ConflictException('Generate from the latest brief and current approved outline');
-      const basis = await this.facts.inspectBasis(tx, project, b.contentMode);
-      if (basis.missingBasis || b.contentMode === 'FACTUAL' && o.basisRevisionId !== basis.basis?.id) throw new ConflictException('Generate from a valid current factual basis');
+      if (b.contentMode === 'FACTUAL') throw new ConflictException('Factual article generation must use source preparation');
       const profile = await tx.userProfile.findUniqueOrThrow({ where: { id: user } });
       const manifest = articleInputManifestSchema.parse({ schemaVersion: 'article-input-v1', articleRevision: expectedRevision, briefRevisionId: b.id, briefHash: b.sha256, outlineRevisionId: o.id, outlineHash: o.sha256,
-        workspaceId: b.workspaceId, workspaceStyleRevision: b.workspaceStyleRevision, contentMode: b.contentMode, basisRevisionId: b.contentMode === 'FACTUAL' ? basis.basis!.id : null, basisHash: b.contentMode === 'FACTUAL' ? basis.basis!.sha256 : null,
+        workspaceId: b.workspaceId, workspaceStyleRevision: b.workspaceStyleRevision, contentMode: b.contentMode, basisRevisionId: null, basisHash: null,
         contextSnapshotIds: b.contextSnapshots.map(row => row.snapshotId).sort(), release, noticeVersion: EXTERNAL_PROCESSING_NOTICE.version, acceptedAt: profile.externalProcessingAcceptedAt?.toISOString() });
       return this.jobs.create(tx, { projectId: project, userId: user, operation: 'ARTICLE_GENERATION', contractVersion: 'article-v1', commandKey, inputManifest: manifest, deadlineMs: ARTICLE_GENERATION_DEADLINE_MS });
     });
@@ -389,15 +489,12 @@ export class ArticleService {
     const parsed = articleContentSchema.safeParse(raw), m = articleInputManifestSchema.safeParse(job.inputManifest);
     if (!parsed.success || !m.success || job.operation !== 'ARTICLE_GENERATION' || job.contractVersion !== 'article-v1') throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     const frozen = m.data, b = await tx.briefRevision.findFirst({ where: { id: frozen.briefRevisionId, projectId: job.projectId }, include: briefInclude });
+    if (frozen.contentMode === 'FACTUAL') throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
     const o = await tx.outlineRevision.findFirst({ where: { id: frozen.outlineRevisionId, projectId: job.projectId } });
     const execution = await tx.aIExecution.findFirst({ where: { id: executionId, projectId: job.projectId, jobId: job.id } });
     if (!b || !o || !execution || canonicalBriefHash(b) !== frozen.briefHash || b.sha256 !== frozen.briefHash || o.sha256 !== frozen.outlineHash || canonicalManifestHash(o.content) !== frozen.outlineHash || !o.approvedAt || o.withdrawnAt || o.briefRevisionId !== b.id || o.basisRevisionId !== frozen.basisRevisionId || b.workspaceId !== frozen.workspaceId || b.workspaceStyleRevision !== frozen.workspaceStyleRevision || b.contentMode !== frozen.contentMode
       || canonicalManifestHash(b.contextSnapshots.map(row => row.snapshotId).sort()) !== canonicalManifestHash([...frozen.contextSnapshotIds].sort())) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
-    if (frozen.contentMode === 'FACTUAL') {
-      const basis = await this.facts.inspectBasisRevision(tx, job.projectId, frozen.basisRevisionId!);
-      if (!basis.valid || basis.sha256 !== frozen.basisHash) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_SUCCEEDED');
-    }
-    const inputs: Inputs = { contentMode: frozen.contentMode, origin: 'AI', briefRevisionId: b.id, basisRevisionId: frozen.basisRevisionId, outlineRevisionId: o.id, workspaceId: frozen.workspaceId, workspaceStyleRevision: frozen.workspaceStyleRevision, sourceSnapshotId: null };
+    const inputs: Inputs = { contentMode: frozen.contentMode, origin: 'AI', briefRevisionId: b.id, basisRevisionId: frozen.basisRevisionId, sourceEvidenceSetId: null, outlineRevisionId: o.id, workspaceId: frozen.workspaceId, workspaceStyleRevision: frozen.workspaceStyleRevision, sourceSnapshotId: null };
     try {
       const detail = await this.mappings(tx, job.projectId, parsed.data, inputs);
       if (!detail.plainText.trim() || detail.issues.length || b.requiredClaims.some(row => !detail.mappings.some(mapping => mapping.claimRevisionId === row.claimRevisionId))) throw new Error('Invalid generated evidence');

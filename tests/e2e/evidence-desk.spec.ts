@@ -1,0 +1,390 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import type { AxeResults } from 'axe-core'
+import { expect, test, type Page } from '@playwright/test'
+import { installEvidenceDeskFixture } from './fixtures/evidence-desk.js'
+
+const artifacts = '.local-checks/evidence-desk'
+const axeSource = readFileSync(createRequire(import.meta.url).resolve('axe-core/axe.min.js'), 'utf8')
+
+async function captureWidths(page: Page) {
+  await page.route('**/__evidence/axe.min.js', route => route.fulfill({ status: 200, contentType: 'text/javascript', body: axeSource }))
+  await page.addScriptTag({ url: '/__evidence/axe.min.js' })
+  for (const width of [1280, 768, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: `${artifacts}/evidence-${width}.png`, fullPage: true })
+    const audit = await page.evaluate(async () => {
+      const runner = window as unknown as { axe: { run: (context: Document, options: unknown) => Promise<AxeResults> } }
+      return runner.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'] } })
+    })
+    writeFileSync(`${artifacts}/accessibility-${width}.json`, JSON.stringify({ width, violations: audit.violations }, null, 2))
+    expect(audit.violations).toEqual([])
+  }
+}
+
+test.beforeEach(() => mkdirSync(artifacts, { recursive: true }))
+
+test('searches selected sources and opens the exact captured passage in a focus-restoring inspector', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page)
+  const legacyRequests: string[] = []
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname
+    if (/\/(?:claims|factual-basis)(?:\/|$)/u.test(path)) legacyRequests.push(path)
+  })
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto(`/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts`)
+
+  await expect(page.getByRole('heading', { name: 'Докази для матеріалу', level: 1 })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Докази', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByText('Збережені твердження', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Витягти твердження' })).toHaveCount(0)
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  await expect(query).toHaveValue('Міська мобільність: як щоденні поїздки змінюють життя міста')
+  await query.fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+
+  const passage = page.getByRole('list').filter({ has: page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true }) })
+  await expect(passage).toContainText('Звіт про щоденні поїздки')
+  const openSource = page.getByRole('button', { name: 'Відкрити в джерелі', exact: true })
+  await openSource.focus()
+  await openSource.click()
+  const inspector = page.getByRole('dialog', { name: 'Звіт про щоденні поїздки' })
+  await expect(inspector).toBeVisible()
+  await expect(inspector.locator('mark')).toHaveText('У дослідженні взяли участь 12 мешканців міста.')
+  await page.screenshot({ path: `${artifacts}/evidence-source-inspector-1280.png`, fullPage: true })
+  await page.setViewportSize({ width: 390, height: 900 })
+  const mobileDialog = await inspector.boundingBox()
+  expect(mobileDialog).not.toBeNull()
+  expect(mobileDialog!.x).toBeGreaterThanOrEqual(0)
+  expect(mobileDialog!.x + mobileDialog!.width).toBeLessThanOrEqual(390)
+  expect(mobileDialog!.y).toBeGreaterThanOrEqual(0)
+  expect(mobileDialog!.y + mobileDialog!.height).toBeLessThanOrEqual(900)
+  await page.screenshot({ path: `${artifacts}/evidence-source-inspector-390.png`, fullPage: true })
+  await inspector.press('Escape')
+  await expect(inspector).toBeHidden()
+  await expect(openSource).toBeFocused()
+
+  await captureWidths(page)
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+  expect(fixture.pollCount).toBeGreaterThan(0)
+  expect(legacyRequests).toEqual([])
+})
+
+test('automatically prepares a missing index then searches the unchanged query', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+
+  await expect(page.getByText('Потрібно підготувати для пошуку')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Знайти в джерелах', exact: true })).toBeEnabled()
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByText('Вибрано 1 джерело', { exact: true })).toBeVisible()
+  await expect(page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true })).toBeVisible()
+  expect(fixture.indexCommandKeys).toHaveLength(1)
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('stops indexing on an unknown paid outcome and offers status refresh without a new request', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false, indexTerminalStatus: 'OUTCOME_UNKNOWN' })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Зовнішня обробка могла ще тривати')
+  await expect(page.getByRole('button', { name: 'Оновити готовність джерел' })).toBeVisible()
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.indexCommandKeys).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('does not search after indexing is cancelled and refreshes readiness without resubmitting', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false, indexTerminalStatus: 'CANCELLED' })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Підготовку скасовано')
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.indexCommandKeys).toHaveLength(1)
+
+  await page.getByRole('button', { name: 'Оновити готовність джерел' }).click()
+  await expect(page.getByText('Потрібно підготувати для пошуку')).toBeVisible()
+  expect(fixture.indexCommandKeys).toHaveLength(1)
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('waits for usefulness selection and accepts an empty relevance result without filling it', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { relevanceSelection: true, emptySearchResults: true, hasMore: true,
+    searchPollStatuses: ['RUNNING', 'RUNNING', 'SUCCEEDED'] })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Яка маса Нептуна?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByText('Відбираємо уривки, корисні для вашого запиту.')).toBeVisible()
+  await expect(page.getByText('Серед перевірених уривків не знайдено корисних для цього запиту. Уточніть питання або додайте джерела.')).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('.evidence-result-count')).toHaveText('0 уривків')
+  await expect(page.locator('.evidence-passage')).toHaveCount(0)
+  await expect(page.getByText('Є й інші можливі уривки. Уточніть запит, щоб змінити добірку.')).toBeVisible()
+  await page.screenshot({ path: test.info().outputPath('empty-usefulness.png'), fullPage: true })
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+})
+
+test('shows filtered passages with the original query job identity', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { relevanceSelection: true,
+    searchPollStatuses: ['RUNNING', 'SUCCEEDED'] })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Скільки мешканців дослідили?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByText('Відібрані для цього запиту уривки. Перевірте їхній зміст у джерелах.')).toBeVisible()
+  await expect(page.locator('.evidence-passage')).toHaveCount(1)
+  await page.reload()
+  await expect(page.locator('.evidence-passage')).toHaveCount(1)
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+})
+
+test('keeps completion detection responsive after several active search polls', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { relevanceSelection: true,
+    searchPollStatuses: ['RUNNING', 'RUNNING', 'RUNNING', 'RUNNING', 'SUCCEEDED'] })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Скільки мешканців дослідили?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByText('Відібрані для цього запиту уривки. Перевірте їхній зміст у джерелах.')).toBeVisible({ timeout: 9_000 })
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+})
+
+test('shows a useful empty-result state without inventing a supported passage', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { emptySearchResults: true })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  await query.fill('Яких даних немає у звіті?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+
+  await expect(page.getByText('Спробуйте переформулювати запит або змінити вибрані джерела.')).toBeVisible()
+  await expect(page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true })).toHaveCount(0)
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.searchBodies[0]).toMatchObject({ query: 'Яких даних немає у звіті?' })
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('keeps the query and gives a recoverable message when a search job fails', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { searchPollStatuses: ['FAILED'], searchErrorCategory: 'TIMEOUT' })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  await query.fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+
+  await expect(page.getByRole('alert')).toContainText('Пошук триває довше')
+  await expect(query).toHaveValue('Як проходять щоденні поїздки мешканців?')
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('retries an ambiguous indexing request with the original command key', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false, indexNetworkFailureOnce: true })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await expect(page.getByText('Потрібно підготувати для пошуку')).toBeVisible()
+  await page.getByRole('button', { name: 'Підготувати до пошуку', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Не вдалося підтвердити, чи запит на підготовку було прийнято')
+  await page.getByRole('button', { name: 'Перевірити ту саму дію', exact: true }).first().click()
+  await expect(page.getByText('Вибрано 1 джерело', { exact: true })).toBeVisible()
+  expect(fixture.indexCommandKeys).toHaveLength(2)
+  expect(fixture.indexCommandKeys[0]).toBe(fixture.indexCommandKeys[1])
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('makes missing search configuration explicit and does not issue search or indexing requests', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { configured: false, indexed: false })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+
+  await expect(page.getByRole('alert')).toContainText('Пошук ще не підключено')
+  await expect(page.getByRole('link', { name: 'налаштуваннях простору' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Знайти в джерелах', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Підготувати до пошуку', exact: true })).toBeDisabled()
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('explains an empty project and offers a direct way to add sources', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { emptySources: true })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+
+  await expect(page.getByText('У проєкті ще немає готових джерел для пошуку.')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Додати джерела' })).toHaveAttribute('href', '/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/sources')
+  await expect(page.getByRole('button', { name: 'Знайти в джерелах' })).toBeDisabled()
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.indexCommandKeys).toEqual([])
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('enforces the UTF-8 byte limit while allowing a query exactly at the limit', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page)
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  const search = page.getByRole('button', { name: 'Знайти в джерелах', exact: true })
+
+  await query.fill('😀'.repeat(384))
+  await expect(search).toBeEnabled()
+  await query.fill('😀'.repeat(385))
+  await expect(page.getByRole('alert')).toContainText('Запит задовгий')
+  await expect(search).toBeDisabled()
+  expect(new TextEncoder().encode('😀'.repeat(384)).byteLength).toBe(1536)
+  expect(new TextEncoder().encode('😀'.repeat(385)).byteLength).toBe(1540)
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.indexCommandKeys).toEqual([])
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('keeps ready sources tucked away and disables search when none are selected', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page)
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const disclosure = page.locator('details.evidence-source-disclosure')
+  await expect(disclosure).toHaveJSProperty('open', false)
+  await expect(page.getByRole('checkbox', { name: 'Звіт про щоденні поїздки' })).toHaveCount(0)
+  await page.getByText('Вибрано 1 джерело').click()
+  const sourceChoice = page.getByRole('checkbox', { name: 'Звіт про щоденні поїздки' })
+  await expect(sourceChoice).toBeChecked()
+  await page.getByRole('button', { name: 'Очистити вибір' }).click()
+  await expect(page.getByText('Виберіть джерела для пошуку')).toBeVisible()
+  await expect(sourceChoice).not.toBeChecked()
+  await expect(page.getByRole('button', { name: 'Знайти в джерелах', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Вибрати всі' }).click()
+  await expect(sourceChoice).toBeChecked()
+  await expect(page.getByRole('button', { name: 'Знайти в джерелах', exact: true })).toBeEnabled()
+  expect(fixture.searchBodies).toEqual([])
+  expect(fixture.indexCommandKeys).toEqual([])
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('keeps the last packet visible when a follow-up search reports stale sources', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page)
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  const search = page.getByRole('button', { name: 'Знайти в джерелах', exact: true })
+  const quote = page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true })
+  await query.fill('Як проходять щоденні поїздки мешканців?')
+  await search.click()
+  await expect(quote).toBeVisible()
+  await query.fill('Які матеріали варто порівняти?')
+  fixture.setSearchFailure('409')
+  await search.click()
+
+  await expect(page.getByRole('alert')).toContainText('Стан джерел змінився')
+  await expect(quote).toBeVisible()
+  await expect(page.getByText('Попередній результат')).toBeVisible()
+  expect(fixture.searchBodies).toHaveLength(2)
+  expect(fixture.searchBodies[1]).toMatchObject({ query: 'Які матеріали варто порівняти?' })
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('reload resumes the submitted search job without creating a second job', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { searchPollStatuses: ['RUNNING', 'SUCCEEDED'] })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  await query.fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: /Знайти|Шукаємо|Пошук триває/ }).click()
+  await expect(page.getByRole('status')).toContainText(/Шукаємо|Пошук триває/)
+  await expect.poll(() => fixture.searchPollCount).toBe(1)
+
+  await page.reload()
+  await expect(page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })).toHaveValue('Як проходять щоденні поїздки мешканців?')
+  await expect(page.getByText('Відновлюємо стан пошуку.')).toBeVisible()
+  await expect(page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true })).toBeVisible({ timeout: 10000 })
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.searchPollCount).toBeGreaterThanOrEqual(2)
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('shows snapshot integrity failures inside the source inspector', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { tamperSnapshot: true })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  const openSource = page.getByRole('button', { name: 'Відкрити в джерелі', exact: true })
+  await openSource.click()
+  const inspector = page.getByRole('dialog', { name: 'Звіт про щоденні поїздки' })
+  await expect(inspector).toBeVisible()
+  await expect(inspector.getByRole('alert')).toContainText('Точний уривок цієї версії джерела більше не вдалося перевірити')
+  expect(fixture.snapshotRequests).toHaveLength(1)
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+test('allows closing the inspector while its snapshot request is pending', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { deferSnapshot: true })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' }).fill('Як проходять щоденні поїздки мешканців?')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  const openSource = page.getByRole('button', { name: 'Відкрити в джерелі', exact: true })
+  await openSource.click()
+  const inspector = page.getByRole('dialog', { name: 'Звіт про щоденні поїздки' })
+  await expect(inspector).toBeVisible()
+  await fixture.snapshotStarted
+  await inspector.getByRole('button', { name: 'Закрити' }).click()
+  await expect(inspector).toBeHidden()
+  fixture.releaseSnapshot()
+  await expect(openSource).toBeFocused()
+  await expect(inspector).toBeHidden()
+  expect(fixture.violations).toEqual([])
+  expect(fixture.pageErrors).toEqual([])
+})
+
+
+test('preserves an explicitly empty source selection during readiness refresh', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false, indexTerminalStatus: 'CANCELLED' })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Підготовку скасовано')
+  await page.getByRole('button', { name: 'Очистити вибір', exact: true }).click()
+  await page.getByRole('button', { name: 'Оновити готовність джерел' }).click()
+  await expect(page.getByRole('checkbox')).not.toBeChecked()
+  await expect(page.getByRole('button', { name: 'Знайти в джерелах', exact: true })).toBeDisabled()
+  expect(fixture.searchBodies).toHaveLength(0)
+  expect(fixture.indexCommandKeys).toHaveLength(1)
+})
+
+test('unlocks the query and source selection after a definitive index rejection', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false, indexHttpFailure: 409 })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Стан джерел змінився')
+  await expect(page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })).toBeEnabled()
+  await expect(page.getByRole('checkbox')).toBeEnabled()
+  await page.getByRole('button', { name: 'Очистити вибір', exact: true }).click()
+  await expect(page.getByRole('checkbox')).not.toBeChecked()
+  expect(fixture.searchBodies).toHaveLength(0)
+})
+
+test('editing the query during indexing cancels only the unsubmitted search', async ({ page }) => {
+  const fixture = await installEvidenceDeskFixture(page, { indexed: false, indexTerminalStatus: 'RUNNING' })
+  await page.goto('/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/facts')
+  const query = page.getByRole('textbox', { name: 'Що потрібно підтвердити або пояснити?' })
+  await query.fill('Перше питання')
+  await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
+  await query.fill('Нове питання')
+  fixture.setIndexStatus('SUCCEEDED')
+  const search = page.getByRole('button', { name: 'Знайти в джерелах', exact: true })
+  await expect(search).toBeEnabled({ timeout: 12000 })
+  expect(fixture.searchBodies).toHaveLength(0)
+  await expect(query).toBeEnabled()
+  await search.click()
+  await expect(page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true })).toBeVisible()
+  expect(fixture.searchBodies).toHaveLength(1)
+  expect(fixture.searchBodies[0]).toMatchObject({ query: 'Нове питання' })
+})

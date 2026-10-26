@@ -238,7 +238,7 @@ function setTemplate(templateId: VisualFrame['templateId']) {
   if (!composition.value || !frame.value) return
   const old = frame.value
   const textLayer = old.layers.find(layer => layer.type === 'text') as VisualTextLayer | undefined
-  const replacement = makeFrame({ id: old.id, text: textLayer?.text ?? '', purpose: old.purpose, ...(textLayer ? { mappings: textLayer.mappings } : {}) }, composition.value.height, templateId, brandStyle.value)
+  const replacement = makeFrame({ id: old.id, text: textLayer?.text ?? '', purpose: old.purpose, ...(textLayer ? { mappings: textLayer.mappings,...(textLayer.sourceMappings ? { sourceMappings: textLayer.sourceMappings } : {}) } : {}) }, composition.value.height, templateId, brandStyle.value)
   replacement.sourceFrameId = old.sourceFrameId
   const preservedLayers = old.layers.filter(layer => layer.id !== textLayer?.id)
   const newPrimaryText = replacement.layers.find(layer => layer.type === 'text')
@@ -309,6 +309,7 @@ function editText(value: string) {
   const changedEnd = old.length - suffix
   const delta = value.length - old.length
   layer.text = value
+  if (layer.sourceMappings) layer.sourceMappings = layer.sourceMappings.flatMap(map => map.endOffset <= prefix ? [map] : map.startOffset >= changedEnd ? [{ ...map,startOffset: map.startOffset+delta,endOffset: map.endOffset+delta }] : [])
   layer.mappings = layer.mappings.flatMap(mapping => {
     if (mapping.endOffset <= prefix) return value.slice(mapping.startOffset, mapping.endOffset) === mapping.quote ? [mapping] : []
     if (mapping.startOffset >= changedEnd) {
