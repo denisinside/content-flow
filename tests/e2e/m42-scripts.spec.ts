@@ -123,8 +123,8 @@ test('manual frames keep stable IDs through reorder and can be checkpointed and 
   await page.locator('.script-workspace').getByRole('textbox', { name: 'Точний текст' }).fill('Команда оновила сервіс.');
   await expect.poll(() => ctx.state.script.draft?.content.frames.length).toBe(2);
   const secondId = ctx.state.script.draft!.content.frames[1]!.id;
-  await page.locator('.script-workspace').getByRole('button', { name: 'Кадр 2: Причина' }).focus();
-  await page.locator('.script-workspace').getByRole('button', { name: 'Кадр 2: Причина' }).press('Alt+ArrowUp');
+  const secondFrame = page.getByRole('navigation', { name: 'Порядок кадрів' }).getByRole('button', { name: '02 Причина', exact: true });
+  await secondFrame.press('Alt+ArrowUp');
   await expect.poll(() => ctx.state.script.draft?.content.frames[0]?.id).toBe(secondId);
   expect(ctx.state.script.draft!.content.frames[1]!.id).toBe(firstId);
   await page.locator('.script-workspace').getByRole('button', { name: 'Зберегти версію' }).click();

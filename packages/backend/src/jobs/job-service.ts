@@ -238,12 +238,14 @@ export class DurableJobService {
       const unknown = ['MAY_STILL_RUN', 'UNKNOWN'].includes(failure.outcome);
       const now = new Date();
       const delay = Math.max(failure.retryAfterMs, (this.options.retryBaseMs ?? 2000) * 5 ** (attempt.ordinal - 1));
-      // One fresh draft is safe after the provider completed and the section failed structural validation.
-      const canRegenerateSection = current.operation === 'SOURCE_WRITING' && failure.category === 'SECTION_DRAFT_INVALID'
-        && failure.outcome === 'KNOWN_SUCCEEDED' && attempt.ordinal === 1;
+      // A completed run that returned a structurally invalid draft can be regenerated once.
+      const invalidDraft = failure.category === 'WRITING_DRAFT_INVALID'
+        && ['SOURCE_WRITING', 'OUTLINE_GENERATION', 'ARTICLE_GENERATION', 'TELEGRAM_GENERATION'].includes(current.operation);
+      const invalidSection = current.operation === 'SOURCE_WRITING' && failure.category === 'SECTION_DRAFT_INVALID';
+      const canRegenerateWriting = (invalidDraft || invalidSection) && failure.outcome === 'KNOWN_SUCCEEDED' && attempt.ordinal === 1;
       const canRetryFailure = ['NOT_SUBMITTED', 'KNOWN_FAILED'].includes(failure.outcome)
         && SAFE_RETRY_CATEGORIES.has(failure.category) && attempt.ordinal < 3;
-      const safeRetry = (canRegenerateSection || canRetryFailure) && now.getTime() + delay < current.deadlineAt.getTime();
+      const safeRetry = (canRegenerateWriting || canRetryFailure) && now.getTime() + delay < current.deadlineAt.getTime();
       await tx.jobAttempt.update({ where: { id: attempt.id }, data: { finishedAt: now, providerOutcome: failure.outcome, errorCategory: failure.category } });
       await tx.job.update({ where: { id: job.id }, data: { status: unknown ? 'OUTCOME_UNKNOWN' : safeRetry ? 'RETRY_WAIT' : 'FAILED',
         nextAttemptAt: new Date(now.getTime() + delay), publishedAt: null, errorCategory: failure.category,

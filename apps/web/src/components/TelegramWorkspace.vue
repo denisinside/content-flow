@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
+import { sourceWritingFailure, type SourceWritingStatus } from '@/source-writing-feedback'
 import SourceMarkdown from './SourceMarkdown.vue'
+import SourceWritingStarter from './SourceWritingStarter.vue'
 
 type InputMode = 'DIRECT' | 'ARTICLE_DERIVED'
 type ContentMode = 'FACTUAL' | 'CREATIVE'
@@ -12,8 +14,8 @@ interface SourcePassage { passageId: string; packetId: string; snapshotId: strin
 interface Content { text: string; mappings: Mapping[]; sourceMappings?: SourceMapping[]; cover?: { text: string; instruction: string } }
 interface Inputs { inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; briefRevisionId: string; sourceEvidenceSetId?: string | null; sourceArticleVersionId: string | null; workspaceId: string; workspaceStyleRevision: number }
 interface Draft extends Inputs { content: Content; baseRevisionId: string | null }
-interface Revision extends Inputs { id: string; number: number; content: Content; hasUnmapped: boolean; status: 'PROPOSED' | 'APPROVED' | 'WITHDRAWN'; origin: string; reviewCounter: number; approvedAt: string | null; approvedBy: string | null; withdrawnAt: string | null; withdrawalReason: string | null; reviewedBriefRevisionId: string | null; reviewedSourceArticleVersionId: string | null; reviewedWorkspaceStyleRevision: number | null; reviewedBy: string | null; reviewedAt: string | null; acknowledgedUnmapped: boolean; staleReasons: string[]; blockingReasons: string[] }
-interface Job { id: string; status: string; operation: string; format?: ChannelFormat; retryAllowed: boolean; failureCode?: string | null; safeMessage?: string | null }
+interface Revision extends Inputs { id: string; number: number; content: Content; hasUnmapped: boolean; status: 'PROPOSED' | 'APPROVED' | 'WITHDRAWN'; origin: string; sourceAdaptationRevision?: number; reviewCounter: number; approvedAt: string | null; approvedBy: string | null; withdrawnAt: string | null; withdrawalReason: string | null; reviewedBriefRevisionId: string | null; reviewedSourceArticleVersionId: string | null; reviewedWorkspaceStyleRevision: number | null; reviewedBy: string | null; reviewedAt: string | null; acknowledgedUnmapped: boolean; staleReasons: string[]; blockingReasons: string[] }
+interface Job { id: string; status: string; operation: string; format?: ChannelFormat; retryAllowed: boolean; errorCategory?: string | null; safeMessage?: string | null }
 interface LanguageSuggestion { id: string; sourceRevisionId: string; locator: { start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean }
 interface RecoveredDraft { content: Content; inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; expectedRevision: number }
 interface State { adaptation: { id: string; revision: number; draft: Draft | null; currentApprovedRevisionId: string | null; revisions: Revision[] } | null; formatSelected?: boolean; telegramSelected?: boolean; brief: { id: string; revision: number; currentRevision: { id: string; contentMode: ContentMode } | null; history: unknown[] } | null; style: { revision: number }; approvedArticle: { id: string; number: number; sourceEvidenceSetId?: string | null; contentMode: ContentMode; title?: string; approvedAt?: string; inspection?: { eligible?: boolean; staleReasons?: string[]; blockingReasons: string[] } } | null; eligibleSourcePassages?: SourcePassage[]; staleReasons: string[]; mappingIssues: { locator: string; reason: string }[]; hasUnmapped: boolean; blockingReasons: string[] }
@@ -56,10 +58,24 @@ const formatLabel = computed(() => ({ TELEGRAM_POST: 'Допис у Telegram', L
 const selectedArticle = computed(() => state.value?.approvedArticle)
 const articleSourceNeedsReview = computed(() => inputMode.value === 'ARTICLE_DERIVED' && !!selectedArticle.value && (selectedArticle.value.inspection?.eligible !== true || !!selectedArticle.value.inspection?.staleReasons?.length))
 const activeApproval = computed(() => state.value?.adaptation?.revisions.find(row => row.id === state.value?.adaptation?.currentApprovedRevisionId) ?? null)
+const latestProposal = computed(() => {
+  const adaptation = state.value?.adaptation
+  const revision = adaptation?.revisions.find(row => row.origin === 'AI')
+  return revision?.status === 'PROPOSED' && revision.id !== adaptation?.draft?.baseRevisionId ? revision : null
+})
+function proposalIssue(revision: Revision) {
+  if (revision.staleReasons.length) return 'Вхідні дані змінилися. Запропонуйте новий текст, щоб використати актуальні джерела.'
+  if (revision.sourceAdaptationRevision !== undefined && revision.sourceAdaptationRevision !== state.value?.adaptation?.revision) {
+    return 'Чернетка змінилася після запуску. Можете скопіювати потрібні фрагменти або запропонувати текст знову.'
+  }
+  return ''
+}
+const hasScript = computed(() => ['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'].includes(format.value))
 const localMappingIssues = computed(() => mappings.value.filter(item => fieldText(item.field).slice(item.startOffset, item.endOffset) !== item.quote))
 const mappings = ref<Mapping[]>([])
 const sourceMappings = ref<SourceMapping[]>([])
-const sourceRequest = ref<{ id: string; stage: string; errorCategory: string | null } | null>(null)
+const sourceRequest = ref<SourceWritingStatus | null>(null)
+const sourceResultPending = ref(false)
 const sourceRecoveryKey = computed(() => `${recoveryKey.value}:source-request`)
 const sourceActive = computed(() => !!sourceRequest.value && !['SUCCEEDED','FAILED','CANCELLED'].includes(sourceRequest.value.stage))
 const selectedSource = ref<SourcePassage | null>(null)
@@ -81,8 +97,10 @@ let sessionEnded = false
 let inFlight: Promise<boolean> | null = null
 const commandKeys = new Map<string, string>()
 let formatEpoch = 0
+let polling = false
+let loadedCreativeResultId: string | undefined
 let controller = new AbortController()
-const activeJob = computed(() => sourceActive.value || jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
+const activeJob = computed(() => sourceActive.value || sourceResultPending.value || jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
 
 function content(): Content { return { text: text.value, mappings: [...mappings.value].sort((a, b) => a.startOffset - b.startOffset), ...(sourceMappings.value.length ? { sourceMappings: [...sourceMappings.value] } : {}), ...(isCover.value ? { cover: { text: coverText.value, instruction: coverInstruction.value } } : {}) } }
 function fieldText(field?: 'text' | 'cover') { return field === 'cover' ? coverText.value : text.value }
@@ -116,10 +134,12 @@ async function request(path = '', body?: unknown, projectScope = false) {
 }
 async function load(reset = false) {
   const requestedFormat = format.value, requestedEpoch = formatEpoch
+  const previousState = state.value
   const next = await request() as State
-  if (requestedEpoch !== formatEpoch || requestedFormat !== format.value || disposed) return
+  if (requestedEpoch !== formatEpoch || requestedFormat !== format.value || disposed || (!reset && state.value !== previousState)) return false
   state.value = next
   if (reset) populate(state.value.adaptation?.draft)
+  return true
 }
 async function save(): Promise<boolean> {
   clearTimeout(timer)
@@ -194,26 +214,35 @@ async function generateFromSources() {
   const key = `source:${generationFormat}:${expectedRevision.value}:${inputMode.value}:${includeLink.value}`
   const commandKey = commandKeys.get(key) ?? crypto.randomUUID(); commandKeys.set(key,commandKey)
   try {
-    const result = await request('/source-prepare',{ commandKey,expectedRevision: expectedRevision.value,inputMode: inputMode.value,includeLink: includeLink.value }) as { request: { id: string;stage: string;errorCategory: string | null } }
+    const result = await request('/source-prepare',{ commandKey,expectedRevision: expectedRevision.value,inputMode: inputMode.value,includeLink: includeLink.value }) as { request: SourceWritingStatus }
     if (generationEpoch !== formatEpoch) return
-    sourceRequest.value = result.request; rememberSourceRequest(); commandKeys.delete(key); jobMessage.value = 'Добираємо докази й готуємо пропозицію. Ваш текст залишається в редакторі.'
+    acceptSourceStatus(result.request)
+    commandKeys.delete(key)
     void pollJobs()
   } catch (cause) { if (generationEpoch === formatEpoch) error.value = cause instanceof Error ? cause.message : 'Не вдалося підготувати текст із джерел.' }
   finally { busy.value = false }
 }
 async function cancelSourceRequest() {
   if (!sourceRequest.value || busy.value) return
+  const cancelEpoch = formatEpoch
   busy.value = true
   try {
     const response = await fetch(`${projectBase}/source-writing/${sourceRequest.value.id}/cancel`,{ method: 'POST',credentials: 'same-origin',signal: controller.signal,
       headers: { 'Content-Type': 'application/json','X-CSRF-Token': props.csrfToken },body: '{}' })
     if (!response.ok) throw new Error('Не вдалося скасувати підготовку.')
-    sourceRequest.value = (await response.json()).request; rememberSourceRequest(); jobMessage.value = 'Підготовку скасовано. Ваш текст збережено.'
+    const result = await response.json() as { request: SourceWritingStatus }
+    if (cancelEpoch === formatEpoch) acceptSourceStatus(result.request)
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося скасувати підготовку.' }
   finally { busy.value = false }
 }
+function acceptSourceStatus(status: SourceWritingStatus) {
+  sourceRequest.value = status
+  sourceResultPending.value = status.stage === 'SUCCEEDED'
+  jobMessage.value = status.stage === 'CANCELLED' ? 'Підготовку скасовано. Ваш текст збережено.' : ''
+  rememberSourceRequest()
+}
 function rememberSourceRequest() {
-  try { if (sourceRequest.value && sourceActive.value) sessionStorage.setItem(sourceRecoveryKey.value,sourceRequest.value.id); else sessionStorage.removeItem(sourceRecoveryKey.value) }
+  try { if (sourceRequest.value && (sourceActive.value || sourceResultPending.value || sourceRequest.value.sourceStarter)) sessionStorage.setItem(sourceRecoveryKey.value,sourceRequest.value.id); else sessionStorage.removeItem(sourceRecoveryKey.value) }
   catch { /* The durable request remains on the server when browser storage is unavailable. */ }
 }
 function restoreSourceRequest() {
@@ -276,32 +305,49 @@ async function generate() {
   finally { busy.value = false }
 }
 async function pollJobs() {
+  if (disposed || polling) return
   clearTimeout(pollTimer)
-  if (disposed) return
-  const requestedFormat = format.value, requestedEpoch = formatEpoch
+  polling = true
+  const requestedEpoch = formatEpoch
+  const isCurrent = () => !disposed && requestedEpoch === formatEpoch
   try {
     if (sourceActive.value && sourceRequest.value) {
-      const result = await fetch(`${projectBase}/source-writing/${sourceRequest.value.id}`,{ credentials: 'same-origin',signal: controller.signal })
+      const currentRequest = sourceRequest.value
+      const result = await fetch(`${projectBase}/source-writing/${currentRequest.id}`,{ credentials: 'same-origin',signal: controller.signal })
       if (result.status === 401) { emit('session-expired'); return }
-      if (requestedEpoch === formatEpoch) {
-        if (result.status === 404) { sourceRequest.value = null; rememberSourceRequest() }
-        else if (result.ok) {
-          sourceRequest.value = (await result.json()).request; rememberSourceRequest()
-          if (sourceRequest.value?.stage === 'SUCCEEDED') { jobMessage.value = 'Пропозиція з доказами готова. Перегляньте її в історії.'; await load(); emit('caption-generated') }
-        }
-      }
+      const status = result.ok ? (await result.json() as { request: SourceWritingStatus }).request : null
+      if (!isCurrent()) return
+      if (sourceRequest.value === currentRequest && status) acceptSourceStatus(status)
+      else if (sourceRequest.value === currentRequest && result.status === 404) { sourceRequest.value = null; rememberSourceRequest() }
     }
+    if (sourceResultPending.value && await load()) {
+      sourceResultPending.value = false
+      rememberSourceRequest()
+      emit('caption-generated')
+    }
+    if (!isCurrent()) return
     const response = await fetch(`${projectBase}/jobs`, { credentials: 'same-origin', signal: controller.signal })
     if (response.status === 401) { emit('session-expired'); return }
-    if (response.ok && requestedEpoch === formatEpoch && requestedFormat === format.value) {
+    if (response.ok) {
       const result = await response.json() as { jobs: Job[] }
+      if (!isCurrent()) return
       jobs.value = result.jobs.filter(job => job.operation === 'TELEGRAM_GENERATION' && (job.format === format.value || (!job.format && format.value === 'TELEGRAM_POST')))
       const latest = jobs.value[0]
-      if (latest?.status === 'SUCCEEDED') { jobMessage.value = 'Пропозицію додано до історії. Вона не замінила ваш текст.'; await load(); emit('caption-generated') }
-      else if (latest && ['FAILED', 'CANCELLED'].includes(latest.status)) jobMessage.value = latest.safeMessage || 'Не вдалося створити пропозицію. Чернетка збережена.'
+      if (latest?.status === 'SUCCEEDED' && latest.id !== loadedCreativeResultId && await load()) {
+        loadedCreativeResultId = latest.id
+        if (!sourceRequest.value) jobMessage.value = ''
+        emit('caption-generated')
+      } else if (latest?.status === 'RETRY_WAIT' && latest.errorCategory === 'WRITING_DRAFT_INVALID' && !sourceRequest.value) {
+        jobMessage.value = 'Перший варіант не пройшов перевірку. Готуємо нову пропозицію…'
+      } else if (latest && ['FAILED', 'CANCELLED'].includes(latest.status) && !sourceRequest.value) {
+        jobMessage.value = latest.safeMessage || (latest.status === 'CANCELLED' ? 'Генерацію скасовано. Ваш текст збережено.' : sourceWritingFailure(latest.errorCategory ?? null))
+      }
     }
-  } catch { /* The editor and its saved text remain usable during status polling errors. */ }
-  if (!disposed) pollTimer = setTimeout(() => void pollJobs(), activeJob.value ? 2000 : 7000)
+  } catch { /* Keep pending results eligible for the next status poll. */ }
+  finally {
+    polling = false
+    if (!disposed) pollTimer = setTimeout(() => void pollJobs(), !isCurrent() || sourceResultPending.value || activeJob.value ? 2000 : 7000)
+  }
 }
 async function loadLanguageSuggestions() {
   const sourceRevisionId = state.value?.adaptation?.draft?.baseRevisionId
@@ -433,7 +479,7 @@ function restoreLocal() {
 }
 function discardLocal() { recovered.value = null; sessionStorage.removeItem(recoveryKey.value) }
 async function reconcile(useLocal: boolean) {
-  try { await load(!useLocal); expectedRevision.value = state.value?.adaptation?.revision ?? 0; conflict.value = false; error.value = ''; recovered.value = null; if (useLocal) { baseline.value = ''; await save() } else sessionStorage.removeItem(recoveryKey.value) }
+  try { if (!await load(!useLocal)) return; expectedRevision.value = state.value?.adaptation?.revision ?? 0; conflict.value = false; error.value = ''; recovered.value = null; if (useLocal) { baseline.value = ''; await save() } else sessionStorage.removeItem(recoveryKey.value) }
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося оновити.' }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { retain(); event.preventDefault(); event.returnValue = '' } }
@@ -451,11 +497,13 @@ watch(() => props.initialFormat, async (next) => {
   if (dirty.value) retain()
   clearTimeout(timer)
   format.value = next; formatEpoch++
+  sourceResultPending.value = false
+  loadedCreativeResultId = undefined
   state.value = null; jobs.value = []; sourceRequest.value = null; jobMessage.value = ''; error.value = ''; conflict.value = false; recovered.value = null; languageSuggestions.value = []; selectedLanguageIds.value = []; languageMessage.value = ''
   loading.value = true
   const requestedEpoch = formatEpoch
   try {
-    await load(true)
+    if (!await load(true)) return
     restoreSourceRequest()
     const stored = sessionStorage.getItem(recoveryKey.value)
     if (stored) { const value = JSON.parse(stored) as RecoveredDraft; if (JSON.stringify({ content: value.content, inputMode: value.inputMode, contentMode: value.contentMode, includeLink: value.includeLink }) !== baseline.value) recovered.value = value; else sessionStorage.removeItem(recoveryKey.value) }
@@ -695,6 +743,51 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         </Button>
       </div>
 
+      <section
+        v-if="latestProposal"
+        class="telegram-proposal"
+        aria-labelledby="channel-proposal-heading"
+      >
+        <h2 id="channel-proposal-heading">
+          {{ sourceRequest?.stage === 'FAILED' ? 'Попередня пропозиція тексту' : 'Пропозиція тексту' }}
+        </h2>
+        <p class="telegram-history-text">
+          {{ latestProposal.content.text }}
+        </p>
+        <template v-if="latestProposal.content.cover">
+          <p class="telegram-history-text">
+            <strong>Текст обкладинки:</strong> {{ latestProposal.content.cover.text }}
+          </p>
+          <p class="telegram-history-instruction">
+            <strong>Завдання:</strong> {{ latestProposal.content.cover.instruction }}
+          </p>
+        </template>
+        <p
+          v-if="proposalIssue(latestProposal)"
+          class="telegram-source-note"
+        >
+          {{ proposalIssue(latestProposal) }}
+        </p>
+        <div class="telegram-history-actions">
+          <Button
+            class="workspace-button workspace-button-primary"
+            :disabled="busy || readonly || dirty || conflict || !!recovered || !!proposalIssue(latestProposal)"
+            @click="command(`/${latestProposal.id}/apply`, {}, true)"
+          >
+            Застосувати до чернетки
+          </Button>
+          <a
+            v-if="hasScript"
+            href="#script-title"
+          >Перейти до сценарію</a>
+        </div>
+      </section>
+
+      <SourceWritingStarter
+        v-if="sourceRequest?.sourceStarter"
+        :starter="sourceRequest.sourceStarter"
+      />
+
       <div class="telegram-layout">
         <section
           class="telegram-paper"
@@ -881,10 +974,10 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             Є посилання на речення, які змінилися в тексті або на обкладинці. Видаліть їх або виділіть точні слова й прив’яжіть знову.
           </div>
           <div
-            v-if="sourceRequest"
+            v-if="sourceActive || sourceResultPending || (sourceRequest?.stage === 'FAILED' && !sourceRequest.sourceStarter)"
             role="status"
           >
-            {{ sourceRequest.stage === 'FAILED' ? 'Підготовка завершилась із помилкою. Перевірте джерела й повторіть запуск.' : sourceActive ? 'Готуємо текст із джерел…' : '' }}
+            {{ sourceRequest?.stage === 'FAILED' ? sourceWritingFailure(sourceRequest.errorCategory) : sourceResultPending ? 'Пропозиція готова. Завантажуємо текст…' : 'Готуємо текст із джерел…' }}
             <Button
               v-if="sourceActive"
               variant="ghost"
@@ -1055,7 +1148,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           class="telegram-history-entry"
         >
           <div class="telegram-history-title">
-            <h3>Версія {{ revision.number }}</h3><p>{{ revision.status === 'APPROVED' ? 'Погоджено' : revision.status === 'WITHDRAWN' ? 'Відкликано' : revision.origin === 'AI' ? 'Пропозиція AI · не застосовано' : 'Очікує перегляду' }} · {{ revision.inputMode === 'DIRECT' ? 'Самостійний допис' : 'За статтею' }} · {{ revision.contentMode === 'FACTUAL' ? 'Фактичний режим' : 'Авторський · неперевірено' }}</p>
+            <h3>Версія {{ revision.number }}</h3><p>{{ revision.status === 'APPROVED' ? 'Погоджено' : revision.status === 'WITHDRAWN' ? 'Відкликано' : revision.id === state.adaptation?.draft?.baseRevisionId ? 'У чернетці' : revision.origin === 'AI' ? 'Пропозиція AI · очікує застосування' : 'Очікує перегляду' }} · {{ revision.inputMode === 'DIRECT' ? 'Самостійний допис' : 'За статтею' }} · {{ revision.contentMode === 'FACTUAL' ? 'Фактичний режим' : 'Авторський · неперевірено' }}</p>
           </div>
           <p
             v-if="revision.staleReasons.length"
@@ -1095,10 +1188,10 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           </details>
           <div class="telegram-history-actions">
             <Button
-              v-if="revision.origin === 'AI' && revision.status === 'PROPOSED'"
+              v-if="revision.origin === 'AI' && revision.status === 'PROPOSED' && revision.id !== latestProposal?.id && revision.id !== state.adaptation?.draft?.baseRevisionId"
               class="workspace-button"
               variant="outline"
-              :disabled="busy || readonly || dirty"
+              :disabled="busy || readonly || dirty || conflict || !!recovered || !!proposalIssue(revision)"
               @click="command(`/${revision.id}/apply`, {}, true)"
             >
               Застосувати до чернетки
@@ -1184,7 +1277,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 .telegram-review-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule); font-size: 13px; }
 .telegram-review-controls p { margin: 0; color: var(--approved, #32664b); }
 .telegram-evidence { min-width: 0; }
-.telegram-evidence h2, .telegram-history h2 { margin: 0; font: 550 25px/1.3 SourceSerif, Georgia, serif; }
+.telegram-evidence h2, .telegram-history h2, .telegram-proposal h2 { margin: 0; font: 550 25px/1.3 SourceSerif, Georgia, serif; }
 .telegram-evidence > p { color: var(--muted); font-size: 13px; line-height: 1.55; }
 .telegram-evidence-item { padding: 16px 0; border-top: 1px solid var(--rule); }
 .telegram-evidence-item h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.45; }
@@ -1204,6 +1297,8 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 .telegram-mapping-list { margin-top: 14px; border-top: 1px solid var(--rule); }
 .telegram-mapping-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule); font: 14px/1.45 SourceSerif, Georgia, serif; }
 .telegram-link-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.telegram-proposal { margin: 20px 0 28px; padding: 16px 0; border-block: 1px solid var(--rule); }
+.telegram-proposal a { align-self: center; text-decoration: underline; text-underline-offset: 0.18em; }
 .telegram-history { margin-top: 44px; border-top: 1px solid var(--ink); }
 .telegram-history > header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 0; }
 .telegram-history-entry { padding: 20px 0; border-top: 1px solid var(--rule); }

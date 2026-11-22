@@ -5,24 +5,32 @@ const base = `/api/v1/projects/${projectId}`;
 export const sourceSetId = 'a93c4674-b653-4992-a3e0-910f6a3487d3';
 export const passageId = '36646e4f-e76a-4f2f-8318-7bd8fb692ba9';
 export const quote = 'Дослідження охопило три райони міста.';
+export const proposedCaption = `Що з’ясували дослідники? ${quote}`;
 const sourceText = `Контекст перед уривком. ${quote} Далі описано методику опитування.`;
 const startOffset = sourceText.indexOf(quote);
 const requestId = 'a0ad3c38-10bc-4d06-8f89-7c24d6448994';
 
 const json = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
 
-export async function installSourceChannelFixture(page: Page, options: { invalidQuote?: boolean; linkedCitation?: boolean; pending?: boolean; emptyDraft?: boolean; oldApproval?: boolean } = {}) {
+export async function installSourceChannelFixture(page: Page, options: { invalidQuote?: boolean; linkedCitation?: boolean; pending?: boolean; emptyDraft?: boolean; oldApproval?: boolean; refreshFailsOnce?: boolean; starter?: boolean } = {}) {
   const baseFixture = await installM63Fixture(page, false, false, true);
   const calls: { path: string; body?: Record<string, unknown> }[] = [];
   let polls = 0;
   let complete = options.pending !== true;
   const passage = { passageId, packetId: '9f9f0f69-9d80-4da4-88bb-8ba6ed3fcf28', snapshotId: 'snapshot-1', quote,
     materialId: 'source-1', materialTitle: 'Звіт про мобільність', startOffset, endOffset: startOffset + quote.length };
+  const candidate = { id: 'candidate-1', number: 1, origin: 'AI', status: 'PROPOSED', content: { text: proposedCaption, mappings: [] },
+    staleReasons: [], blockingReasons: [] };
+  let hasCandidate = false;
+  let revisionReadFailed = false;
+  let baseRevisionId: string | null = null;
   let revision = options.emptyDraft ? 0 : 1;
   let savedContent: unknown = options.emptyDraft ? null : { text: options.linkedCitation ? quote : 'Мій допис має залишитися.',mappings: [],sourceMappings: options.linkedCitation ? [{ startOffset: 0,endOffset: quote.length,quote,passageId,packetId: passage.packetId }] : [] };
   let savedInputMode = 'ARTICLE_DERIVED',savedIncludeLink = false;
   const state = () => ({ format: 'TELEGRAM_POST',formatSelected: true,telegramSelected: true,
-    adaptation: savedContent ? { id: 'adaptation-1',revision,draft: { content: savedContent,inputMode: savedInputMode,contentMode: 'FACTUAL',includeLink: savedIncludeLink,sourceEvidenceSetId: sourceSetId,baseRevisionId: null },currentApprovedRevisionId: null,revisions: [] } : null,
+    adaptation: savedContent || hasCandidate ? { id: 'adaptation-1',revision,
+      draft: savedContent ? { content: savedContent,inputMode: savedInputMode,contentMode: 'FACTUAL',includeLink: savedIncludeLink,sourceEvidenceSetId: sourceSetId,baseRevisionId } : null,
+      currentApprovedRevisionId: null,revisions: hasCandidate ? [candidate] : [] } : null,
     brief: { id: 'brief-1',revision: 1,currentRevision: { id: 'brief-1',contentMode: 'FACTUAL' },history: [] },style: { revision: 3 },
     prerequisites: { blockingReasons: ['MISSING_BASIS'],missingBasis: true,unverified: false },
     approvedArticle: { id: 'article-version-1',number: 1,sourceEvidenceSetId: sourceSetId,contentMode: 'FACTUAL',title: 'Погоджена стаття',inspection: { eligible: !options.oldApproval,staleReasons: options.oldApproval ? ['BRIEF_CHANGED'] : [],blockingReasons: [] } },
@@ -30,6 +38,17 @@ export async function installSourceChannelFixture(page: Page, options: { invalid
   await page.route(`**${base}/telegram**`, async route => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (path === `${base}/telegram` && request.method() === 'GET') {
+      if (options.refreshFailsOnce && hasCandidate && !revisionReadFailed) {
+        revisionReadFailed = true;
+        calls.push({ path: 'failed-caption-refresh' });
+        return json(route,{},503);
+      }
+      return json(route,state());
+    }
+    if (path === `${base}/telegram/${candidate.id}/apply` && request.method() === 'POST') {
+      savedContent = candidate.content;
+      baseRevisionId = candidate.id;
+      revision++;
       return json(route,state());
     }
     if (path === `${base}/telegram/draft` && request.method() === 'POST') {
@@ -48,7 +67,11 @@ export async function installSourceChannelFixture(page: Page, options: { invalid
   await page.route(`**${base}/source-writing/${requestId}`, async route => {
     if (route.request().method() !== 'GET') return route.fallback();
     polls++; calls.push({ path: 'poll' });
-    return json(route, { request: { id: requestId, stage: !complete || polls === 1 ? 'SEARCHING' : 'SUCCEEDED', errorCategory: null } });
+    if (!complete || polls === 1) return json(route, { request: { id: requestId, stage: 'SEARCHING', errorCategory: null } });
+    if (options.starter) return json(route, { request: { id: requestId, stage: 'FAILED', errorCategory: 'SOURCE_STARTER_READY',
+      sourceStarter: { topic: 'Мобільність у місті', excerpts: [{ label: passage.materialTitle, text: quote, truncated: false }] } } });
+    hasCandidate = true;
+    return json(route, { request: { id: requestId, stage: 'SUCCEEDED', errorCategory: null } });
   });
   await page.route(`**${base}/materials/source-1/snapshots/snapshot-1`, async route => {
     if (route.request().method() !== 'GET') return route.fallback();

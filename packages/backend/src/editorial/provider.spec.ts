@@ -112,7 +112,7 @@ describe('controlled outline workflow boundary', () => {
   it('preserves outline-v1 validation after a ready report and bounds captured-run detail separately', async () => {
     for (const route of ['stream', 'detail'] as const) {
       await expect(consume({ outline_json: JSON.stringify({ schemaVersion: 'outline-v1', content: { title: 'Broken', sections: [] } }),
-        outline_report: readyReport }, route)).rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });
+        outline_report: readyReport }, route)).rejects.toMatchObject({ code: 'INVALID_DRAFT', outcome: 'KNOWN_SUCCEEDED' });
     }
     await expect(consume(validOutputs(), 'detail', 'x'.repeat(2 * 1024 * 1024)))
       .rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });

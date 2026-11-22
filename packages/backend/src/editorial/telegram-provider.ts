@@ -54,7 +54,8 @@ const release: ReleaseArtifact = {
 export type TelegramWorkflowSettings = TelegramWorkflowRelease & { apiKey: string };
 export class TelegramProviderError extends Error {
   constructor(readonly code: 'CONFIG' | 'AUTH' | 'INVALID_INPUT' | 'INCOMPATIBLE_CONTRACT' | 'QUOTA' | 'RATE_LIMIT' | 'TRANSIENT_TRANSPORT'
-    | 'TIMEOUT' | 'UNKNOWN_OUTCOME' | 'PROVIDER_FAILED', message: string, readonly outcome: 'NOT_SUBMITTED' | 'KNOWN_FAILED' | 'UNKNOWN' = 'KNOWN_FAILED') {
+    | 'TIMEOUT' | 'UNKNOWN_OUTCOME' | 'PROVIDER_FAILED' | 'INVALID_DRAFT', message: string,
+    readonly outcome: 'NOT_SUBMITTED' | 'KNOWN_FAILED' | 'KNOWN_SUCCEEDED' | 'UNKNOWN' = 'KNOWN_FAILED') {
     super(message); this.name = 'TelegramProviderError';
   }
 }
@@ -212,7 +213,14 @@ function extractionFromRun(run: DifyRun, expectedFormat?: TelegramOutput['format
   const raw = run.data.outputs?.[release.outputVariable];
   const output = typeof raw === 'string' ? safeJson(raw) : raw;
   const parsed = telegramOutputSchema.safeParse(output);
-  if (!parsed.success) throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow output did not match adaptation-v1');
+  if (!parsed.success) {
+    const matchesFormat = !expectedFormat || (output as { format?: unknown } | null | undefined)?.format === expectedFormat;
+    const matchesHash = typeof output === 'object' && output !== null && parsedReport.data.contentHash === sha256(JSON.stringify(output));
+    if (matchesFormat && matchesHash && parsed.error.issues.every(issue => issue.path[0] === 'content' || issue.path[0] === 'script')) {
+      throw new TelegramProviderError('INVALID_DRAFT', 'Channel workflow output did not match adaptation-v1', 'KNOWN_SUCCEEDED');
+    }
+    throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow output did not match adaptation-v1');
+  }
   if (expectedFormat && parsed.data.format !== expectedFormat) {
     throw new TelegramProviderError('INCOMPATIBLE_CONTRACT', 'Channel workflow output format did not match the frozen request');
   }

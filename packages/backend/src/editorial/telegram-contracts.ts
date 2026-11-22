@@ -47,9 +47,9 @@ export const generateTelegramInput = z.object({ format: adaptationFormatSchema.d
 export const telegramOutputSchema = z.object({ schemaVersion: z.literal('adaptation-v1'), format: adaptationFormatSchema, content: telegramContentSchema,
   script: scriptContentSchema.optional() }).strict().superRefine((value, ctx) => {
   const needsScript = ['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'].includes(value.format);
-  if (needsScript !== !!value.script) ctx.addIssue({ code: 'custom', message: 'Carousel and stories output must include exactly one script candidate' });
+  if (needsScript !== !!value.script) ctx.addIssue({ code: 'custom', path: ['script'], message: 'Carousel and stories output must include exactly one script candidate' });
   if (value.format === 'INSTAGRAM_STORIES' && value.script?.frames.some(frame => !frame.transition?.trim())) {
-    ctx.addIssue({ code: 'custom', message: 'Every Instagram story frame requires a transition' });
+    ctx.addIssue({ code: 'custom', path: ['script','frames'], message: 'Every Instagram story frame requires a transition' });
   }
 });
 export const telegramWorkflowReleaseSchema = z.object({ endpoint: z.url(), workflowId: z.uuid(), releaseId: safeText(100).min(1),

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { installSourceChannelFixture, passageId, quote, sourceSetId } from './fixtures/source-channel.js';
+import { installSourceChannelFixture, passageId, proposedCaption, quote, sourceSetId } from './fixtures/source-channel.js';
 
 test('an older article approval leaves channel saving available and links directly to article versions', async ({ page }) => {
   await installSourceChannelFixture(page, { oldApproval: true });
@@ -52,21 +52,43 @@ test('factual article-derived generation bypasses only the legacy basis gate and
   const prep = fixture.calls.find(call => call.path.endsWith('/telegram/source-prepare'))?.body;
   expect(prep).toMatchObject({ inputMode: 'ARTICLE_DERIVED', includeLink: true });
   expect(prep?.commandKey).toEqual(expect.any(String));
-  await expect(page.getByText('Пропозиція з доказами готова. Перегляньте її в історії.')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('region', { name: 'Пропозиція тексту' })).toContainText(proposedCaption, { timeout: 10_000 });
   await expect(editor).toHaveValue('Ручна чернетка має лишитися на місці.');
   expect(sourceSetId).toBeTruthy(); expect(passageId).toBeTruthy();
 });
 
 test('pending source generation resumes after reload without another generation request',async ({ page }) => {
-  const fixture = await installSourceChannelFixture(page,{ pending: true });
+  const fixture = await installSourceChannelFixture(page,{ pending: true, emptyDraft: true, refreshFailsOnce: true });
   await page.getByRole('button',{ name: 'Запропонувати текст',exact: true }).click();
   await expect(page.getByRole('button',{ name: 'Скасувати підготовку',exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('button',{ name: 'Скасувати підготовку',exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Історія й походження' }).click();
   expect(fixture.calls.filter(call => call.path.endsWith('/telegram/source-prepare'))).toHaveLength(1);
   fixture.completeRequest();
-  await expect(page.getByText('Пропозиція з доказами готова. Перегляньте її в історії.')).toBeVisible({ timeout: 10000 });
+  const proposal = page.getByRole('region', { name: 'Пропозиція тексту' });
+  await expect(proposal).toContainText(proposedCaption, { timeout: 10_000 });
+  expect(fixture.calls.filter(call => call.path === 'failed-caption-refresh')).toHaveLength(1);
   expect(fixture.calls.filter(call => call.path.endsWith('/telegram/source-prepare'))).toHaveLength(1);
+  const editor = page.getByRole('textbox', { name: 'Текст публікації' });
+  await expect(editor).toHaveValue('');
+  await page.reload();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(proposal).toContainText(proposedCaption);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await proposal.getByRole('button', { name: 'Застосувати до чернетки' }).click();
+  await expect(editor).toHaveValue(proposedCaption);
+  await expect(proposal).toHaveCount(0);
+});
+
+test('a failed source generation shows reusable excerpts without overwriting the channel draft', async ({ page }) => {
+  await installSourceChannelFixture(page, { starter: true });
+  await page.getByRole('button', { name: 'Запропонувати текст', exact: true }).click();
+  const starter = page.getByRole('region', { name: 'Робоча заготовка з джерел' });
+  await expect(starter).toContainText(quote, { timeout: 10_000 });
+  await expect(page.getByRole('textbox', { name: 'Текст публікації' })).toHaveValue('Мій допис має залишитися.');
+  await page.reload();
+  await expect(starter.getByRole('button', { name: 'Скопіювати заготовку' })).toBeVisible();
 });
 
 test('initial generation choices do not autosave an empty channel draft', async ({ page }) => {

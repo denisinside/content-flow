@@ -30,7 +30,8 @@ type RequestInput = Readonly<{ schemaVersion: 'source-writing-request-v1'; comma
   brief: FrozenBrief; context: readonly FrozenContext[]; snapshots: readonly FrozenSnapshot[]; expectedOutlineRevision: number;
   release: unknown; noticeVersion: string; acceptedAt: string }>;
 type StageData = { indexJobIds?: string[]; searchJobId?: string; sourceEvidenceSetId?: string; sourceEvidenceSetHash?: string;
-  writingJobId?: string; outlineRevisionId?: string; articleVersionId?: string; adaptationRevisionId?: string };
+  writingJobId?: string; outlineRevisionId?: string; articleVersionId?: string; adaptationRevisionId?: string;
+  sourceStarter?: { topic: string; excerpts: Array<{ label: string; text: string; truncated: boolean }> } };
 type RequestRow = { id: string; projectId: string; requestedBy: string; commandKey: string; task: string; stage: string;
   inputManifestJson: unknown; inputHash: string; stageDataJson: unknown; revision: number; errorCategory: string | null;
   createdAt: Date; updatedAt: Date; nextCheckAt: Date | null };
@@ -87,6 +88,7 @@ function parseStageData(value: unknown): StageData {
 function requestView(row: RequestRow) {
   const data = parseStageData(row.stageDataJson);
   return { id: row.id, stage: row.stage, errorCategory: row.errorCategory,
+    sourceStarter: data.sourceStarter,
     resultRefs: data.outlineRevisionId ? { outlineRevisionId: data.outlineRevisionId,
       ...(data.sourceEvidenceSetId ? { sourceEvidenceSetId: data.sourceEvidenceSetId } : {}) }
       : data.adaptationRevisionId ? { adaptationRevisionId: data.adaptationRevisionId } : data.articleVersionId ? { articleVersionId: data.articleVersionId,
@@ -365,8 +367,31 @@ export class SourcePreparationService {
         if (typeof id !== 'string') { await this.failCategory(request, 'GENERATION_RESULT_MISSING'); return; }
         await this.updateStage(request, 'SUCCEEDED', { ...data, ...(input.task === 'OUTLINE' ? { outlineRevisionId: id } : { adaptationRevisionId: id }) });
       }
+      else if (job.status === 'FAILED' && job.providerOutcome === 'KNOWN_SUCCEEDED'
+        && ['WRITING_DRAFT_INVALID', 'NEEDS_HUMAN', 'INSUFFICIENT_EVIDENCE'].includes(job.errorCategory ?? '')
+        && data.sourceEvidenceSetId && data.sourceEvidenceSetHash) await this.saveSourceStarter(request, input, data);
       else await this.failCategory(request, job.errorCategory ?? 'WRITING_FAILED');
     }
+  }
+
+  private async saveSourceStarter(request: RequestRow, input: RequestInput, data: StageData) {
+    await this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id"=${request.projectId}::uuid FOR UPDATE`;
+      await this.jobs.assertEffects(tx, request.projectId, request.requestedBy);
+      await this.assertFrozenCurrent(tx, request.projectId, input);
+      const set = await this.grounding.inspectSet(tx, request.projectId, data.sourceEvidenceSetId!, input.brief.id, true);
+      if (set.sha256 !== data.sourceEvidenceSetHash) throw new ConflictException('INPUT_INTEGRITY');
+      const labels = new Map(input.snapshots.map(snapshot => [snapshot.snapshotId, snapshot.label]));
+      const quotes = [...new Map(set.passages.map(passage => [passage.quote, passage])).values()].slice(0, 3);
+      const sourceStarter = { topic: input.brief.topic, excerpts: quotes.map(passage => {
+        const points = Array.from(passage.quote);
+        return { label: labels.get(passage.snapshotId) ?? 'Джерело', text: points.slice(0, 360).join(''), truncated: points.length > 360 };
+      }) };
+      await tx.$executeRaw`UPDATE contextflow."SourceWritingRequest"
+        SET "stage"='FAILED',"errorCategory"='SOURCE_STARTER_READY',"stageDataJson"=${JSON.stringify({ ...data, sourceStarter })}::jsonb,
+          "revision"="revision"+1,"updatedAt"=CURRENT_TIMESTAMP,"nextCheckAt"=NULL
+        WHERE "projectId"=${request.projectId}::uuid AND "id"=${request.id}::uuid AND "revision"=${request.revision} AND "stage"='GENERATING'`;
+    }, { maxWait: 10_000, timeout: 30_000 });
   }
 
   private async enqueueWritingJob(projectId: string, request: RequestRow, input: RequestInput, data: StageData): Promise<Job> {

@@ -94,7 +94,7 @@ describe('controlled Telegram workflow boundary', () => {
     await expect(provider.execute(settings, randomUUID(), input, signal(), async () => {}, async () => {}))
       .rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });
   });
-  it('accepts a reviewed story script and rejects missing, misplaced, or mismatched format output', async () => {
+  it('accepts a reviewed story script, marks a missing script for regeneration and rejects a mismatched format', async () => {
     const settings = telegramWorkflowSettings(env), runId = randomUUID();
     const respond = (candidate: unknown) => new DifyTelegramProvider(async () => sse({ event: 'workflow_finished', workflow_run_id: runId,
       data: { workflow_id: settings.workflowId, status: 'succeeded', outputs: {
@@ -103,7 +103,7 @@ describe('controlled Telegram workflow boundary', () => {
     expect(accepted.output).toEqual(storyOutput);
     const missingScript = { ...storyOutput, script: undefined };
     await expect(respond(missingScript).execute(settings, randomUUID(), storyInput, signal(), async () => {}, async () => {}))
-      .rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });
+      .rejects.toMatchObject({ code: 'INVALID_DRAFT', outcome: 'KNOWN_SUCCEEDED' });
     const misplacedScript = { ...storyOutput, format: 'LINKEDIN_TEXT' };
     await expect(respond(misplacedScript).execute(settings, randomUUID(), storyInput, signal(), async () => {}, async () => {}))
       .rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });

@@ -3,13 +3,15 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
 import { Textarea } from '@/components/ui/textarea'
+import { sourceWritingFailure, type SourceWritingStatus } from '@/source-writing-feedback'
+import SourceWritingStarter from './SourceWritingStarter.vue'
 
 interface BriefRevision { id: string; number: number; contentMode: 'FACTUAL' | 'CREATIVE'; topic: string; audience: string; centralMessage: string; category: string; tone: string; targetLength: number; cta: string; exclusions: string[]; notes: string; style?: { revision: number; tone: string; brandbook: string }; workspaceStyleRevision?: number; contextSnapshots?: unknown; createdAt?: string }
 interface Section { title: string; purpose: string; sourcePassageIds?: string[] }
 interface OutlineRevision { id: string; number: number; briefRevisionId: string; origin: string; status: string; sourceEvidenceSetId?: string | null; sourceEvidenceSealed?: boolean; content: { title: string; sections: Section[] }; createdAt?: string; approvedAt?: string; withdrawnAt?: string }
 interface State { brief: { revision: number; currentRevision: BriefRevision; history: BriefRevision[] } | null; outline: { revision: number; currentRevision: OutlineRevision | null; currentApprovedRevisionId: string | null; revisions: OutlineRevision[] } | null; style: { revision: number; tone: string; brandbook: string; settings: unknown }; articleSelected: boolean }
 interface Job { id: string; operation: string; status: string; retryAllowed: boolean; errorCategory?: string; progressStage: string }
-interface SourceWritingRequest { id: string; stage: 'INDEXING' | 'SEARCHING' | 'READY' | 'GENERATING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'; errorCategory: string | null; resultRefs?: { outlineRevisionId?: string; sourceEvidenceSetId?: string }; revision: number }
+interface SourceWritingRequest extends SourceWritingStatus { stage: 'INDEXING' | 'SEARCHING' | 'READY' | 'GENERATING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'; resultRefs?: { outlineRevisionId?: string; sourceEvidenceSetId?: string }; revision: number }
 interface BriefProposalFields { topic: string; audience: string; centralMessage: string; category: string; tone: string; targetLength: number; cta: string; exclusions: string[]; notes: string }
 interface BriefProposalJob { id: string; status: string; errorCategory?: string | null; retryAllowed?: boolean; progressStage?: string }
 interface BriefProposalSource { snapshotId?: string; label: string; sampled: boolean; sourceBytes: number; excerptBytes: number }
@@ -176,9 +178,9 @@ async function request(path: string, payload?: unknown) {
   }
   return response.json()
 }
-async function load(reset = false): Promise<boolean> {
+async function load(reset = false, quiet = false): Promise<boolean> {
   try { state.value = await request('/editorial') as State; if (!disposed && reset) { populate(); conflict.value = false; error.value = '' }; return true }
-  catch (cause) { if (!disposed) error.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити бриф.'; return false }
+  catch (cause) { if (!disposed && !quiet) error.value = cause instanceof Error ? cause.message : 'Не вдалося відкрити бриф.'; return false }
   finally { if (!disposed) loading.value = false }
 }
 async function mutate(path: string, payload: unknown, kind: 'brief' | 'outline' | 'other' = 'other') {
@@ -374,15 +376,30 @@ async function generate() {
   await loadJobs()
 }
 function acceptSourceRequest(value: SourceWritingRequest) {
+  if (disposed) return
   sourceRequest.value = value
   sourceRequestError.value = ''
-  if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(value.stage)) {
-    clearTimeout(sourceTimer)
-    if (value.stage === 'SUCCEEDED') storageRemove(sourceCommandStorageKey)
-  } else {
+  clearTimeout(sourceTimer)
+  if (sourcePreparationActive.value || value.stage === 'SUCCEEDED' || value.sourceStarter) {
     storageSet(sourceRequestStorageKey, value.id)
-    clearTimeout(sourceTimer)
+  } else storageRemove(sourceRequestStorageKey)
+  if (value.stage === 'SUCCEEDED') {
+    storageRemove(sourceCommandStorageKey)
+    void refreshSourceOutline(value.id)
+  } else if (sourcePreparationActive.value) {
     sourceTimer = setTimeout(() => void pollSourceRequest(), 1800)
+  }
+}
+async function refreshSourceOutline(id: string) {
+  if (disposed || sourceRequest.value?.id !== id) return
+  const loaded = await load(false, true)
+  if (disposed || sourceRequest.value?.id !== id) return
+  if (loaded) {
+    storageRemove(sourceRequestStorageKey)
+    sourceRequestError.value = ''
+  } else {
+    sourceRequestError.value = 'План готовий. Повторно завантажуємо пропозицію…'
+    sourceTimer = setTimeout(() => void refreshSourceOutline(id), 3500)
   }
 }
 async function postSourcePreparation(key: string) {
@@ -392,9 +409,7 @@ async function postSourcePreparation(key: string) {
   try {
     const result = await request('/outline/source-prepare', { commandKey: key }) as { request: SourceWritingRequest }
     storageRemove(sourceCommandStorageKey)
-    storageSet(sourceRequestStorageKey, result.request.id)
     acceptSourceRequest(result.request)
-    if (result.request.stage === 'SUCCEEDED') await load()
   } catch (cause) {
     sourceRequestError.value = cause instanceof Error ? cause.message : 'Не вдалося розпочати підготовку джерел.'
   } finally { if (!disposed) sourceSubmitting.value = false }
@@ -410,13 +425,9 @@ async function pollSourceRequest() {
   if (disposed || !current || !sourcePreparationActive.value) return
   try {
     const result = await request(`/source-writing/${current.id}`) as { request: SourceWritingRequest }
-    acceptSourceRequest(result.request)
-    if (result.request.stage === 'SUCCEEDED') {
-      await load()
-      storageRemove(sourceRequestStorageKey)
-    }
+    if (sourceRequest.value === current) acceptSourceRequest(result.request)
   } catch (cause) {
-    if (!disposed) {
+    if (!disposed && sourceRequest.value === current) {
       sourceRequestError.value = cause instanceof Error ? cause.message : 'Не вдалося оновити підготовку джерел.'
       sourceTimer = setTimeout(() => void pollSourceRequest(), 3500)
     }
@@ -428,8 +439,6 @@ async function resumeSourceRequest() {
     try {
       const result = await request(`/source-writing/${id}`) as { request: SourceWritingRequest }
       acceptSourceRequest(result.request)
-      if (result.request.stage === 'SUCCEEDED') { await load(); storageRemove(sourceRequestStorageKey) }
-      else if (['FAILED', 'CANCELLED'].includes(result.request.stage)) storageRemove(sourceRequestStorageKey)
       return
     } catch (cause) { sourceRequestError.value = cause instanceof Error ? cause.message : 'Не вдалося відновити підготовку джерел.'; return }
   }
@@ -465,7 +474,7 @@ function sourceFailureText(category: string | null) {
   if (category === 'WRITING_FAILED') return 'Не вдалося створити план. Ваші записи й попередні версії залишилися.'
   if (category === 'SEARCH_PACKET_MISSING' || category === 'SEARCH_FAILED') return 'Не вдалося знайти придатні уривки у вибраних джерелах. Перевірте джерела або створіть план вручну.'
   if (category === 'INPUT_TOO_LARGE' || category === 'REQUIRED_EVIDENCE_LIMIT') return 'Поточний контекст завеликий для автоматичного плану. Скоротіть бриф або контекст і повторіть.'
-  return 'Попередні записи залишилися. Перевірте джерела або створіть план вручну.'
+  return sourceWritingFailure(category)
 }
 function passageCountLabel(count: number) {
   const lastTwo = count % 100
@@ -937,10 +946,10 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
           aria-atomic="true"
         >
           <p role="status">
-            {{ sourceStageLabel(sourceRequest.stage) }}
+            {{ sourceRequest.sourceStarter ? 'Є робоча заготовка для плану.' : sourceStageLabel(sourceRequest.stage) }}
           </p>
           <p
-            v-if="sourceRequest.stage === 'FAILED'"
+            v-if="sourceRequest.stage === 'FAILED' && !sourceRequest.sourceStarter"
             class="field-hint"
           >
             {{ sourceFailureText(sourceRequest.errorCategory) }}
@@ -974,6 +983,10 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
             </Button>
           </div>
         </div>
+        <SourceWritingStarter
+          v-if="sourceRequest?.sourceStarter"
+          :starter="sourceRequest.sourceStarter"
+        />
         <p
           v-if="sourceRequestError"
           class="brief-source-error"

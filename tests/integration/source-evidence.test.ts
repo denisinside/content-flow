@@ -648,7 +648,7 @@ describe('source evidence indexing and exact passage retrieval', () => {
     expect(after[0]?.count).toBe(before[0]?.count);
   });
 
-  it('prepares and reviews a factual source-grounded outline without a claim catalogue', { timeout: 90_000 }, async () => {
+  it('prepares and reviews a factual source-grounded outline without a claim catalogue', { timeout: 120_000 }, async () => {
     const p = await health.prisma.project.create({ data: { workspaceId, createdBy: owner.id, topic: 'Synthetic source writing', formats: ['ARTICLE','TELEGRAM_POST'] } });
     projectIds.push(p.id);
     await addSource(owner, 'Atomicity', 'База даних database transaction зберігає атомарність операцій. 😀', p.id);
@@ -666,6 +666,8 @@ describe('source evidence indexing and exact passage retrieval', () => {
     let writingCalls = 0;
     let rejectedSectionJob: string | undefined;
     let rejectFirstSection = false;
+    let rejectedCarouselJob: string | undefined;
+    let rejectedStoriesJob: string | undefined;
     const writer = {
       async execute(_settings: unknown,_jobId: string,input: SourceWritingInput,_signal: AbortSignal,before: () => Promise<void>,record: (id: string) => Promise<void>) {
         await before(); const run = randomUUID(); await record(run); writingCalls++;
@@ -679,6 +681,13 @@ describe('source evidence indexing and exact passage retrieval', () => {
           return { workflowRunId: run, model: 'synthetic-reviewed-writer', output: { schemaVersion: 'source-writing-v1',
             requestId: input.requestId, inputHash: canonicalManifestHash(input), task: input.task, status: 'needs_human', content: null,
             review: { status: 'needs_human', issues: [], reasons: ['Чернетка не пройшла перевірку структури або доказових посилань: CANDIDATE_TASK_FIELDS'], modelCalls: 1 } } };
+        }
+        if (input.task === 'ADAPTATION' && (input.format === 'INSTAGRAM_STORIES' || (input.format === 'LINKEDIN_CAROUSEL' && !rejectedCarouselJob))) {
+          if (input.format === 'LINKEDIN_CAROUSEL') rejectedCarouselJob = _jobId;
+          else rejectedStoriesJob = _jobId;
+          return { workflowRunId: run, model: 'synthetic-reviewed-writer', output: { schemaVersion: 'source-writing-v1',
+            requestId: input.requestId, inputHash: canonicalManifestHash(input), task: input.task, status: 'needs_human', content: null,
+            review: { status: 'needs_human', issues: [], reasons: ['Чернетка не пройшла перевірку структури або доказових посилань: ARRAY_BOUNDS'], modelCalls: 1 } } };
         }
         const assertion = 'База даних зберігає атомарність 😀';
         const content = input.task === 'OUTLINE' ? { title: 'Атомарність', sections: [0,1].map(index => ({ id: randomUUID(),
@@ -838,10 +847,17 @@ describe('source evidence indexing and exact passage retrieval', () => {
       let carouselState = await preparation.get(owner.id,directProject.id,carousel.id);
       for (let step=0;step<14 && !['SUCCEEDED','FAILED'].includes(carouselState.stage);step++) {
         await preparation.pollOnce(new Date(Date.now()+step*30000));
-        for (const child of await health.prisma.job.findMany({ where: { projectId: directProject.id,status: { in: ['QUEUED','RETRY_WAIT'] } } })) await writingWorker.process({ jobId: child.id,ordinal: child.attemptCount+1 });
+        for (const child of await health.prisma.job.findMany({ where: { projectId: directProject.id,status: { in: ['QUEUED','RETRY_WAIT'] } } })) {
+          if (child.status === 'RETRY_WAIT') await new Promise(resolve => setTimeout(resolve, Math.max(0,child.nextAttemptAt.getTime()-Date.now())));
+          await writingWorker.process({ jobId: child.id,ordinal: child.attemptCount+1 });
+        }
         carouselState = await preparation.get(owner.id,directProject.id,carousel.id);
       }
       expect(carouselState).toMatchObject({ stage: 'SUCCEEDED' });
+      expect(await health.prisma.jobAttempt.findMany({ where: { jobId: rejectedCarouselJob! }, orderBy: { ordinal: 'asc' } })).toMatchObject([
+        { ordinal: 1, providerOutcome: 'KNOWN_SUCCEEDED', errorCategory: 'WRITING_DRAFT_INVALID' },
+        { ordinal: 2, providerOutcome: 'KNOWN_SUCCEEDED', errorCategory: null },
+      ]);
       const caption = await health.prisma.adaptationRevision.findFirstOrThrow({ where: { projectId: directProject.id,adaptation: { format: 'LINKEDIN_CAROUSEL' } } });
       let captionState = await telegram.get(owner.id,directProject.id,'LINKEDIN_CAROUSEL');
       await telegram.review(owner.id,directProject.id,caption.id,'apply',{ expectedRevision: captionState.adaptation!.revision,format: 'LINKEDIN_CAROUSEL' });
@@ -873,6 +889,25 @@ describe('source evidence indexing and exact passage retrieval', () => {
       expect((await exports.readiness(member.id,directProject.id)).ready).toBe(true);
       expect(await health.prisma.claim.count({ where: { projectId: directProject.id } })).toBe(0);
       expect(await health.prisma.factualBasisRevision.count({ where: { projectId: directProject.id } })).toBe(0);
+      const storiesProject = await health.prisma.project.create({ data: { workspaceId,createdBy: owner.id,topic: 'Standalone source-based stories',formats: ['INSTAGRAM_STORIES'] } });
+      projectIds.push(storiesProject.id);
+      await addSource(owner,'Standalone source','База даних database transaction зберігає атомарність. 😀',storiesProject.id);
+      await editorial.saveBrief(owner.id,storiesProject.id,{ expectedRevision: 0,contentMode: 'FACTUAL',topic: 'database transaction',audience: '',centralMessage: '',category: '',tone: '',targetLength: 100,cta: '',exclusions: [],notes: '',requiredClaimRevisionIds: [] });
+      const stories = await preparation.prepareAdaptation(owner.id,storiesProject.id,{ commandKey: randomUUID(),format: 'INSTAGRAM_STORIES',expectedRevision: 0 });
+      let storiesState = await preparation.get(owner.id,storiesProject.id,stories.id);
+      for (let step=0;step<14 && !['SUCCEEDED','FAILED'].includes(storiesState.stage);step++) {
+        await preparation.pollOnce(new Date(Date.now()+step*30000));
+        for (const child of await health.prisma.job.findMany({ where: { projectId: storiesProject.id,status: { in: ['QUEUED','RETRY_WAIT'] } } })) {
+          if (child.status === 'RETRY_WAIT') await new Promise(resolve => setTimeout(resolve, Math.max(0,child.nextAttemptAt.getTime()-Date.now())));
+          await writingWorker.process({ jobId: child.id,ordinal: child.attemptCount+1 });
+        }
+        storiesState = await preparation.get(owner.id,storiesProject.id,stories.id);
+      }
+      expect(storiesState).toMatchObject({ stage: 'FAILED', errorCategory: 'SOURCE_STARTER_READY', sourceStarter: {
+        topic: 'database transaction', excerpts: [{ label: 'Standalone source', text: 'База даних database transaction зберігає атомарність. 😀', truncated: false }],
+      } });
+      expect(await health.prisma.jobAttempt.count({ where: { jobId: rejectedStoriesJob! } })).toBe(2);
+      expect(await health.prisma.adaptationRevision.count({ where: { projectId: storiesProject.id } })).toBe(0);
       rejectFirstSection = true;
       const beforePartial = await health.prisma.article.findUniqueOrThrow({ where: { projectId: p.id } });
       const partialRequest = await articlePreparation.prepareArticle(owner.id,p.id,{ commandKey: randomUUID(),expectedRevision: beforePartial.revision });

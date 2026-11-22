@@ -195,6 +195,6 @@ describe('controlled article workflow boundary', () => {
     const settings = articleWorkflowSettings(env), runId = randomUUID();
     const provider = new DifyArticleProvider(async () => Response.json({ id: runId, workflow_id: settings.workflowId, status: 'succeeded',
       outputs: { editorial_report: readyReport, article_json: { ...output, content: { title: 'Тема', document: { type: 'doc', content: [{ type: 'image', attrs: { src: 'https://example.test/private' } }] } } } } }));
-    await expect(provider.resume(settings, runId, signal())).rejects.toMatchObject({ code: 'INCOMPATIBLE_CONTRACT' });
+    await expect(provider.resume(settings, runId, signal())).rejects.toMatchObject({ code: 'INVALID_DRAFT', outcome: 'KNOWN_SUCCEEDED' });
   });
 });

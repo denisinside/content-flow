@@ -181,9 +181,9 @@ export function createSourceWritingJobHandler(deps: { prisma: PrismaClient; edit
         await validateFrozen(tx, job, manifest, deps.factualBasis,deps.articles);
         const output = validateSourceWritingOutput(result.output, manifest.request);
         if (output.status !== 'ready' || !output.content) {
-          if (manifest.task === 'SECTION' && output.status === 'needs_human' && output.review.modelCalls === 1
-            && output.review.reasons.some(reason => /: (?:CANDIDATE_TASK_FIELDS|QUOTE_LOCATOR_NOT_UNIQUE|ASSERTION_LOCATOR_NOT_UNIQUE|ASSERTION_LOCATOR_OVERLAP|MISSING_CITATIONS|SECTION_WORD_BUDGET)$/u.test(reason))) {
-            throw new JobFailure('SECTION_DRAFT_INVALID', 'KNOWN_SUCCEEDED');
+          if (output.status === 'needs_human' && output.review.modelCalls === 1 && output.review.issues.length === 0
+            && output.review.reasons.some(reason => /: (?:ARRAY_BOUNDS|CANDIDATE_TASK_FIELDS|QUOTE_LOCATOR_NOT_UNIQUE|ASSERTION_LOCATOR_NOT_UNIQUE|ASSERTION_LOCATOR_OVERLAP|MISSING_CITATIONS|SECTION_WORD_BUDGET)$/u.test(reason))) {
+            throw new JobFailure(manifest.task === 'SECTION' ? 'SECTION_DRAFT_INVALID' : 'WRITING_DRAFT_INVALID', 'KNOWN_SUCCEEDED');
           }
           throw new JobFailure(output.status === 'insufficient_evidence' ? 'INSUFFICIENT_EVIDENCE' : 'NEEDS_HUMAN', 'KNOWN_SUCCEEDED');
         }

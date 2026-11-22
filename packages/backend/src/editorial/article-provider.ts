@@ -51,7 +51,8 @@ const release: ReleaseArtifact = {
 export type ArticleWorkflowSettings = ArticleWorkflowRelease & { apiKey: string };
 export class ArticleProviderError extends Error {
   constructor(readonly code: 'CONFIG' | 'AUTH' | 'INVALID_INPUT' | 'INCOMPATIBLE_CONTRACT' | 'QUOTA' | 'RATE_LIMIT' | 'TRANSIENT_TRANSPORT'
-    | 'TIMEOUT' | 'UNKNOWN_OUTCOME' | 'PROVIDER_FAILED', message: string, readonly outcome: 'NOT_SUBMITTED' | 'KNOWN_FAILED' | 'UNKNOWN' = 'KNOWN_FAILED') {
+    | 'TIMEOUT' | 'UNKNOWN_OUTCOME' | 'PROVIDER_FAILED' | 'INVALID_DRAFT', message: string,
+    readonly outcome: 'NOT_SUBMITTED' | 'KNOWN_FAILED' | 'KNOWN_SUCCEEDED' | 'UNKNOWN' = 'KNOWN_FAILED') {
     super(message); this.name = 'ArticleProviderError';
   }
 }
@@ -207,7 +208,12 @@ function extractionFromRun(run: DifyRun): ArticleOutput {
   const raw = run.data.outputs?.[release.outputVariable];
   const output = typeof raw === 'string' ? safeJson(raw) : raw;
   const parsed = articleOutputSchema.safeParse(output);
-  if (!parsed.success) throw new ArticleProviderError('INCOMPATIBLE_CONTRACT', 'Article workflow output did not match article-v1');
+  if (!parsed.success) {
+    if (parsed.error.issues.every(issue => issue.path[0] === 'content')) {
+      throw new ArticleProviderError('INVALID_DRAFT', 'Article workflow output did not match article-v1', 'KNOWN_SUCCEEDED');
+    }
+    throw new ArticleProviderError('INCOMPATIBLE_CONTRACT', 'Article workflow output did not match article-v1');
+  }
   return parsed.data;
 }
 

@@ -18,7 +18,7 @@ function fail(error: unknown): never {
   if (error instanceof OutlineProviderError) throw new JobFailure(({ CONFIG: 'CONFIG_CHANGED', AUTH: 'PROVIDER_AUTH',
     INVALID_INPUT: 'INVALID_INPUT', INCOMPATIBLE_CONTRACT: 'INVALID_CONTRACT', QUOTA: 'QUOTA', RATE_LIMIT: 'RATE_LIMIT',
     TRANSIENT_TRANSPORT: 'TRANSIENT_TRANSPORT', TIMEOUT: 'TIMEOUT', UNKNOWN_OUTCOME: 'UNKNOWN_OUTCOME',
-    PROVIDER_FAILED: 'PROVIDER_FAILED' })[error.code], error.outcome);
+    PROVIDER_FAILED: 'PROVIDER_FAILED', INVALID_DRAFT: 'WRITING_DRAFT_INVALID' })[error.code], error.outcome);
   throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
 }
 function manifestFor(job: JobContext['job']) {
