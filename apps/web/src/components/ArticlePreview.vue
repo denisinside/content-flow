@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { defineComponent, h, type VNode } from 'vue'
 import type { JSONContent } from '@tiptap/core'
-const previewProps = defineProps<{ document: JSONContent; activeCitation?: string | null }>()
+const previewProps = defineProps<{ document: JSONContent; activeCitation?: string | null; staticCitations?: boolean }>()
 const emit = defineEmits<{ 'source-citation': [passageId: string, packetId: string, citationId: string] }>()
 const SafeNode = defineComponent({ props: { node: { type: Object, required: true } }, setup(props) {
   function render(node: JSONContent, path = '0'): VNode | string {
     if (node.type === 'text') {
       let result: VNode | string = node.text ?? ''
       for (const mark of node.marks ?? []) {
-        if (mark.type === 'source_evidence') result = h('button',{ type: 'button',class: ['preview-source-evidence', { 'is-active': previewProps.activeCitation === path }],
+        if (mark.type === 'source_evidence' && previewProps.staticCitations) result = h('span', { class: 'preview-evidence', title: mark.attrs?.quote }, [result])
+        else if (mark.type === 'source_evidence') result = h('button',{ type: 'button',class: ['preview-source-evidence', { 'is-active': previewProps.activeCitation === path }],
           'aria-pressed': previewProps.activeCitation === path, 'aria-label': 'Переглянути уривок джерела',title: 'Відкрити доказ у джерелі',
           onClick: () => emit('source-citation',String(mark.attrs?.passageId ?? ''),String(mark.attrs?.packetId ?? ''), path) },[result])
         else { const tag = ({ bold: 'strong',italic: 'em',strike: 's',evidence: 'span' } as Record<string,string>)[mark.type]; if (tag) result = h(tag,mark.type === 'evidence' ? { class: 'preview-evidence' } : {},[result]) }

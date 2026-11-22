@@ -16,7 +16,7 @@ interface Content { title: string; document: JSONContent }
 interface Version { id: string; number: number; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string; status: string; sourceArticleRevision: number; sha256?: string; approvedAt?: string; withdrawnAt?: string; reviewCounter?: number; staleReasons?: string[]; blockingReasons?: string[]; eligible?: boolean; hasUnmapped?: boolean }
 interface Draft { baseVersionId?: string | null; sha256?: string; content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; origin: string }
 interface SourcePassage { passageId: string; packetId: string; snapshotId: string; fragmentId: string; startOffset: number; endOffset: number; quote: string; materialId: string; materialTitle: string }
-interface SourceRequest { id: string; stage: string; errorCategory: string | null; resultRefs?: { articleVersionId?: string } }
+interface SourceRequest { id: string; stage: string; errorCategory: string | null; resultRefs?: { articleVersionId?: string }; partialArticle?: { content: Content; reviewedSectionCount: number } }
 interface State { editorOnly?: boolean; article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleSourcePassages?: SourcePassage[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { id?: string; contentMode: string } | null } | null; outline: { currentApprovedRevisionId: string | null; currentRevision?: { id?: string; briefRevisionId?: string; sourceEvidenceSetId?: string | null } | null } | null } }
 interface LanguageSuggestion { id: string; targetType: 'ARTICLE' | 'ADAPTATION'; sourceRevisionId: string; contentHash: string; locator: { field: 'TITLE' | 'BODY' | 'COVER_TEXT'; start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean; resultVersionId?: string | null }
 interface Job { id: string; status: string; operation: string; retryAllowed: boolean }
@@ -62,6 +62,9 @@ const sourceActive = computed(() => !!sourceRequest.value && !['SUCCEEDED', 'FAI
 const sourceProgress = computed(() => {
   const request = sourceRequest.value
   if (!request) return ''
+  if (request.partialArticle) return request.partialArticle.reviewedSectionCount
+    ? 'Збережено частковий результат. Розділи, які треба дописати, позначено в тексті.'
+    : 'Жоден розділ не пройшов перевірку. Нижче залишився план для ручного написання.'
   if (request.stage === 'FAILED') {
     if (request.errorCategory === 'NO_RELEVANT_SOURCE_EVIDENCE' || request.errorCategory === 'INSUFFICIENT_EVIDENCE') {
       return 'Для одного з розділів бракує доказів. Уточніть план або додайте джерела. Попередній текст збережено.'
@@ -559,7 +562,7 @@ async function poll() {
     if (sourceActive.value && sourceRequest.value) {
       sourceRequest.value = (await request(`/source-writing/${sourceRequest.value.id}`) as { request: SourceRequest }).request
       sourceResultPending = sourceRequest.value.stage === 'SUCCEEDED'
-      if (!sourceActive.value && !sourceResultPending) sessionStorage.removeItem(`${recoveryKey}:source-request`)
+      if (!sourceActive.value && !sourceResultPending && !sourceRequest.value.partialArticle) sessionStorage.removeItem(`${recoveryKey}:source-request`)
     }
     const result = await request('/jobs') as { jobs: Job[] }
     jobs.value = result.jobs.filter(job => job.operation === 'ARTICLE_GENERATION')
@@ -840,6 +843,17 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
           Скасувати підготовку статті
         </Button>
       </p>
+      <details
+        v-if="sourceRequest?.partialArticle"
+        class="article-notice"
+      >
+        <summary>Переглянути частковий результат</summary>
+        <h2>{{ sourceRequest.partialArticle.content.title }}</h2>
+        <ArticlePreview
+          :document="sourceRequest.partialArticle.content.document"
+          :static-citations="true"
+        />
+      </details>
       <div
         v-if="state.article || state.articleSelected"
         class="article-layout"

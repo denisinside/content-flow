@@ -4,6 +4,35 @@ import { installM63Fixture,projectId } from './fixtures/m63-editorial.js';
 const passageId = '19191919-1919-4919-8919-191919191919',packetId = '29292929-2929-4929-8929-292929292929';
 const snapshotId = '39393939-3939-4939-8939-393939393939',materialId = '49494949-4949-4949-8949-494949494949';
 const quote = 'Збережене джерело підтверджує атомарність 😀.';
+test('a partially reviewed article remains available after reload without replacing the draft', async ({ page }) => {
+  await installM63Fixture(page);
+  const base = `/api/v1/projects/${projectId}`;
+  await page.route(`**${base}/article`, route => route.fulfill({ json: {
+    article: null, articleSelected: true, mappingIssues: [], staleReasons: [], hasUnmapped: false,
+    editorial: { brief: { currentRevision: { contentMode: 'FACTUAL' } }, outline: { currentApprovedRevisionId: packetId } },
+  } }));
+  await page.route(`**${base}/article/source-prepare`, route => route.fulfill({ json: {
+    request: { id: 'partial-run', stage: 'GENERATING', errorCategory: null },
+  } }));
+  await page.route(`**${base}/source-writing/partial-run`, route => route.fulfill({ json: {
+    request: { id: 'partial-run', stage: 'FAILED', errorCategory: 'PARTIAL_ARTICLE', partialArticle: {
+      missingSections: ['Обмеження'], reviewedSectionCount: 1, content: { title: 'Тестова стаття', document: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'Перевірений текст.' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Цей розділ потрібно дописати й перевірити.' }] },
+      ] } },
+    } },
+  } }));
+  await page.goto(`/projects/${projectId}/article`);
+  await page.getByRole('button', { name: 'Запропонувати статтю', exact: true }).click();
+  await page.getByText('Переглянути частковий результат', { exact: true }).click();
+  await expect(page.getByText('Перевірений текст.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Текст статті' })).toBeEmpty();
+  await page.reload();
+  await page.getByText('Переглянути частковий результат', { exact: true }).click();
+  await expect(page.getByText('Цей розділ потрібно дописати й перевірити.')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Текст статті' })).toBeEmpty();
+});
+
 for (const staleOnOpen of [true, false]) {
   test(`an outdated factual outline gives a path back to the plan (known on open: ${staleOnOpen})`, async ({ page }) => {
     await installM63Fixture(page);

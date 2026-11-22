@@ -665,9 +665,15 @@ describe('source evidence indexing and exact passage retrieval', () => {
     const preparation = new SourcePreparationService(health.prisma,jobs,evidence,facts,writingEnv);
     let writingCalls = 0;
     let rejectedSectionJob: string | undefined;
+    let rejectFirstSection = false;
     const writer = {
       async execute(_settings: unknown,_jobId: string,input: SourceWritingInput,_signal: AbortSignal,before: () => Promise<void>,record: (id: string) => Promise<void>) {
         await before(); const run = randomUUID(); await record(run); writingCalls++;
+        if (rejectFirstSection && input.task === 'SECTION' && input.section?.title === 'Робота транзакцій 1') {
+          return { workflowRunId: run, model: 'synthetic-reviewed-writer', output: { schemaVersion: 'source-writing-v1',
+            requestId: input.requestId, inputHash: canonicalManifestHash(input), task: input.task, status: 'needs_human', content: null,
+            review: { status: 'needs_human', issues: [], reasons: ['Не розкрито частину призначення розділу.'], modelCalls: 4 } } };
+        }
         if (input.task === 'SECTION' && !rejectedSectionJob) {
           rejectedSectionJob = _jobId;
           return { workflowRunId: run, model: 'synthetic-reviewed-writer', output: { schemaVersion: 'source-writing-v1',
@@ -867,6 +873,22 @@ describe('source evidence indexing and exact passage retrieval', () => {
       expect((await exports.readiness(member.id,directProject.id)).ready).toBe(true);
       expect(await health.prisma.claim.count({ where: { projectId: directProject.id } })).toBe(0);
       expect(await health.prisma.factualBasisRevision.count({ where: { projectId: directProject.id } })).toBe(0);
+      rejectFirstSection = true;
+      const beforePartial = await health.prisma.article.findUniqueOrThrow({ where: { projectId: p.id } });
+      const partialRequest = await articlePreparation.prepareArticle(owner.id,p.id,{ commandKey: randomUUID(),expectedRevision: beforePartial.revision });
+      let partialState = await articlePreparation.get(owner.id,p.id,partialRequest.id);
+      for (let step=0;step<16 && !['SUCCEEDED','FAILED'].includes(partialState.stage);step++) {
+        await new Promise(resolve => setTimeout(resolve, 1600));
+        await articlePreparation.pollOnce();
+        const pending = await health.prisma.job.findMany({ where: { projectId: p.id,status: { in: ['QUEUED','RETRY_WAIT'] } }, orderBy: { createdAt: 'asc' } });
+        for (const child of pending) await writingWorker.process({ jobId: child.id,ordinal: child.attemptCount+1 });
+        partialState = await articlePreparation.get(owner.id,p.id,partialRequest.id);
+      }
+      expect(partialState).toMatchObject({ stage: 'FAILED',errorCategory: 'PARTIAL_ARTICLE',
+        partialArticle: { missingSections: ['Робота транзакцій 1'] } });
+      expect(JSON.stringify(partialState.partialArticle?.content)).toContain('source_evidence');
+      expect(await health.prisma.article.findUnique({ where: { projectId: p.id } })).toEqual(beforePartial);
+      expect(await health.prisma.articleVersion.count({ where: { projectId: p.id } })).toBe(1);
     } finally { await writingWorker.close(); await renderer.onModuleDestroy(); }
   });
 });

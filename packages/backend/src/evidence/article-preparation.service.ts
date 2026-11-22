@@ -35,7 +35,7 @@ type RequestInput = Readonly<{ schemaVersion: 'source-writing-request-v1'; comma
 type SectionStage = FrozenSection & { searchJobId?: string; packetId?: string; writingJobId?: string; writingInputHash?: string;
   output?: unknown; outputHash?: string; executionId?: string };
 type StageData = { indexJobIds?: string[]; sections: SectionStage[]; sourceEvidenceSetId?: string; sourceEvidenceSetHash?: string;
-  articleVersionId?: string };
+  articleVersionId?: string; partialArticle?: { content: ArticleContent; missingSections: string[]; reviewedSectionCount: number } };
 type RequestRow = { id: string; projectId: string; requestedBy: string; commandKey: string; task: string; stage: string;
   inputManifestJson: unknown; inputHash: string; stageDataJson: unknown; revision: number; errorCategory: string | null;
   createdAt: Date; updatedAt: Date; nextCheckAt: Date | null };
@@ -80,6 +80,7 @@ function queryForSection(brief: FrozenBrief, section: FrozenSection): string {
 function requestView(row: RequestRow) {
   const data = parseStageData(row.stageDataJson);
   return { id: row.id, stage: row.stage, errorCategory: row.errorCategory,
+    partialArticle: data.partialArticle,
     resultRefs: data.articleVersionId ? { articleVersionId: data.articleVersionId,
       ...(data.sourceEvidenceSetId ? { sourceEvidenceSetId: data.sourceEvidenceSetId } : {}) }
       : data.sourceEvidenceSetId ? { sourceEvidenceSetId: data.sourceEvidenceSetId } : undefined,
@@ -357,14 +358,16 @@ export class SourceArticlePreparationService {
       const jobs = await this.jobsFor(projectId, data.sections.map(section => section.writingJobId).filter((id): id is string => !!id));
       if (jobs.length !== data.sections.length || data.sections.some(section => !section.writingJobId)) { await this.failCategory(request, 'WRITING_JOB_MISSING'); return; }
       const byId = new Map(jobs.map(job => [job.id, job]));
-      const failed = jobs.find(job => TERMINAL.has(job.status) && job.status !== 'SUCCEEDED');
+      const recoverable = (job: Job) => job.status === 'FAILED' && ['NEEDS_HUMAN', 'SECTION_DRAFT_INVALID', 'INSUFFICIENT_EVIDENCE'].includes(job.errorCategory ?? '');
+      const failed = jobs.find(job => TERMINAL.has(job.status) && job.status !== 'SUCCEEDED' && !recoverable(job));
       if (failed) { await this.failCategory(request, failed.errorCategory ?? 'WRITING_FAILED'); return; }
-      if (jobs.some(job => job.status !== 'SUCCEEDED')) { await this.defer(request); return; }
+      if (jobs.some(job => !TERMINAL.has(job.status))) { await this.defer(request); return; }
       const completed: Array<{ input: SourceWritingInput; output: unknown }> = [];
       const updatedSections: SectionStage[] = [];
       try {
         for (const section of data.sections) {
           const job = byId.get(section.writingJobId!)!;
+          if (recoverable(job)) continue;
           const refs = job.resultRefs as { output?: unknown; outputHash?: unknown; content?: unknown; executionId?: unknown; review?: unknown } | null;
           const manifest = job.inputManifest as { schemaVersion?: unknown; requestId?: unknown; task?: unknown; briefRevisionId?: unknown;
             briefHash?: unknown; workspaceId?: unknown; workspaceStyleRevision?: unknown; expectedRevision?: unknown; outlineRevisionId?: unknown;
@@ -393,6 +396,26 @@ export class SourceArticlePreparationService {
           updatedSections.push({ ...section, output, outputHash: refs.outputHash, executionId: refs.executionId });
         }
       } catch (error) { await this.failCategory(request, error instanceof ConflictException ? error.message : 'SECTION_RESULT_INVALID'); return; }
+      if (completed.length !== data.sections.length) {
+        const bySection = new Map(completed.map(section => [section.input.section!.id, section]));
+        const missingSections = data.sections.filter(section => !bySection.has(section.id)).map(section => section.title);
+        const content: ArticleContent = { title: input.outline.title, document: { type: 'doc', content: data.sections.flatMap(section => {
+          const reviewed = bySection.get(section.id);
+          return reviewed ? assembleSourceArticle(input.outline.title, [reviewed]).document.content ?? [] : [
+            { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: section.title }] },
+            { type: 'paragraph', content: [{ type: 'text', text: 'Цей розділ потрібно дописати й перевірити.' }] },
+          ];
+        }) } };
+        await this.prisma.$transaction(async tx => {
+          await this.$lockCurrent(tx, request.requestedBy, projectId);
+          await this.assertFrozenCurrent(tx, projectId, input);
+          await tx.$executeRaw`UPDATE contextflow."SourceWritingRequest"
+            SET "stage"='FAILED',"errorCategory"='PARTIAL_ARTICLE',"stageDataJson"=${JSON.stringify({ ...data, partialArticle: { content, missingSections, reviewedSectionCount: completed.length } })}::jsonb,
+              "revision"="revision"+1,"updatedAt"=CURRENT_TIMESTAMP,"nextCheckAt"=NULL
+            WHERE "projectId"=${projectId}::uuid AND "id"=${request.id}::uuid AND "revision"=${request.revision} AND "stage"='GENERATING'`;
+        }, { maxWait: 10_000, timeout: 30_000 });
+        return;
+      }
       const content = assembleSourceArticle(input.outline.title, completed);
       await this.appendArticle(projectId, request, input, data, content, updatedSections); return;
     }
