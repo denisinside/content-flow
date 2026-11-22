@@ -527,7 +527,10 @@ describe('source evidence indexing and exact passage retrieval', () => {
 
   it('rechecks workspace access and source inclusion before relevance provider submission', { timeout: 90_000 }, async () => {
     const source = await addSource(owner, 'Relevance access fence', 'Database transaction evidence is frozen only while included.');
-    const indexed = await evidence.index(owner.id, projectId, { commandKey: randomUUID(), snapshotIds: [source.snapshot.id] });
+    await evidence.indexNewSnapshot(owner.id, projectId, source.snapshot.id);
+    await evidence.indexNewSnapshot(owner.id, projectId, source.snapshot.id);
+    const indexed = await evidence.index(owner.id, projectId, { commandKey: source.snapshot.id, snapshotIds: [source.snapshot.id] });
+    expect(indexed.jobs).toHaveLength(1);
     for (const job of indexed.jobs) await processJob(job.id);
     const beforeCalls = relevanceCalls.length;
     await expect(evidence.search(outsider.id, projectId, { commandKey: randomUUID(), snapshotIds: [source.snapshot.id], query: 'database transaction' }))
@@ -661,12 +664,20 @@ describe('source evidence indexing and exact passage retrieval', () => {
       centralMessage: 'Атомарна робота', category: 'Техніка', tone: '', targetLength: 100, cta: '', exclusions: [], notes: '', requiredClaimRevisionIds: [] });
     const preparation = new SourcePreparationService(health.prisma,jobs,evidence,facts,writingEnv);
     let writingCalls = 0;
+    let rejectedSectionJob: string | undefined;
     const writer = {
       async execute(_settings: unknown,_jobId: string,input: SourceWritingInput,_signal: AbortSignal,before: () => Promise<void>,record: (id: string) => Promise<void>) {
         await before(); const run = randomUUID(); await record(run); writingCalls++;
+        if (input.task === 'SECTION' && !rejectedSectionJob) {
+          rejectedSectionJob = _jobId;
+          return { workflowRunId: run, model: 'synthetic-reviewed-writer', output: { schemaVersion: 'source-writing-v1',
+            requestId: input.requestId, inputHash: canonicalManifestHash(input), task: input.task, status: 'needs_human', content: null,
+            review: { status: 'needs_human', issues: [], reasons: ['Чернетка не пройшла перевірку структури або доказових посилань: CANDIDATE_TASK_FIELDS'], modelCalls: 1 } } };
+        }
         const assertion = 'База даних зберігає атомарність 😀';
         const content = input.task === 'OUTLINE' ? { title: 'Атомарність', sections: [0,1].map(index => ({ id: randomUUID(),
-          title: `Робота транзакцій ${index+1}`, purpose: 'Пояснити атомарність', targetWords: 50, passageIds: [input.passages[0]!.id], requiredClaimRevisionIds: [] })) }
+          title: `Робота транзакцій ${index+1}`, purpose: 'Пояснити атомарність. ' + 'transaction example '.repeat(65),
+          targetWords: 50, passageIds: [input.passages[0]!.id], requiredClaimRevisionIds: [] })) }
           : { ...(input.task === 'SECTION' ? { sectionId: input.section!.id } : {}),paragraphs: [{ id: randomUUID(),text: assertion+' слово'.repeat(44),citations: [{ kind: 'source_passage',
             passageId: input.passages[0]!.id,quote: input.passages[0]!.quote,assertionText: assertion }] }] };
         if (input.task === 'ADAPTATION' && input.format?.includes('CAROUSEL') && 'paragraphs' in content) {
@@ -745,7 +756,13 @@ describe('source evidence indexing and exact passage retrieval', () => {
         articleState = await articlePreparation.get(owner.id,p.id,articleRequest.id);
       }
       expect(articleState).toMatchObject({ stage: 'SUCCEEDED',errorCategory: null });
-      expect(writingCalls).toBe(3);
+      expect(writingCalls).toBe(4);
+      const attempts = await health.prisma.jobAttempt.findMany({ where: { jobId: rejectedSectionJob! }, orderBy: { ordinal: 'asc' } });
+      expect(attempts).toMatchObject([
+        { ordinal: 1, providerOutcome: 'KNOWN_SUCCEEDED', errorCategory: 'SECTION_DRAFT_INVALID' },
+        { ordinal: 2, providerOutcome: 'KNOWN_SUCCEEDED', errorCategory: null },
+      ]);
+      expect(attempts[0]?.providerRunId).not.toBe(attempts[1]?.providerRunId);
       const version = await health.prisma.articleVersion.findFirstOrThrow({ where: { projectId: p.id } });
       expect(version).toMatchObject({ sourceEvidenceSealed: true,claimsSealed: true,basisRevisionId: null,approvedAt: null });
       const assembly = await health.prisma.sourceArticleAssembly.findUniqueOrThrow({ where: { articleVersionId: version.id } });

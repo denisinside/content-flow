@@ -38,7 +38,9 @@ export class VisualService {
     if (!rows.length) throw new NotFoundException('Project not found');
   }
   private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = true) {
-    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); });
+    // Visual review also checks the approved channel or script and its source lineage.
+    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); },
+      { maxWait: 5_000, timeout: 30_000 });
   }
   private format(raw: string): VisualFormat {
     if (!isFormat(raw)) throw new BadRequestException('Unsupported visual format');
@@ -94,6 +96,14 @@ export class VisualService {
     if (!script?.currentApprovedRevisionId) return null;
     return this.parent(tx, project, format, kind, script.currentApprovedRevisionId);
   }
+  private async currentParentRevisionId(tx: Prisma.TransactionClient, project: string, format: VisualFormat, kind: ParentKind) {
+    const where = { projectId_format: { projectId: project, format: format as AdaptationFormat } };
+    const select = { currentApprovedRevisionId: true } as const;
+    const owner = kind === 'ADAPTATION'
+      ? await tx.adaptation.findUnique({ where, select })
+      : await tx.script.findUnique({ where, select });
+    return owner?.currentApprovedRevisionId ?? null;
+  }
   private parentFrames(parent: ParentSource) {
     if (parent.kind === 'ADAPTATION') {
       const content = telegramContentSchema.parse(parent.content);
@@ -148,10 +158,14 @@ export class VisualService {
       if (error instanceof ConflictException || error instanceof NotFoundException) return { staleReasons: ['PARENT_CHANGED'], blockingReasons: ['PARENT_UNAVAILABLE'], eligible: false };
       throw error;
     }
+    return this.inspectResolvedParent(tx, project, format, row, parent);
+  }
+  private async inspectResolvedParent(tx: Prisma.TransactionClient, project: string, format: VisualFormat,
+    row: { parentRevisionId: string; parentRevisionHash: string; parentReviewCounter: number }, parent: ParentSource) {
     const staleReasons = [...parent.staleReasons];
     const blockingReasons = [...parent.blockingReasons];
-    const current = await this.currentParent(tx, project, format);
-    if (!current || current.id !== row.parentRevisionId) staleReasons.push('PARENT_CHANGED');
+    const currentId = await this.currentParentRevisionId(tx, project, format, parent.kind);
+    if (currentId !== row.parentRevisionId) staleReasons.push('PARENT_CHANGED');
     if (parent.sha256 !== row.parentRevisionHash || parent.reviewCounter !== row.parentReviewCounter) blockingReasons.push('PARENT_INTEGRITY');
     return { staleReasons: [...new Set(staleReasons)], blockingReasons: [...new Set(blockingReasons)], eligible: parent.eligible && !staleReasons.length && !blockingReasons.length };
   }
@@ -184,7 +198,7 @@ export class VisualService {
       }) : null;
       if (!parent) { staleReasons.push('PARENT_CHANGED'); blockingReasons.push('PARENT_UNAVAILABLE'); }
       else {
-        const parentInspection = await this.inspectParent(tx, project, format!, row);
+        const parentInspection = await this.inspectResolvedParent(tx, project, format!, row, parent);
         staleReasons.push(...parentInspection.staleReasons);
         blockingReasons.push(...parentInspection.blockingReasons);
         if (!parentInspection.eligible) blockingReasons.push('PARENT_NOT_ELIGIBLE');
@@ -234,7 +248,11 @@ export class VisualService {
     const selectedParent = owner?.draft
       ? await this.parent(tx, project, format, owner.draft.parentKind as ParentKind, owner.draft.parentRevisionId, false).catch(() => null)
       : await this.currentParent(tx, project, format);
-    const parent = selectedParent ? { ...selectedParent, ...(owner?.draft ? await this.inspectParent(tx, project, format, owner.draft) : {}) } : null;
+    const draftParentInspection = owner?.draft
+      ? selectedParent ? await this.inspectResolvedParent(tx, project, format, owner.draft, selectedParent)
+        : await this.inspectParent(tx, project, format, owner.draft)
+      : null;
+    const parent = selectedParent ? { ...selectedParent, ...draftParentInspection } : null;
     const revisions = owner ? await tx.visualCompositionRevision.findMany({ where: { projectId: project, compositionId: owner.id }, orderBy: { number: 'desc' }, include: { previews: { include: { asset: { select: { id: true, projectId: true, sha256: true, mediaType: true, state: true } } } } } }) : [];
     return { format, formatSelected: p.formats.includes(format), style: defaults,
       parent,
@@ -242,7 +260,7 @@ export class VisualService {
         draft: owner.draft ? { counter: owner.draft.counter, content: owner.draft.content, sha256: owner.draft.sha256,
           parentKind: owner.draft.parentKind, parentRevisionId: owner.draft.parentRevisionId, parentRevisionHash: owner.draft.parentRevisionHash,
           parentReviewCounter: owner.draft.parentReviewCounter, workspaceStyleRevision: owner.draft.workspaceStyleRevision,
-          hasUnmapped: this.unmapped(compositionSchema.parse(owner.draft.content)), ...(await this.inspectParent(tx, project, format, owner.draft)) } : null,
+          hasUnmapped: this.unmapped(compositionSchema.parse(owner.draft.content)), ...draftParentInspection } : null,
         revisions: await Promise.all(revisions.map(async row => ({ id: row.id, number: row.number, content: row.content, sha256: row.sha256,
           approvedBy: row.approvedBy, approvedAt: row.approvedAt, withdrawnBy: row.withdrawnBy, withdrawnAt: row.withdrawnAt, reviewCounter: row.reviewCounter,
           parentKind: row.parentKind, parentRevisionId: row.parentRevisionId, parentRevisionHash: row.parentRevisionHash,

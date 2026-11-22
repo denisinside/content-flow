@@ -4,6 +4,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBody, ApiConsumes, ApiCookieAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { ServerResponse } from 'node:http';
+import { SourceEvidenceService } from '@contextflow/backend';
 import { SessionGuard, type AuthenticatedRequest } from '../auth/session.guard.js';
 import { SessionService } from '../auth/session-service.js';
 import { cookieValue, SESSION_COOKIE, setCookie } from '../auth/csrf.js';
@@ -32,7 +33,15 @@ function attachmentHeader(filename: string): string {
 @UseGuards(SessionGuard)
 @Controller('api/v1')
 export class SourcesController {
-  constructor(@Inject(SourceService) private readonly sources: SourceService, @Inject(SessionService) private readonly sessions: SessionService) {}
+  constructor(@Inject(SourceService) private readonly sources: SourceService, @Inject(SessionService) private readonly sessions: SessionService,
+    @Inject(SourceEvidenceService) private readonly evidence: SourceEvidenceService) {}
+
+  private indexSnapshot(user: string, project: string, material: { currentSnapshotId: string | null; purpose: string; included: boolean }) {
+    if (process.env['NODE_ENV'] === 'test') return; // TEST can use the shared live provider keys.
+    if (material.currentSnapshotId && material.included && material.purpose === 'FACTUAL_SOURCE') {
+      void this.evidence.indexNewSnapshot(user, project, material.currentSnapshotId);
+    }
+  }
 
   @Get('projects/:projectId/materials')
   @ApiResponse({ status: 200, type: SourcesPageDto })
@@ -49,7 +58,9 @@ export class SourcesController {
   async createText(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Body() body: unknown) {
     const parsed = createTextSourceInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Invalid source input');
-    return this.sources.createText(request.sessionUser.id, id(projectId), parsed.data);
+    const result = await this.sources.createText(request.sessionUser.id, id(projectId), parsed.data);
+    this.indexSnapshot(request.sessionUser.id, projectId, result.material);
+    return result;
   }
 
   @Post('projects/:projectId/materials/upload')
@@ -66,7 +77,9 @@ export class SourcesController {
     if (!parsed.success || !file) throw new BadRequestException('Upload requires a file and purpose');
     const cookie = cookieValue(request, SESSION_COOKIE);
     if (!cookie) throw new UnauthorizedException('Session expired');
-    return this.sources.upload(request.sessionUser.id, id(projectId), cookie, parsed.data, file);
+    const result = await this.sources.upload(request.sessionUser.id, id(projectId), cookie, parsed.data, file);
+    this.indexSnapshot(request.sessionUser.id, projectId, result.material);
+    return result;
   }
 
   @Post('projects/:projectId/materials/url')
@@ -121,7 +134,9 @@ export class SourcesController {
   async update(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Param('materialId') materialId: string, @Body() body: unknown) {
     const parsed = updateMaterialInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Invalid source update');
-    return this.sources.update(request.sessionUser.id, id(projectId), id(materialId), parsed.data);
+    const result = await this.sources.update(request.sessionUser.id, id(projectId), id(materialId), parsed.data);
+    if (parsed.data.included === true || parsed.data.purpose === 'FACTUAL_SOURCE') this.indexSnapshot(request.sessionUser.id, projectId, result.material);
+    return result;
   }
 
   @Post('projects/:projectId/materials/:materialId/snapshots')
@@ -134,7 +149,9 @@ export class SourcesController {
   async appendSnapshot(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Param('materialId') materialId: string, @Body() body: unknown) {
     const parsed = appendSnapshotInput.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Invalid source snapshot');
-    return this.sources.appendText(request.sessionUser.id, id(projectId), id(materialId), parsed.data);
+    const result = await this.sources.appendText(request.sessionUser.id, id(projectId), id(materialId), parsed.data);
+    this.indexSnapshot(request.sessionUser.id, projectId, result.material);
+    return result;
   }
 
   @Get('projects/:projectId/materials/:materialId')

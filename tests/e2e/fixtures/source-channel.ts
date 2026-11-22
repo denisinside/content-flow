@@ -11,22 +11,22 @@ const requestId = 'a0ad3c38-10bc-4d06-8f89-7c24d6448994';
 
 const json = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
 
-export async function installSourceChannelFixture(page: Page, options: { invalidQuote?: boolean; linkedCitation?: boolean; pending?: boolean } = {}) {
+export async function installSourceChannelFixture(page: Page, options: { invalidQuote?: boolean; linkedCitation?: boolean; pending?: boolean; emptyDraft?: boolean; oldApproval?: boolean } = {}) {
   const baseFixture = await installM63Fixture(page, false, false, true);
   const calls: { path: string; body?: Record<string, unknown> }[] = [];
   let polls = 0;
   let complete = options.pending !== true;
   const passage = { passageId, packetId: '9f9f0f69-9d80-4da4-88bb-8ba6ed3fcf28', snapshotId: 'snapshot-1', quote,
     materialId: 'source-1', materialTitle: 'Звіт про мобільність', startOffset, endOffset: startOffset + quote.length };
-  let revision = 1;
-  let savedContent: unknown = { text: options.linkedCitation ? quote : 'Мій допис має залишитися.',mappings: [],sourceMappings: options.linkedCitation ? [{ startOffset: 0,endOffset: quote.length,quote,passageId,packetId: passage.packetId }] : [] };
+  let revision = options.emptyDraft ? 0 : 1;
+  let savedContent: unknown = options.emptyDraft ? null : { text: options.linkedCitation ? quote : 'Мій допис має залишитися.',mappings: [],sourceMappings: options.linkedCitation ? [{ startOffset: 0,endOffset: quote.length,quote,passageId,packetId: passage.packetId }] : [] };
   let savedInputMode = 'ARTICLE_DERIVED',savedIncludeLink = false;
   const state = () => ({ format: 'TELEGRAM_POST',formatSelected: true,telegramSelected: true,
-    adaptation: { id: 'adaptation-1',revision,draft: { content: savedContent,inputMode: savedInputMode,contentMode: 'FACTUAL',includeLink: savedIncludeLink,sourceEvidenceSetId: sourceSetId,baseRevisionId: null },currentApprovedRevisionId: null,revisions: [] },
+    adaptation: savedContent ? { id: 'adaptation-1',revision,draft: { content: savedContent,inputMode: savedInputMode,contentMode: 'FACTUAL',includeLink: savedIncludeLink,sourceEvidenceSetId: sourceSetId,baseRevisionId: null },currentApprovedRevisionId: null,revisions: [] } : null,
     brief: { id: 'brief-1',revision: 1,currentRevision: { id: 'brief-1',contentMode: 'FACTUAL' },history: [] },style: { revision: 3 },
     prerequisites: { blockingReasons: ['MISSING_BASIS'],missingBasis: true,unverified: false },
-    approvedArticle: { id: 'article-version-1',number: 1,sourceEvidenceSetId: sourceSetId,contentMode: 'FACTUAL',title: 'Погоджена стаття',inspection: { eligible: true,staleReasons: [],blockingReasons: [] } },
-    eligibleEvidence: [],eligibleSourcePassages: [passage],staleReasons: [],mappingIssues: [],hasUnmapped: true,blockingReasons: [] });
+    approvedArticle: { id: 'article-version-1',number: 1,sourceEvidenceSetId: sourceSetId,contentMode: 'FACTUAL',title: 'Погоджена стаття',inspection: { eligible: !options.oldApproval,staleReasons: options.oldApproval ? ['BRIEF_CHANGED'] : [],blockingReasons: [] } },
+    eligibleEvidence: [],eligibleSourcePassages: [passage],staleReasons: options.oldApproval ? ['INPUTS_CHANGED', 'BRIEF_CHANGED'] : [],mappingIssues: [],hasUnmapped: true,blockingReasons: [] });
   await page.route(`**${base}/telegram**`, async route => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (path === `${base}/telegram` && request.method() === 'GET') {

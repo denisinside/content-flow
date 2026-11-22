@@ -21,7 +21,7 @@ export type GroundingSet = Readonly<{ id: string; sha256: string; briefRevisionI
 
 type SetRow = { id: string; briefRevisionId: string; sha256: string; manifestJson: unknown; sealed: boolean };
 type PacketRow = { id: string; sha256: string; manifestJson: unknown; status: string };
-type SpanRow = GroundingPassage & { normalizedText: string; actualSnapshotHash: string; materialId: string;
+type SpanRow = GroundingPassage & { normalizedText: string | null; actualSnapshotHash: string;
   purpose: string; included: boolean; currentSnapshotId: string | null; ordinal: number };
 
 /** Internal transaction API. Caller holds Project/Workspace/member locks. No AI approvals. */
@@ -77,12 +77,22 @@ export class SourceGroundingService {
       throw new ConflictException('Source evidence set packet membership changed');
     }
     const rows = await tx.$queryRaw<SpanRow[]>`SELECT s."id"::text,i."packetId"::text,s."snapshotId"::text,s."fragmentId"::text,
-      s."startOffset",s."endOffset",s."quote",s."sha256",s."snapshotSha256",snap."normalizedText",snap."sha256" AS "actualSnapshotHash",
-      m."id"::text AS "materialId",m."purpose"::text,m."included",m."currentSnapshotId"::text,i."ordinal"
+      s."startOffset",s."endOffset",s."quote",s."sha256",s."snapshotSha256",snap."sha256" AS "actualSnapshotHash",
+      CASE WHEN row_number() OVER (PARTITION BY s."snapshotId" ORDER BY i."packetId", i."ordinal") = 1
+        THEN snap."normalizedText" END AS "normalizedText",
+      m."purpose"::text,m."included",m."currentSnapshotId"::text,i."ordinal"
       FROM contextflow."SourceEvidencePacketItem" i JOIN contextflow."SourceEvidenceSpan" s ON s."projectId"=i."projectId" AND s."id"=i."spanId"
       JOIN contextflow."SourceSnapshot" snap ON snap."projectId"=s."projectId" AND snap."id"=s."snapshotId"
       JOIN contextflow."Material" m ON m."projectId"=snap."projectId" AND m."id"=snap."materialId"
       WHERE i."projectId"=${projectId}::uuid AND i."packetId"=ANY(${packetIds}::uuid[]) ORDER BY i."packetId",i."ordinal"`;
+    // Read and hash the body once per snapshot, even when many packets cite it.
+    const snapshotBodies = new Map<string, { text: string; hash: string }>();
+    for (const row of rows) {
+      if (row.normalizedText === null) continue;
+      const hash = sha256Text(row.normalizedText);
+      if (hash !== row.actualSnapshotHash) throw new ConflictException('Source snapshot integrity check failed');
+      snapshotBodies.set(row.snapshotId, { text: row.normalizedText, hash });
+    }
     const snapshots = new Map<string, string>();
     const passages: GroundingPassage[] = [];
     for (const packet of packets) {
@@ -94,8 +104,9 @@ export class SourceGroundingService {
           || entry.startOffset !== members[index]?.startOffset || entry.endOffset !== members[index]?.endOffset
           || entry.sha256 !== members[index]?.sha256)) throw new ConflictException('Evidence packet contains an invalid source membership');
       for (const row of members) {
-        if (row.snapshotSha256 !== row.actualSnapshotHash || sha256Text(row.normalizedText) !== row.actualSnapshotHash
-          || row.normalizedText.slice(row.startOffset, row.endOffset) !== row.quote || sha256Text(row.quote) !== row.sha256
+        const snapshot = snapshotBodies.get(row.snapshotId);
+        if (!snapshot || row.snapshotSha256 !== snapshot.hash
+          || snapshot.text.slice(row.startOffset, row.endOffset) !== row.quote || sha256Text(row.quote) !== row.sha256
           || requireCurrent && (!row.included || row.purpose !== 'FACTUAL_SOURCE' || row.currentSnapshotId !== row.snapshotId)) {
           throw new ConflictException('Source evidence is invalid or the selected source version changed');
         }

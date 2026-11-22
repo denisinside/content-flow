@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Req, Res, ServiceUnavailableException, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Query, Req, Res, ServiceUnavailableException, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { ApiCookieAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { ServerResponse } from 'node:http';
 import { ExportService, createExportInput } from '@contextflow/backend';
@@ -28,8 +28,8 @@ export class ExportController {
 
   @Get()
   @ApiOperation({ summary: 'Show selected output readiness and export history' })
-  list(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string): Promise<Awaited<ReturnType<ExportService['readiness']>>> {
-    return this.exports.readiness(request.sessionUser.id, id(projectId));
+  list(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Query('view') view?: string): Promise<Awaited<ReturnType<ExportService['readiness']>>> {
+    return this.exports.readiness(request.sessionUser.id, id(projectId), view === 'items' || view === 'history' ? view : undefined);
   }
 
   @Post()
@@ -44,14 +44,14 @@ export class ExportController {
   @ApiOperation({ summary: 'Download a current private export after rechecking session, membership, and selected dependencies' })
   async download(@Req() request: AuthenticatedRequest, @Param('projectId') projectId: string, @Param('exportId') exportId: string, @Res() response: ServerResponse) {
     const project = id(projectId), artifact = id(exportId);
-    const file = await this.exports.download(request.sessionUser.id, project, artifact);
-    const session = await this.sessions.check(cookieValue(request, SESSION_COOKIE), false);
-    if (session.kind === 'unavailable') throw new ServiceUnavailableException('Authentication temporarily unavailable');
-    if (session.kind !== 'active' || session.user.id !== request.sessionUser.id) {
-      setCookie(response, SESSION_COOKIE, '', 0);
-      throw new UnauthorizedException('Session expired');
-    }
-    await this.exports.assertDownloadReadable(request.sessionUser.id, project, artifact);
+    const file = await this.exports.download(request.sessionUser.id, project, artifact, async () => {
+      const session = await this.sessions.check(cookieValue(request, SESSION_COOKIE), false);
+      if (session.kind === 'unavailable') throw new ServiceUnavailableException('Authentication temporarily unavailable');
+      if (session.kind !== 'active' || session.user.id !== request.sessionUser.id) {
+        setCookie(response, SESSION_COOKIE, '', 0);
+        throw new UnauthorizedException('Session expired');
+      }
+    });
     response.statusCode = 200;
     response.setHeader('Content-Type', file.contentType);
     response.setHeader('Content-Length', file.bytes.byteLength);

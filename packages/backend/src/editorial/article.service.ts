@@ -42,8 +42,8 @@ export class ArticleService {
       : await tx.$queryRaw<{ id: string }[]>`SELECT p."id" FROM contextflow."Project" p JOIN contextflow."Workspace" w ON w."id"=p."workspaceId" JOIN contextflow."WorkspaceMember" m ON m."workspaceId"=w."id" WHERE p."id"=${project}::uuid AND p."archivedAt" IS NULL AND p."trashedAt" IS NULL AND w."archivedAt" IS NULL AND w."trashedAt" IS NULL AND m."userId"=${user}::uuid AND m."leftAt" IS NULL FOR SHARE OF p,w,m`;
     if (!rows.length) throw new NotFoundException('Project not found');
   }
-  private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = true) {
-    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); });
+  private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = true, options?: { maxWait: number; timeout: number }) {
+    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); }, options);
   }
   private async article(tx: Prisma.TransactionClient, project: string, expected: number, create = true) {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project } });
@@ -146,44 +146,48 @@ export class ArticleService {
         ? await this.passageViews(tx,project,version.sourceEvidenceSetId,version.briefRevisionId) : [] };
     },false);
   }
-  private async state(tx: Prisma.TransactionClient, project: string) {
+  private async state(tx: Prisma.TransactionClient, project: string, editorOnly = false) {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project }, include: { workspace: true } });
-    const article = await tx.article.findUnique({ where: { projectId: project }, include: { draft: true, versions: { include: { claims: true }, orderBy: { number: 'desc' } } } });
-    const brief = await tx.brief.findUnique({ where: { projectId: project }, include: { currentRevision: { include: briefInclude }, revisions: { include: briefInclude, orderBy: { number: 'desc' } } } });
-    const outline = await tx.outline.findUnique({ where: { projectId: project }, include: { currentRevision: true, revisions: { orderBy: { number: 'desc' } } } });
-    const style = await tx.workspaceStyleRevision.findUniqueOrThrow({ where: { workspaceId_revision: { workspaceId: p.workspaceId, revision: p.workspace.styleRevision } } });
+    const article = await tx.article.findUnique({ where: { projectId: project }, include: { draft: true,
+      versions: { include: { claims: !editorOnly }, orderBy: { number: 'desc' },
+        ...(editorOnly ? { where: { OR: [{ approvedAt: null, withdrawnAt: null }, { approvedFor: { some: {} } }, { draftBases: { some: {} } }] } } : {}) } } });
+    const brief = await tx.brief.findUnique({ where: { projectId: project }, include: { currentRevision: { include: briefInclude }, revisions: editorOnly ? false : { include: briefInclude, orderBy: { number: 'desc' } } } });
+    const outline = await tx.outline.findUnique({ where: { projectId: project }, include: { currentRevision: true, revisions: editorOnly ? false : { orderBy: { number: 'desc' } } } });
+    const style = editorOnly ? null : await tx.workspaceStyleRevision.findUniqueOrThrow({ where: { workspaceId_revision: { workspaceId: p.workspaceId, revision: p.workspace.styleRevision } } });
     const mode = article?.draft?.contentMode ?? brief?.currentRevision?.contentMode ?? 'CREATIVE';
     const prerequisites = { sourceEvidenceRequired: mode === 'FACTUAL' };
-    const detail = article?.draft ? await this.mappings(tx, project, articleContentSchema.parse(article.draft.content), article.draft) : null;
-    const staleReasons = article?.draft ? await this.stale(tx, project, article.draft) : [];
+    const detail = !editorOnly && article?.draft ? await this.mappings(tx, project, articleContentSchema.parse(article.draft.content), article.draft) : null;
+    const staleReasons = !editorOnly && article?.draft ? await this.stale(tx, project, article.draft) : [];
     const versions = [];
-    for (const version of article?.versions ?? []) versions.push({ ...json(version), ...await this.inspectVersion(tx, project, version), status: version.withdrawnAt ? 'WITHDRAWN' : version.approvedAt ? 'APPROVED' : 'PROPOSED' });
+    for (const version of article?.versions ?? []) versions.push({ ...json(version), ...(!editorOnly ? await this.inspectVersion(tx, project, version) : {}), status: version.withdrawnAt ? 'WITHDRAWN' : version.approvedAt ? 'APPROVED' : 'PROPOSED' });
     const selectedSource = article?.draft?.sourceEvidenceSetId ? article.draft : article?.versions.find(row => row.sourceEvidenceSetId) ?? outline?.currentRevision;
-    const eligibleSourcePassages = selectedSource?.sourceEvidenceSetId && selectedSource.briefRevisionId
+    const eligibleSourcePassages = !editorOnly && selectedSource?.sourceEvidenceSetId && selectedSource.briefRevisionId
       ? await this.passageViews(tx,project,selectedSource.sourceEvidenceSetId,selectedSource.briefRevisionId) : [];
-    return { article: article ? { id: article.id, revision: article.revision, draft: json(article.draft), currentApprovedVersionId: article.currentApprovedVersionId,
+    return { editorOnly, article: article ? { id: article.id, revision: article.revision, draft: json(article.draft), currentApprovedVersionId: article.currentApprovedVersionId,
       versions } : null,
-      articleSelected: p.formats.includes('ARTICLE'), editorial: { brief: brief ? { id: brief.id, revision: brief.revision, currentRevision: json(brief.currentRevision), history: json(brief.revisions) } : null,
-        outline: outline ? { ...json(outline), revisions: outline.revisions.map(row => ({ ...json(row), status: row.withdrawnAt ? 'WITHDRAWN' : row.approvedAt ? 'APPROVED' : 'PROPOSED' })) } : null, style: json(style), prerequisites, articleSelected: p.formats.includes('ARTICLE') },
+      articleSelected: p.formats.includes('ARTICLE'), editorial: { brief: brief ? { id: brief.id, revision: brief.revision, currentRevision: json(brief.currentRevision), history: json(brief.revisions ?? []) } : null,
+        outline: outline ? { ...json(outline), revisions: (outline.revisions ?? []).map(row => ({ ...json(row), status: row.withdrawnAt ? 'WITHDRAWN' : row.approvedAt ? 'APPROVED' : 'PROPOSED' })) } : null, style: json(style), prerequisites, articleSelected: p.formats.includes('ARTICLE') },
       eligibleEvidence: [],
       eligibleSourcePassages,
       mappingIssues: detail?.issues ?? [], hasUnmapped: detail?.hasUnmapped ?? false, staleReasons };
   }
-  get(user: string, project: string) { return this.command(user, project, tx => this.state(tx, project), false); }
+  get(user: string, project: string, editorOnly = false) {
+    return this.command(user, project, tx => this.state(tx, project, editorOnly), false, { maxWait: 5_000, timeout: 30_000 });
+  }
   private async writeDraft(tx: Prisma.TransactionClient, articleId: string, project: string, user: string, content: ArticleContent, inputs: Inputs, baseVersionId: string | null) {
     await this.mappings(tx, project, content, inputs, true);
     const data = { ...inputData(inputs), content: json(content), plainText: articleDocumentDetails(content).plainText, sha256: canonicalManifestHash(content), baseVersionId, updatedBy: user, updatedAt: new Date() };
     await tx.articleDraft.upsert({ where: { articleId }, create: { articleId, projectId: project, ...data }, update: data });
     await tx.article.update({ where: { id: articleId }, data: { revision: { increment: 1 } } });
   }
-  saveDraft(user: string, project: string, input: z.infer<typeof saveArticleDraftInput>) {
+  saveDraft(user: string, project: string, input: z.infer<typeof saveArticleDraftInput>, editorOnly = false) {
     return this.command(user, project, async tx => {
       const article = await this.article(tx, project, input.expectedRevision);
       const inputs = inputData(!input.refreshInputs && article.draft?.contentMode === input.contentMode ? article.draft : await this.currentInputs(tx, project, input.contentMode, article.draft?.origin === 'UNVERIFIED_IMPORTED' ? 'UNVERIFIED_IMPORTED' : 'MANUAL', article.draft?.sourceSnapshotId ?? null));
       if (inputs.origin === 'AI' && article.draft?.sha256 !== canonicalManifestHash(input.content)) inputs.origin = 'MANUAL';
       await this.writeDraft(tx, article.id, project, user, articleContentSchema.parse(input.content), inputs, article.draft?.baseVersionId ?? null);
-      return this.state(tx, project);
-    });
+      return this.state(tx, project, editorOnly);
+    }, true, { maxWait: 5_000, timeout: 30_000 });
   }
   importArticle(user: string, project: string, input: z.infer<typeof importArticleInput>) {
     return this.command(user, project, async tx => {
@@ -331,12 +335,12 @@ export class ArticleService {
     const version = await this.append(tx, project, article.id, user, imported, candidateInputs, frozen.expectedArticleRevision);
     return version.id;
   }
-  checkpoint(user: string, project: string, input: { expectedRevision: number }) {
+  checkpoint(user: string, project: string, input: { expectedRevision: number }, editorOnly = false) {
     return this.command(user, project, async tx => {
       const article = await this.article(tx, project, input.expectedRevision, false), draft = article.draft;
       if (!draft) throw new ConflictException('Save the article draft first');
       const base = draft.baseVersionId ? await tx.articleVersion.findUnique({ where: { id: draft.baseVersionId } }) : null;
-      if (base && !base.withdrawnAt && base.sha256 === draft.sha256 && this.sameInputs(base, draft)) return this.state(tx, project);
+      if (base && !base.withdrawnAt && base.sha256 === draft.sha256 && this.sameInputs(base, draft)) return this.state(tx, project, editorOnly);
       const inputs = inputData(draft);
       // Reusing an intact AI checkpoint above retains its invocation. Creating a
       // replacement after terminal withdrawal is a new human editorial version.
@@ -344,8 +348,8 @@ export class ArticleService {
       const version = await this.append(tx, project, article.id, user, articleContentSchema.parse(draft.content), inputs, article.revision);
       await tx.articleDraft.update({ where: { articleId: article.id }, data: { baseVersionId: version.id, origin: inputs.origin, updatedBy: user, updatedAt: new Date() } });
       await tx.article.update({ where: { id: article.id }, data: { revision: { increment: 1 } } });
-      return this.state(tx, project);
-    });
+      return this.state(tx, project, editorOnly);
+    }, true, { maxWait: 5_000, timeout: 30_000 });
   }
   private sameInputs(a: Inputs, b: Inputs) { return ['briefRevisionId', 'basisRevisionId', 'sourceEvidenceSetId', 'outlineRevisionId', 'workspaceId', 'workspaceStyleRevision', 'sourceSnapshotId', 'contentMode', 'origin'].every(key => a[key as keyof Inputs] === b[key as keyof Inputs]); }
   // Caller holds the authorized Project lock. Receipt freshness and factual
@@ -462,7 +466,7 @@ export class ArticleService {
         await tx.article.update({ where: { id: article.id }, data: { currentApprovedVersionId: versionId, revision: { increment: 1 } } });
       }
       return this.state(tx, project);
-    });
+    }, true, { maxWait: 10_000, timeout: 30_000 });
   }
   freezeArticle(user: string, project: string, commandKey: string, expectedRevision: number, releaseInput: ArticleWorkflowRelease) {
     const release = articleWorkflowReleaseSchema.parse(releaseInput);

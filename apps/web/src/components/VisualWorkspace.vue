@@ -16,7 +16,7 @@ interface Draft { counter: number; content: VisualComposition; sha256: string; p
 interface State { format: Format; formatSelected: boolean; style: { revision: number; revisionId: string; defaults: { background: string; text: string; accent: string; font: VisualTextLayer['font']; logo: ImageRef | null } }; parent: Parent | null; composition: { id: string; revision: number; currentApprovedRevisionId?: string | null; draft: Draft | null; revisions: Revision[] } | null }
 interface Props { projectId: string; workspaceId: string; userId: string; csrfToken: string; format: Format; formats: Format[]; archived?: boolean }
 const props = defineProps<Props>()
-const emit = defineEmits<{ 'session-expired': []; dirty: [value: boolean]; 'format-change': [value: Format] }>()
+const emit = defineEmits<{ 'session-expired': []; dirty: [value: boolean]; 'format-change': [value: Format]; 'open-source': [] }>()
 
 const state = ref<State | null>(null)
 const composition = ref<VisualComposition | null>(null)
@@ -78,7 +78,12 @@ const canRefreshParent = computed(() => {
 })
 const selectedLayer = computed(() => frame.value?.layers.find(layer => layer.id === selectedLayerId.value) ?? null)
 const selectedText = computed(() => selectedLayer.value?.type === 'text' ? selectedLayer.value : null)
-const compositionStatus = computed(() => state.value?.composition?.draft ? 'Чернетка' : state.value?.composition ? `Версія ${state.value.composition.revision}` : 'Ще не створено')
+const compositionStatus = computed(() => {
+  if (approvedAndClean.value) return latestRevision.value?.eligible && state.value?.parent?.eligible
+    ? `Погоджено · версія ${latestRevision.value.number}`
+    : `Версія ${latestRevision.value?.number} · потребує перегляду`
+  return state.value?.composition?.draft ? 'Чернетка' : state.value?.composition ? `Версія ${state.value.composition.revision}` : 'Ще не створено'
+})
 const canvasStyle = computed(() => composition.value ? { aspectRatio: `1080 / ${composition.value.height}` } : {})
 
 function serializeDraft() { return composition.value ? JSON.stringify({ composition: composition.value, workspaceStyleRevision: appliedStyleRevision.value }) : '' }
@@ -487,6 +492,15 @@ async function preparePreviewsAndApprove() {
       if (!checkCurrent()) throw new Error('Композиція змінилася під час перевірки. Ваші правки збережені; запустіть підготовку ще раз.')
     }
     if (!checkCurrent()) throw new Error('Композиція змінилася під час перевірки. Ваші правки збережені; запустіть підготовку ще раз.')
+    if (frameIds.some(frameId => !revision.previews?.some(preview => preview.frameId === frameId))) {
+      const refreshed = await request() as State
+      const refreshedOwner = refreshed.composition
+      if (!checkCurrent() || refreshedOwner?.id !== owner.id || refreshedOwner.revision !== owner.revision
+        || refreshedOwner.draft?.sha256 !== revision.sha256 || refreshedOwner.revisions[0]?.id !== revision.id) {
+        throw new Error('Композиція змінилася під час перевірки. Ваші правки збережені; запустіть підготовку ще раз.')
+      }
+      state.value = refreshed
+    }
     const current = latestRevision.value
     const parent = state.value?.parent
     if (!current || current.id !== revision.id || current.eligible !== true || !parent?.eligible
@@ -719,11 +733,19 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(autosave); controller.abor
         Створити візуал
       </button>
       <p
-        v-if="state?.parent && !state.parent.eligible"
+        v-if="state && !state.parent?.eligible"
         class="visual-error"
       >
-        Погоджене джерело застаріло або потребує перевірки. Оновіть його перед створенням візуалу.
+        Спочатку погодьте актуальний текст або сценарій у вкладці «Канали».
       </p>
+      <Button
+        v-if="state && !state.parent?.eligible"
+        class="workspace-button"
+        variant="outline"
+        @click="emit('open-source')"
+      >
+        Відкрити матеріал у каналах
+      </Button>
       <p class="visual-boundary">
         Погодження й експорт відкриються після підготовки візуалу.
       </p>
@@ -1003,7 +1025,20 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(autosave); controller.abor
         Погодження візуалу
       </h2>
       <p v-if="state.composition.currentApprovedRevisionId">
-        Погоджена версія: {{ state.composition.revisions.find(item => item.id === state?.composition?.currentApprovedRevisionId)?.number ?? '—' }}. Будь-яка нова зміна потребує окремого погодження.
+        {{ state.parent?.eligible ? 'Погоджена версія' : 'Раніше погоджена версія' }} · {{ state.composition.revisions.find(item => item.id === state?.composition?.currentApprovedRevisionId)?.number ?? '—' }}.
+      </p>
+      <p
+        v-if="state && !state.parent?.eligible"
+        role="status"
+      >
+        Для експорту візуалу потрібен актуальний погоджений текст або сценарій.
+        <Button
+          variant="outline"
+          class="workspace-button"
+          @click="emit('open-source')"
+        >
+          Відкрити матеріал у каналах
+        </Button>
       </p>
       <p v-else>
         Погодження зберігається окремо від сценарію чи обкладинки й стосується лише цієї контрольної версії.

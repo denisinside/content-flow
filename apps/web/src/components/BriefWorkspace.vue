@@ -52,7 +52,8 @@ const dirty = computed(() => JSON.stringify(form) !== baseline.value)
 const outlineDirty = computed(() => JSON.stringify(outline) !== outlineBaseline.value)
 const valid = computed(() => form.topic.trim() && Number.isInteger(Number(form.targetLength)) && Number(form.targetLength) >= 50 && Number(form.targetLength) <= 20000)
 const currentOutline = computed(() => state.value?.outline?.currentRevision)
-const candidates = computed(() => state.value?.outline?.revisions.filter(item => item.origin === 'AI' && item.id !== currentOutline.value?.id && item.status === 'PROPOSED') ?? [])
+const candidates = computed(() => state.value?.outline?.revisions.filter(item => item.origin === 'AI' && item.id !== currentOutline.value?.id
+  && item.status === 'PROPOSED' && item.briefRevisionId === state.value?.brief?.currentRevision.id) ?? [])
 const activeJob = computed(() => jobs.value.some(job => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(job.status)))
 const briefProposalActive = computed(() => !!briefProposalResponse.value && ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(briefProposalResponse.value.job.status))
 const briefProposalFieldsChanged = computed(() => {
@@ -61,6 +62,7 @@ const briefProposalFieldsChanged = computed(() => {
 })
 const styleChanged = computed(() => !!state.value?.brief?.currentRevision.workspaceStyleRevision && state.value.brief.currentRevision.workspaceStyleRevision !== state.value.style.revision)
 const outdatedOutline = computed(() => !!currentOutline.value && currentOutline.value.briefRevisionId !== state.value?.brief?.currentRevision.id)
+const needsSourceOutline = computed(() => outdatedOutline.value && (form.contentMode === 'FACTUAL' || !!currentOutline.value?.sourceEvidenceSetId))
 const remoteBriefChanged = computed(() => loadedBriefId.value !== (state.value?.brief?.currentRevision.id ?? null))
 const remoteOutlineChanged = computed(() => loadedOutlineId.value !== (currentOutline.value?.id ?? null))
 const generationBlocked = computed(() => !state.value?.brief || dirty.value || styleChanged.value || remoteBriefChanged.value)
@@ -141,8 +143,19 @@ async function request(path: string, payload?: unknown) {
       } catch { /* Fall back to a general conflict message if the server body is not JSON. */ }
       if (proposalCode === 'BRIEF_CHANGED') conflict.value = true
     }
+    if (response.status === 409 && path.startsWith('/outline/')) {
+      const problem = await response.json().catch(() => null) as { message?: unknown } | null
+      if (problem?.message === 'Outline changed; retain your text and reload'
+        || problem?.message === 'Outline changed; reload before review') {
+        conflict.value = true
+        throw new Error('На сервері з’явилася новіша версія плану. Ваші правки ще у формі.')
+      }
+      if (problem?.message === 'Source evidence set does not match its captured brief and hash'
+        || problem?.message === 'Outline requires the latest brief revision') throw new Error('Підготуйте новий план для поточного брифу. Збережений план залишився в історії.')
+      throw new Error('Не вдалося виконати дію з планом. Перевірте бриф і джерела проєкту.')
+    }
     if (response.status === 409 && path !== '/brief/proposals') conflict.value = true
-    if (response.status === 503 && path === '/outline/generate') throw new Error('AI-генерація ще не налаштована. Створіть структуру вручну.')
+    if (response.status === 503 && path === '/outline/generate') throw new Error('AI-генерація ще не налаштована. Створіть план вручну.')
     if (response.status === 503 && path === '/outline/source-prepare') throw new Error('Генерацію з джерел ще не налаштовано. Збережіть план вручну або зверніться до адміністратора.')
     if (response.status === 503 && path === '/brief/proposals') throw new Error('AI-пропозицію брифу ще не налаштовано. Збережіть бриф вручну або зверніться до адміністратора.')
     if (response.status === 403 && path === '/brief/proposals') throw new Error('Перевірте доступ до проєкту й згоду на зовнішню обробку даних.')
@@ -176,7 +189,7 @@ async function mutate(path: string, payload: unknown, kind: 'brief' | 'outline' 
     if (disposed) return
     await load()
     if (kind === 'brief') { const draft = JSON.parse(JSON.stringify(outline)) as typeof outline; const previousBaseline = outlineBaseline.value; const previousExpectedRevision = outlineExpectedRevision.value; const previousOutlineId = loadedOutlineId.value; const keepOutline = outlineDirty.value; populate(); if (keepOutline) { Object.assign(outline, draft); outlineBaseline.value = previousBaseline; outlineExpectedRevision.value = previousExpectedRevision; loadedOutlineId.value = previousOutlineId } if (briefProposalSession.value?.applied) { writeBriefProposalSession(null); briefProposalResponse.value = null } saved.value = 'Бриф збережено' }
-    if (kind === 'outline') { populateOutline(); saved.value = 'Структуру збережено' }
+    if (kind === 'outline') { populateOutline(); saved.value = 'План збережено' }
     if (path.includes('/outline/') && kind === 'other') outlineExpectedRevision.value = state.value?.outline?.revision ?? outlineExpectedRevision.value
     conflict.value = false
   } catch (cause) { if (!disposed) error.value = cause instanceof Error ? cause.message : 'Не вдалося зберегти.' }
@@ -305,6 +318,15 @@ async function retryBriefProposalJob() {
   } catch (cause) { briefProposalError.value = cause instanceof Error ? cause.message : 'Не вдалося повторити пропозицію.' }
   finally { if (!disposed) briefProposalSubmitting.value = false }
 }
+function fillBriefStarter() {
+  const topic = form.topic.trim() || props.projectTopic
+  form.topic = topic
+  form.audience ||= 'Читачі, які хочуть розібратися в темі'
+  form.centralMessage ||= `Пояснити головне про тему «${topic}» та показати, що з цього випливає для читача.`.slice(0, 2000)
+  form.tone ||= 'Зрозумілий і предметний'
+  form.category ||= 'Пояснювальний матеріал'
+}
+
 async function applyBriefProposal() {
   const session = briefProposalSession.value
   if (!session?.jobId || form.contentMode !== session.submitted.contentMode) {
@@ -342,7 +364,7 @@ async function applyBriefProposal() {
     if (!disposed) briefProposalError.value = cause instanceof Error ? cause.message : 'Не вдалося перевірити пропозицію брифу.'
   } finally { if (!disposed) briefProposalApplying.value = false }
 }
-function saveOutline() { return mutate('/outline/manual', { expectedRevision: outlineExpectedRevision.value, briefRevisionId: state.value?.brief?.currentRevision.id,
+function saveOutline() { if (needsSourceOutline.value) return; return mutate('/outline/manual', { expectedRevision: outlineExpectedRevision.value, briefRevisionId: state.value?.brief?.currentRevision.id,
   ...(currentOutline.value?.sourceEvidenceSetId ? { sourceEvidenceSetId: currentOutline.value.sourceEvidenceSetId } : {}), content: { ...JSON.parse(JSON.stringify(outline)), sections: outline.sections.map(section => ({ ...section, claimRevisionIds: [] })) } }, 'outline') }
 async function generate() {
   if (form.contentMode === 'FACTUAL') { await prepareSourceOutline(); return }
@@ -467,7 +489,7 @@ async function loadJobs() {
   } catch { if (!disposed) jobError.value = 'Не вдалося оновити стан генерації.' }
   finally { if (!disposed) timer = setTimeout(() => void loadJobs(), activeJob.value ? 2000 : 5000) }
 }
-function jobLabel(job: Job) { return ({ QUEUED: 'Очікує обробки', RUNNING: 'Створюємо структуру', RETRY_WAIT: 'Очікує повторної спроби', SUCCEEDED: 'Пропозиція готова', FAILED: 'Не вдалося створити структуру', CANCELLED: 'Генерацію скасовано', OUTCOME_UNKNOWN: 'Результат зовнішньої обробки невідомий' } as Record<string, string>)[job.status] ?? 'Обробка' }
+function jobLabel(job: Job) { return ({ QUEUED: 'Очікує обробки', RUNNING: 'Створюємо план', RETRY_WAIT: 'Очікує повторної спроби', SUCCEEDED: 'Пропозиція готова', FAILED: 'Не вдалося створити план', CANCELLED: 'Генерацію скасовано', OUTCOME_UNKNOWN: 'Результат зовнішньої обробки невідомий' } as Record<string, string>)[job.status] ?? 'Обробка' }
 function onFocus() {
   if (sourcePreparationActive.value || storageGet(sourceCommandStorageKey)) void refreshSourcePreparation()
   if (briefProposalSession.value?.jobId) void refreshBriefProposal()
@@ -679,13 +701,21 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
               <span>Перегляньте й відредагуйте поля, потім натисніть «Зберегти бриф».</span>
             </div>
           </template>
-          <p
+          <div
             v-else
-            class="brief-proposal-error"
+            class="brief-review"
             role="status"
           >
-            Для цієї теми бракує даних, щоб запропонувати всі поля брифу. Додайте контекст у джерела й спробуйте ще раз.
-          </p>
+            <p>AI не запропонував повного брифу. Можна заповнити порожні поля шаблоном за темою й уточнити їх вручну.</p>
+            <Button
+              variant="outline"
+              class="workspace-button"
+              :disabled="busy || archived"
+              @click="fillBriefStarter"
+            >
+              Заповнити порожні поля
+            </Button>
+          </div>
         </template>
       </section>
       <p
@@ -707,7 +737,7 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
         class="brief-review"
         role="status"
       >
-        Стиль простору змінився. Збережіть нову версію брифу перед роботою зі структурою.
+        Стиль простору змінився. Збережіть нову версію брифу перед роботою з планом.
       </p>
       <div class="brief-layout">
         <form
@@ -889,9 +919,16 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
             :disabled="busy || sourceSubmitting || archived || generationBlocked || activeJob || sourcePreparationActive"
             @click="generate"
           >
-            {{ sourceSubmitting || sourcePreparationActive ? 'Готуємо план…' : form.contentMode === 'FACTUAL' ? 'Створити план із джерел' : 'Запропонувати структуру' }}
+            {{ sourceSubmitting || sourcePreparationActive ? 'Готуємо план…' : form.contentMode === 'FACTUAL' ? needsSourceOutline ? 'Оновити план із джерел' : 'Створити план із джерел' : 'Запропонувати план' }}
           </Button>
         </div>
+        <p
+          v-if="needsSourceOutline"
+          class="brief-review"
+          role="status"
+        >
+          Бриф змінився. Підготуйте план для нового брифу, потім застосуйте й схваліть його. Попередній план доступний в історії.
+        </p>
         <div
           v-if="sourceRequest"
           class="brief-source-progress"
@@ -957,7 +994,7 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
           v-if="!state.brief || dirty"
           class="field-hint"
         >
-          Збережіть бриф, щоб працювати зі структурою.
+          Збережіть бриф, щоб працювати з планом.
         </p>
         <p
           v-if="jobError"
@@ -981,7 +1018,7 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
             v-if="['FAILED', 'OUTCOME_UNKNOWN'].includes(job.status)"
             class="field-hint"
           >
-            Попередня робота збережена. Можна відредагувати структуру вручну. <template v-if="job.status === 'OUTCOME_UNKNOWN'">
+            Попередня робота збережена. Можна відредагувати план вручну. <template v-if="job.status === 'OUTCOME_UNKNOWN'">
               Пізній результат не буде застосовано. Новий запуск може спричинити повторну оплату.
             </template>
           </p><Button
@@ -1027,15 +1064,15 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
           </ol><Button
             class="workspace-button"
             variant="outline"
-            :disabled="busy || archived || dirty || outlineDirty || remoteOutlineChanged || remoteBriefChanged"
+            :disabled="busy || archived || dirty || (outlineDirty && !needsSourceOutline) || remoteOutlineChanged || remoteBriefChanged"
             @click="mutate(`/outline/${candidate.id}/apply`, { expectedRevision: state.outline?.revision ?? 0 }, 'outline')"
           >
-            Застосувати структуру
+            {{ outlineDirty && needsSourceOutline ? 'Замінити ручні правки новим планом' : 'Застосувати план' }}
           </Button><p
-            v-if="outlineDirty"
+            v-if="outlineDirty && !needsSourceOutline"
             class="field-hint"
           >
-            Спочатку збережіть ручні зміни структури.
+            Спочатку збережіть ручні зміни плану.
           </p>
         </details>
         <h3
@@ -1062,7 +1099,7 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
           </li>
         </ol>
         <details
-          v-if="state.brief"
+          v-if="state.brief && (!needsSourceOutline || outlineDirty)"
           class="outline-edit"
           :open="!currentOutline || outlineDirty"
         >
@@ -1076,7 +1113,7 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
               :disabled="busy || archived"
             >
               <legend class="sr-only">
-                Редагування структури
+                Редагування плану
               </legend><label
                 class="brief-field brief-wide"
                 for="outline-heading"
@@ -1135,37 +1172,37 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
               </Button><Button
                 type="submit"
                 class="workspace-button workspace-button-primary"
-                :disabled="busy || archived || dirty || (!outlineDirty && !outdatedOutline) || !outline.title.trim() || !outline.sections.length || outline.sections.some(section => !section.title.trim() || !section.purpose.trim())"
+                :disabled="busy || archived || dirty || needsSourceOutline || (!outlineDirty && !outdatedOutline) || !outline.title.trim() || !outline.sections.length || outline.sections.some(section => !section.title.trim() || !section.purpose.trim())"
               >
-                Зберегти структуру
+                Зберегти план
               </Button>
             </div>
           </form>
         </details>
         <p
-          v-if="outdatedOutline"
+          v-if="outdatedOutline && !needsSourceOutline"
           class="brief-review"
         >
-          Бриф змінився після створення цієї структури. Збережіть нову редакцію структури для поточного брифу.
+          Бриф змінився. Збережіть план для поточного брифу.
         </p><div
           v-if="currentOutline"
           class="brief-actions"
         >
-          <span role="status">{{ outlineDirty ? 'Є незбережені зміни структури' : currentOutline.status === 'APPROVED' ? 'Структуру схвалено' : currentOutline.status === 'WITHDRAWN' ? 'Схвалення відкликано' : 'Структура потребує перегляду' }}</span><Button
+          <span role="status">{{ outlineDirty ? 'Є незбережені зміни плану' : outdatedOutline ? 'План для попереднього брифу' : currentOutline.status === 'APPROVED' ? 'План схвалено' : currentOutline.status === 'WITHDRAWN' ? 'Схвалення відкликано' : 'План потребує перегляду' }}</span><Button
             v-if="currentOutline.status === 'PROPOSED'"
             variant="outline"
             class="workspace-button"
             :disabled="busy || archived || dirty || outlineApprovalBlocked"
             @click="mutate(`/outline/${currentOutline.id}/approve`, { expectedRevision: state.outline?.revision ?? 0 })"
           >
-            Схвалити структуру
+            Схвалити план
           </Button>
         </div>
         <details
           v-if="state.outline?.revisions.length"
           class="brief-details"
         >
-          <summary>Історія структури</summary><article
+          <summary>Історія плану</summary><article
             v-for="revision in state.outline.revisions"
             :key="revision.id"
             class="brief-history"

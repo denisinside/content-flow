@@ -53,7 +53,7 @@ function isIndexManifest(manifest: OperationManifest): manifest is IndexManifest
   return manifest.schemaVersion === 'source-embedding-job-v1';
 }
 
-function convertFailure(error: unknown): never {
+function convertFailure(error: unknown, beforeProvider = false): never {
   if (error instanceof JobFailure || error instanceof JobFenceLost || error instanceof HttpException) throw error;
   if (error instanceof EvidenceServiceError) throw new JobFailure(error.category, error.outcome);
   if (error instanceof EmbeddingProviderError || error instanceof SourceRelevanceProviderError) {
@@ -62,7 +62,19 @@ function convertFailure(error: unknown): never {
       TIMEOUT: 'TIMEOUT', UNKNOWN_OUTCOME: 'UNKNOWN_OUTCOME', PROVIDER_FAILED: 'PROVIDER_FAILED' };
     throw new JobFailure(categories[error.code], error.outcome);
   }
-  throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
+  // Log only fixed metadata. Driver and validator messages can contain inputs.
+  const detail = error instanceof Error ? error as Error & { code?: unknown; meta?: { code?: unknown } } : null;
+  const driverCode = typeof detail?.code === 'string' && /^(?:P\d{4}|[0-9A-Z]{5})$/u.test(detail.code) ? detail.code : undefined;
+  const sqlCode = typeof detail?.meta?.code === 'string' && /^[0-9A-Z]{5}$/u.test(detail.meta.code) ? detail.meta.code : undefined;
+  const queryTimedOut = !!detail?.message.includes('Query read timeout')
+    || !!detail?.message.includes('timeout exceeded when trying to connect') || sqlCode === '57014';
+  const type = queryTimedOut ? 'QUERY_READ_TIMEOUT' : detail instanceof z.ZodError ? 'SCHEMA_VALIDATION' : 'UNEXPECTED';
+  console.warn('Source evidence job step failed', { type, driverCode, sqlCode });
+  if (beforeProvider && (queryTimedOut || driverCode && ['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2034'].includes(driverCode))) {
+    throw new JobFailure('ENGINE_UNAVAILABLE', 'NOT_SUBMITTED');
+  }
+  if (detail instanceof z.ZodError) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
+  throw error;
 }
 
 function releaseMatches(settings: EmbeddingWorkflowSettings, release: FrozenRelease): boolean {
@@ -78,6 +90,7 @@ export function createSourceEvidenceJobHandlers(dependencies: { prisma: PrismaCl
   const env = dependencies.env ?? process.env;
 
   async function run(context: JobContext, providerRunId?: string): Promise<ExecutionResult> {
+    let beforeProvider = !providerRunId;
     try {
       const manifest = parseManifest(context);
       const settings = embeddingWorkflowSettings(env);
@@ -105,7 +118,7 @@ export function createSourceEvidenceJobHandlers(dependencies: { prisma: PrismaCl
       else {
         try {
           response = await provider.execute(settings, context.job.id, manifest.request, context.signal,
-            () => context.recordSubmissionIntent(), recordRun);
+            async () => { await context.recordSubmissionIntent(); beforeProvider = false; }, recordRun);
         } catch (error) {
           if (!capturedId || !(error instanceof EmbeddingProviderError)
             || !['UNKNOWN_OUTCOME', 'TRANSIENT_TRANSPORT', 'TIMEOUT'].includes(error.code)) throw error;
@@ -115,7 +128,7 @@ export function createSourceEvidenceJobHandlers(dependencies: { prisma: PrismaCl
       if (capturedId && capturedId !== response.workflowRunId) throw new EmbeddingProviderError('INCOMPATIBLE_CONTRACT', 'Embedding workflow returned another run');
       if (!capturedId) await recordRun(response.workflowRunId);
       return { output: response.output, executionId, providerRunId: response.workflowRunId, model: response.model };
-    } catch (error) { return convertFailure(error); }
+    } catch (error) { return convertFailure(error, beforeProvider); }
   }
 
   function relevanceManifest(context: Pick<JobContext, 'job'>): EvidenceRelevanceManifest {
@@ -127,6 +140,7 @@ export function createSourceEvidenceJobHandlers(dependencies: { prisma: PrismaCl
   }
 
   async function runRelevance(context: JobContext, providerRunId?: string) {
+    let beforeProvider = !providerRunId;
     try {
       const manifest = relevanceManifest(context);
       const settings = sourceRelevanceWorkflowSettings(env);
@@ -160,7 +174,7 @@ export function createSourceEvidenceJobHandlers(dependencies: { prisma: PrismaCl
       if (providerRunId) response = await relevanceProvider.resume(settings, providerRunId, manifest.request, context.signal);
       else {
         try { response = await relevanceProvider.execute(settings, context.job.id, manifest.request, context.signal,
-          () => context.recordSubmissionIntent(), recordRun); }
+          async () => { await context.recordSubmissionIntent(); beforeProvider = false; }, recordRun); }
         catch (error) {
           if (!capturedId || !(error instanceof SourceRelevanceProviderError)
             || !['UNKNOWN_OUTCOME', 'TRANSIENT_TRANSPORT', 'TIMEOUT'].includes(error.code)) throw error;
@@ -170,7 +184,7 @@ export function createSourceEvidenceJobHandlers(dependencies: { prisma: PrismaCl
       if (capturedId && capturedId !== response.workflowRunId) throw new SourceRelevanceProviderError('INCOMPATIBLE_CONTRACT', 'Relevance workflow returned another run');
       if (!capturedId) await recordRun(response.workflowRunId);
       return { output: response.output, executionId, providerRunId: response.workflowRunId, model: response.model };
-    } catch (error) { return convertFailure(error); }
+    } catch (error) { return convertFailure(error, beforeProvider); }
   }
 
   const operations: JobHandler[] = [];

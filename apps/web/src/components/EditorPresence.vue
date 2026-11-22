@@ -14,7 +14,6 @@ const props = defineProps<{
 const emit = defineEmits<{ 'session-expired': [] }>()
 
 const people = ref<Person[]>([])
-const error = ref(false)
 const clientId = crypto.randomUUID()
 let activePage: string | null = null
 let epoch = 0
@@ -46,7 +45,6 @@ function stop(status?: number) {
   clearTimers()
   people.value = []
   if (status === 401) emit('session-expired')
-  if (status !== 401 && status !== 404) error.value = true
 }
 
 async function heartbeat(page: string, version: number) {
@@ -58,11 +56,10 @@ async function heartbeat(page: string, version: number) {
       body: JSON.stringify({ page, clientId }),
     })
     if (version !== epoch || activePage !== page) return
-    if (response.status === 401 || response.status === 404) return stop(response.status)
-    if (!response.ok) return stop(response.status)
-    error.value = false
+    if ([401, 403, 404].includes(response.status)) return stop(response.status)
+    if (!response.ok) people.value = []
   } catch {
-    if (version === epoch) error.value = true
+    if (version === epoch) people.value = []
   }
 }
 
@@ -72,14 +69,13 @@ async function refresh(page: string, version: number) {
       credentials: 'same-origin',
     })
     if (version !== epoch || activePage !== page) return
-    if (response.status === 401 || response.status === 404) return stop(response.status)
-    if (!response.ok) return stop(response.status)
+    if ([401, 403, 404].includes(response.status)) return stop(response.status)
+    if (!response.ok) { people.value = []; return }
     const result = await response.json() as { people?: Person[] }
     if (version !== epoch || activePage !== page) return
     people.value = Array.isArray(result.people) ? result.people.filter(person => person.userId && person.displayName) : []
-    error.value = false
   } catch {
-    if (version === epoch) error.value = true
+    if (version === epoch) people.value = []
   }
 }
 
@@ -90,7 +86,6 @@ async function enter(page: string | null) {
   clearTimers()
   activePage = null
   people.value = []
-  error.value = false
   if (previous) await leave(previous)
   if (!page || document.visibilityState !== 'visible' || version !== epoch) return
   activePage = page
@@ -130,17 +125,15 @@ onBeforeUnmount(() => {
 
 <template>
   <p
-    v-if="people.length || error"
+    v-if="people.length"
     class="editor-presence"
-    :class="{ 'editor-presence-error': error }"
     role="status"
     aria-live="polite"
   >
-    {{ error ? 'Не вдалося оновити присутність.' : `Також тут: ${people.map(person => person.displayName).join(', ')}` }}
+    Також тут: {{ people.map(person => person.displayName).join(', ') }}
   </p>
 </template>
 
 <style scoped>
 .editor-presence { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.editor-presence-error { color: var(--review, #945000); }
 </style>

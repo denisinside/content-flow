@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Post, Req, ServiceUnavailableException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Inject, Param, Post, Req, ServiceUnavailableException, UseGuards } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { ArticleService, SourceArticlePreparationService, SourceWritingProviderError, saveArticleDraftInput, importArticleInput, checkpointArticleInput, reviewArticleInput, generateArticleInput, articleWorkflowRelease, jobView } from '@contextflow/backend';
 import { z } from 'zod';
@@ -14,13 +14,13 @@ export class ArticleController {
   constructor(@Inject(ArticleService) private readonly articles: ArticleService,
     @Inject(SourceArticlePreparationService) private readonly preparation: SourceArticlePreparationService) {}
   @Get()
-  state(@Req() request: AuthenticatedRequest, @Param('projectId') project: string): Promise<ArticleState> { return this.articles.get(request.sessionUser.id, id(project)); }
+  state(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Headers('x-contextflow-view') view?: string): Promise<ArticleState> { return this.articles.get(request.sessionUser.id, id(project), view === 'editor'); }
   @Post('draft')
-  draft(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Body() body: unknown): Promise<ArticleState> { return this.articles.saveDraft(request.sessionUser.id, id(project), parse(saveArticleDraftInput, body)); }
+  draft(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Body() body: unknown, @Headers('x-contextflow-view') view?: string): Promise<ArticleState> { return this.articles.saveDraft(request.sessionUser.id, id(project), parse(saveArticleDraftInput, body), view === 'editor'); }
   @Post('import')
   import(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Body() body: unknown): Promise<ArticleState> { return this.articles.importArticle(request.sessionUser.id, id(project), parse(importArticleInput, body)); }
   @Post('checkpoint')
-  checkpoint(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Body() body: unknown): Promise<ArticleState> { return this.articles.checkpoint(request.sessionUser.id, id(project), parse(checkpointArticleInput, body)); }
+  checkpoint(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Body() body: unknown, @Headers('x-contextflow-view') view?: string): Promise<ArticleState> { return this.articles.checkpoint(request.sessionUser.id, id(project), parse(checkpointArticleInput, body), view === 'editor'); }
   @Post('generate')
   async generate(@Req() request: AuthenticatedRequest, @Param('projectId') project: string, @Body() body: unknown) {
     const input = parse(generateArticleInput, body); let release;

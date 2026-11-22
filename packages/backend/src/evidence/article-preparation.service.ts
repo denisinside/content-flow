@@ -7,7 +7,8 @@ import type { ArticleService, SourceArticleInputs } from '../editorial/article.s
 import type { ArticleContent } from '../editorial/article-contracts.js';
 import { DurableJobService, canonicalManifestHash } from '../jobs/job-service.js';
 import { EXTERNAL_PROCESSING_NOTICE } from '../external-processing-notice.js';
-import { sha256Text, type IndexSourceEvidenceInput, type SearchSourceEvidenceInput } from './contracts.js';
+import { MAX_EMBEDDING_TEXT_BYTES, MAX_EVIDENCE_QUERY_LENGTH, sha256Text,
+  type IndexSourceEvidenceInput, type SearchSourceEvidenceInput } from './contracts.js';
 import { SourceEvidenceService } from './evidence.service.js';
 import { SourceGroundingService } from './source-grounding.service.js';
 import { FactualBasisService } from '../claims/factual-basis.service.js';
@@ -65,23 +66,16 @@ function briefForWriting(brief: FrozenBrief) {
     tone: brief.tone, targetLength: brief.targetLength, cta: brief.cta, exclusions: brief.exclusions, notes: brief.notes };
 }
 function queryForSection(brief: FrozenBrief, section: FrozenSection): string {
-  // Keep the section question specific; fields are individually budgeted and Unicode-safe.
-  const pieces = [`Topic: ${brief.topic}`, `Section: ${section.title}`, `Purpose: ${section.purpose}`, `Audience: ${brief.audience}`];
+  const query = [`Topic: ${brief.topic}`, `Section: ${section.title}`, `Purpose: ${section.purpose}`, `Audience: ${brief.audience}`]
+    .join('\n').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, ' ');
   let output = '';
-  for (const piece of pieces) {
-    const remaining = 1536 - Buffer.byteLength(output ? `${output}\n${piece}` : piece, 'utf8');
-    if (remaining >= 0) { output = output ? `${output}\n${piece}` : piece; continue; }
-    if (remaining <= -Buffer.byteLength(piece, 'utf8')) continue;
-    let bounded = '';
-    for (const point of [...piece]) {
-      const candidate = `${output ? `${output}\n` : ''}${bounded}${point}`;
-      if (Buffer.byteLength(candidate, 'utf8') > 1536) break;
-      bounded += point;
-    }
-    if (bounded.trim()) output = output ? `${output}\n${bounded}` : bounded;
-    break;
+  let bytes = 0;
+  for (const point of Buffer.from(query, 'utf8').toString('utf8')) {
+    bytes += Buffer.byteLength(point, 'utf8');
+    if (output.length + point.length > MAX_EVIDENCE_QUERY_LENGTH || bytes > MAX_EMBEDDING_TEXT_BYTES) break;
+    output += point;
   }
-  return output;
+  return output.trim();
 }
 function requestView(row: RequestRow) {
   const data = parseStageData(row.stageDataJson);
@@ -249,13 +243,29 @@ export class SourceArticlePreparationService {
         AND ("nextCheckAt" IS NULL OR "nextCheckAt"<=CURRENT_TIMESTAMP) ORDER BY "nextCheckAt" NULLS FIRST,"createdAt" LIMIT ${MAX_PER_TICK}`;
     for (const row of rows) {
       try { await this.advance(row.projectId, row.id, new Date()); }
-      catch (error) { this.logger.error('Source article preparation step failed'); await this.fail(row.projectId, row.id, error); }
+      catch (error) {
+        const detail = error instanceof Error ? error as Error & { code?: unknown; meta?: { code?: unknown } } : null;
+        const driverCode = typeof detail?.code === 'string' && /^(?:P\d{4}|[0-9A-Z]{5})$/u.test(detail.code) ? detail.code : undefined;
+        const sqlCode = typeof detail?.meta?.code === 'string' && /^[0-9A-Z]{5}$/u.test(detail.meta.code) ? detail.meta.code : undefined;
+        const type = detail?.message.includes('Query read timeout') ? 'QUERY_READ_TIMEOUT'
+          : detail?.message.includes('timeout exceeded when trying to connect') ? 'POOL_TIMEOUT'
+            : detail?.name === 'ZodError' ? 'SCHEMA_VALIDATION' : 'UNEXPECTED';
+        const errorName = ['Error', 'ConflictException', 'NotFoundException', 'PrismaClientKnownRequestError',
+          'PrismaClientUnknownRequestError', 'PrismaClientInitializationError'].includes(detail?.name ?? '') ? detail?.name : 'OTHER';
+        const location = detail?.stack?.match(/article-preparation\.service\.(?:js|ts):(\d+):(\d+)/u)?.[1];
+        console.warn('Source article preparation step failed', { type, errorName, location, driverCode, sqlCode });
+        if (type === 'QUERY_READ_TIMEOUT' || type === 'POOL_TIMEOUT') continue;
+        await this.fail(row.projectId, row.id, error);
+      }
     }
   }
 
   private async claim(projectId: string, requestId: string, now: Date): Promise<Claimed | null> {
     return this.prisma.$transaction(async tx => {
-      await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id"=${projectId}::uuid FOR UPDATE`;
+      // Child jobs also lock the project. A polling pass can yield to those transactions.
+      const project = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM contextflow."Project"
+        WHERE "id"=${projectId}::uuid FOR UPDATE SKIP LOCKED`;
+      if (!project.length) return null;
       const rows = await tx.$queryRaw<RequestRow[]>`SELECT * FROM contextflow."SourceWritingRequest"
         WHERE "projectId"=${projectId}::uuid AND "id"=${requestId}::uuid FOR UPDATE`;
       const request = rows[0];
@@ -346,9 +356,10 @@ export class SourceArticlePreparationService {
     if (request.stage === 'GENERATING') {
       const jobs = await this.jobsFor(projectId, data.sections.map(section => section.writingJobId).filter((id): id is string => !!id));
       if (jobs.length !== data.sections.length || data.sections.some(section => !section.writingJobId)) { await this.failCategory(request, 'WRITING_JOB_MISSING'); return; }
-      if (jobs.some(job => !TERMINAL.has(job.status))) { await this.defer(request); return; }
       const byId = new Map(jobs.map(job => [job.id, job]));
-      if (jobs.some(job => job.status !== 'SUCCEEDED')) { await this.failCategory(request, jobs.find(job => job.status !== 'SUCCEEDED')?.errorCategory ?? 'WRITING_FAILED'); return; }
+      const failed = jobs.find(job => TERMINAL.has(job.status) && job.status !== 'SUCCEEDED');
+      if (failed) { await this.failCategory(request, failed.errorCategory ?? 'WRITING_FAILED'); return; }
+      if (jobs.some(job => job.status !== 'SUCCEEDED')) { await this.defer(request); return; }
       const completed: Array<{ input: SourceWritingInput; output: unknown }> = [];
       const updatedSections: SectionStage[] = [];
       try {

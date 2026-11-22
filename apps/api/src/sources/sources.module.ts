@@ -5,6 +5,7 @@ import { StorageModule } from '../storage/storage.module.js';
 import { SourceService } from './source.service.js';
 import { SourcesController } from './sources.controller.js';
 import { JobsModule } from '../jobs/jobs.module.js';
+import { ClaimsModule } from '../claims/claims.module.js';
 
-@Module({ imports: [FoundationModule, AuthModule, StorageModule, JobsModule], controllers: [SourcesController], providers: [SourceService], exports: [SourceService] })
+@Module({ imports: [FoundationModule, AuthModule, StorageModule, JobsModule, ClaimsModule], controllers: [SourcesController], providers: [SourceService], exports: [SourceService] })
 export class SourcesModule {}

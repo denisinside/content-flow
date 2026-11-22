@@ -49,7 +49,7 @@ function initialState(format: Format, approved = false): VisualState {
       revision: 2, currentApprovedRevisionId: approved ? id : null,
       draft: { counter: 1, content, sha256: hash, parentKind: format === 'LINKEDIN_COVER' ? 'ADAPTATION' : 'SCRIPT', parentRevisionId: '30000000-0000-4000-8000-000000000001', parentRevisionHash: 'approved-parent-hash', parentReviewCounter: 3 },
       revisions: [{ id, number: 1, content, sha256: hash, parentKind: format === 'LINKEDIN_COVER' ? 'ADAPTATION' : 'SCRIPT', parentRevisionId: '30000000-0000-4000-8000-000000000001', parentRevisionHash: 'approved-parent-hash', parentReviewCounter: 3,
-        reviewCounter: approved ? 4 : 0, approvedBy: approved ? 'editor' : null, approvedAt: approved ? '2026-10-13T10:00:00.000Z' : null, withdrawnBy: null, withdrawnAt: null, eligible: true, staleReasons: [], blockingReasons: [], hasUnmapped: true, previews }],
+        reviewCounter: approved ? 4 : 0, approvedBy: approved ? 'editor' : null, approvedAt: approved ? '2026-10-13T10:00:00.000Z' : null, withdrawnBy: null, withdrawnAt: null, eligible: approved, staleReasons: [], blockingReasons: approved ? [] : ['CANONICAL_PREVIEW_MISSING'], hasUnmapped: true, previews }],
     },
   };
 }
@@ -91,7 +91,18 @@ async function fixture(page: Page, options: { approved?: boolean } = {}) {
     if (visual?.[2] === 'preview') {
       const body = request.postDataJSON() as { frameId: string };
       previewCalls.push(String(body.frameId)); commands.push({ path, body });
-      return json(route, { assetId: `70000000-0000-4000-8000-${String(previewCalls.length).padStart(12, '0')}`, frameId: body.frameId, sha256: pngHash, overflow: [], rendererVersion: 'chromium-visual-v1', fontHashes: {} });
+      const revision = states.get(url.searchParams.get('format') as Format)!.composition.revisions[0]!;
+      const existing = revision.previews.find(preview => preview.frameId === body.frameId);
+      if (existing) return json(route, existing);
+      const suffix = String(previewCalls.length).padStart(12, '0');
+      const preview = { id: `60000000-0000-4000-8000-${suffix}`, assetId: `70000000-0000-4000-8000-${suffix}`,
+        frameId: body.frameId, sha256: pngHash, overflow: [], rendererVersion: 'chromium-visual-v1', fontHashes: {} };
+      revision.previews.push(preview);
+      if (revision.previews.length === revision.content.frames.length) {
+        revision.eligible = true;
+        revision.blockingReasons = [];
+      }
+      return json(route, preview);
     }
     if (path.startsWith(`${base}/visuals/preview/`)) return route.fulfill({ status: 200, contentType: 'image/png', body: png });
     if (visual?.[2] === 'approve') {

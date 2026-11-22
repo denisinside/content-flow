@@ -54,6 +54,13 @@ BASE_PROSE = ("У межах описаного випробування фах�
     "експлуатації та окремо вказати відмінності й обмеження. Практичне значення перевірки полягає в тому, "
     "що параметри досліду відомі читачеві та можуть бути враховані під час інтерпретації наведених даних. "
     "Такий виклад залишає числові межі помітними й не перетворює один дослід на загальне правило.")
+SECTION_PROSE = ("Наведений результат описує конкретне випробування стенда за заданих умов. "
+    "Уривок джерела дає змогу читачеві побачити фактичний результат і не переносити його автоматично "
+    "на інші режими використання. Тут важливо зберегти точні числові параметри, бо вони обмежують зміст "
+    "висновку. Повний уривок містить контекст, потрібний для перевірки формулювання. Коли читач оцінює "
+    "цей результат, він може зіставити його з умовами власного завдання, але таке зіставлення саме по собі "
+    "не є новим підтвердженим фактом. Тому розділ описує лише наведені дані та їхні межі. "
+    "У тексті варто відрізняти повідомлені факти від подальших очікувань і окремих рішень щодо застосування.")
 
 
 def make_input(task: str = "ADAPTATION") -> dict:
@@ -74,6 +81,7 @@ def make_input(task: str = "ADAPTATION") -> dict:
             "evidence": [{"evidenceId": CLAIM_EVIDENCE_ID, "quote": CLAIM_QUOTE}]}],
     }
     if task == "SECTION":
+        value["requiredClaims"] = []
         value["section"] = {"id": SECTION_ID, "title": "Результат випробування",
             "purpose": "Описати підтверджений результат і його умови.", "targetWords": 100}
         value["approvedOutline"] = {"title": "Перевірка стенда", "sections": [
@@ -94,7 +102,8 @@ def internal_paragraph(ident=PARAGRAPH_ID, text=BASE_PROSE):
 
 
 def writer_result(task, *, malformed=False):
-    result = {"task": task, "title": "", "sectionId": "", "sections": [], "paragraphs": [],"frames": [],"coverInstruction": ""}
+    result = {"task": task, "title": "", "sectionId": "", "sections": [], "paragraphs": [],
+        "sectionParagraphs": [],"frames": [],"coverInstruction": ""}
     if task == "OUTLINE":
         result.update({"title": "Перевірка стенда", "sections": [{
             "id": SECTION_ID, "title": "Результат випробування",
@@ -103,9 +112,15 @@ def writer_result(task, *, malformed=False):
     else:
         if task == "SECTION":
             result["sectionId"] = SECTION_ID
-        result["paragraphs"] = [internal_paragraph()]
+        if task == "SECTION" and not malformed:
+            result["sectionParagraphs"] = [{"text": SECTION_PROSE, "passageIndex": 0}]
+        else:
+            result["paragraphs"] = [internal_paragraph()]
         if malformed:
-            result["paragraphs"][0]["citations"][0]["quote"] = "вигаданий уривок"
+            if task == "SECTION":
+                result["sectionParagraphs"] = [{"text": SECTION_PROSE, "passageIndex": 1000}]
+            else:
+                result["paragraphs"][0]["citations"][0]["quote"] = "вигаданий уривок"
     return result
 
 
@@ -157,6 +172,20 @@ class Scenario:
         if node.id == "writer":
             self.assert_untrusted_data_remains_opaque(request)
             result = writer_result(self.input["task"], malformed=self.mode == "bad-citation")
+            if self.input["task"] == "SECTION" and self.mode in ("section-short", "section-missing-detail"):
+                result["sectionParagraphs"][0]["text"] = "Навантаження стенда становило 42 кН."
+            if self.input["task"] == "SECTION" and self.mode == "section-water":
+                result["sectionParagraphs"][0]["text"] = SECTION_PROSE + " " + SECTION_PROSE
+            if self.input["task"] == "SECTION" and self.mode == "bad-section-index":
+                result["sectionParagraphs"][0]["passageIndex"] = 9
+            if self.input["task"] == "SECTION" and self.mode in ("extra-section-fields", "extra-fields-invalid-section"):
+                result["task"] = "OUTLINE"
+                result["title"] = "Зайвий заголовок"
+                result["sections"] = writer_result("OUTLINE")["sections"]
+                result["paragraphs"] = [internal_paragraph()]
+                result["coverInstruction"] = "Зайва інструкція до обкладинки"
+                if self.mode == "extra-fields-invalid-section":
+                    result["sectionParagraphs"][0]["passageIndex"] = 9
             if self.input.get("format") in ("LINKEDIN_CAROUSEL","INSTAGRAM_CAROUSEL","INSTAGRAM_STORIES"):
                 result["frames"] = [{**internal_paragraph(PARAGRAPH_2_ID),"purpose": "Результат", "visualHint": "Схема стенда",
                     "transition": "Завершення" if self.input["format"] == "INSTAGRAM_STORIES" else ""}]
@@ -171,17 +200,24 @@ class Scenario:
                 reviewed_hash = "0" * 64
             else:
                 reviewed_hash = request["reviewedHash"]
-            if self.mode in ("repair", "unresolved", "frame-repair"):
+            if self.mode in ("repair", "unresolved", "frame-repair", "section-repair", "section-missing-detail", "section-water"):
                 target = request["content"]["frames" if self.mode == "frame-repair" else "paragraphs"][0]["id"]
                 return {"reviewedHash": reviewed_hash, "status": "needs_human", "issues": [{
                     "id": "unsupported-inference", "severity": "major", "paragraphId": target,
-                    "sectionId": "", "reason": "Приберіть непідтверджене узагальнення."}], "reasons": []}
+                    "sectionId": "", "reason": ("Додайте підтверджену тривалість випробування, потрібну для цього результату."
+                        if self.mode == "section-missing-detail" else "Приберіть повтор і воду."
+                        if self.mode == "section-water" else "Приберіть непідтверджене узагальнення.")}], "reasons": []}
             return {"reviewedHash": reviewed_hash, "status": "ready", "issues": [], "reasons": []}
         if node.id == "repairer":
             replacements = []
+            section_replacements = []
             for issue in request["issues"]:
                 target_id = issue["paragraphId"]
                 original = next(row for row in request["content"]["paragraphs"]+request["content"].get("frames",[]) if row["id"] == target_id)
+                if self.input["task"] == "SECTION" and not self.input["requiredClaims"]:
+                    section_replacements.append({"paragraphId": target_id, "text": SECTION_PROSE,
+                                                 "passageIndex": 0})
+                    continue
                 revised = {key: copy.deepcopy(original[key]) for key in ("id","text","citations")}
                 revised["text"] = revised["text"].replace(
                     "не перетворює один дослід на загальне правило", "не слід переносити цей результат на інші режими")
@@ -193,13 +229,15 @@ class Scenario:
                     for citation in revised["citations"]]
                 replacements.append({"paragraphId": target_id, "paragraph": revised})
             return {"reviewedHash": request["reviewedHash"],
-                    "paragraphReplacements": replacements, "sectionReplacements": []}
+                    "paragraphReplacements": replacements, "sectionParagraphReplacements": section_replacements,
+                    "sectionReplacements": []}
         if node.id == "reviewer_2":
-            if self.mode == "unresolved":
+            if self.mode in ("unresolved", "section-missing-detail"):
                 target = request["content"]["paragraphs"][0]["id"]
                 return {"reviewedHash": request["reviewedHash"], "status": "needs_human", "issues": [{
                     "id": "still-unsupported", "severity": "major", "paragraphId": target,
-                    "sectionId": "", "reason": "Залишилось непідтверджене твердження."}], "reasons": []}
+                    "sectionId": "", "reason": ("Тривалість випробування досі не пояснена в тексті."
+                        if self.mode == "section-missing-detail" else "Залишилось непідтверджене твердження.")}], "reasons": []}
             return {"reviewedHash": request["reviewedHash"], "status": "ready", "issues": [], "reasons": []}
         raise AssertionError("Unexpected model node: " + node.id)
 
@@ -272,7 +310,7 @@ class SourceWritingGraphTests(unittest.TestCase):
         release = json.loads(builder.RELEASE_PATH.read_text(encoding="utf-8"))
         unsigned = dict(release)
         config_digest = unsigned.pop("configDigest")
-        self.assertEqual(release["releaseId"], "source-writing-2026-10-20.1")
+        self.assertEqual(release["releaseId"], "source-writing-2026-11-22.1")
         self.assertEqual(release["target"], {"difyVersion": "1.17.1", "graphonVersion": "0.7.0", "dslVersion": "0.7.0"})
         self.assertEqual(release["publishedWorkflowIdEnv"], "DIFY_SOURCE_WRITING_PUBLISHED_WORKFLOW_ID")
         self.assertEqual(hashlib.sha256(builder.canonical(unsigned).encode("utf-8")).hexdigest(), config_digest)
@@ -293,9 +331,89 @@ class SourceWritingGraphTests(unittest.TestCase):
                 self.assertEqual(result["review"]["status"], "ready")
                 if task == "OUTLINE":
                     self.assertEqual(result["content"]["sections"][0]["requiredClaimRevisionIds"], [CLAIM_ID])
+                elif task == "SECTION":
+                    paragraph = result["content"]["paragraphs"][0]
+                    self.assertEqual(paragraph["citations"], [{"kind": "source_passage", "passageId": PASSAGE_ID,
+                        "quote": PASSAGE_QUOTE, "assertionText": paragraph["text"]}])
+                    self.assertEqual(result["content"]["sectionId"], SECTION_ID)
                 else:
                     self.assertEqual(result["content"]["paragraphs"][0]["citations"][0]["quote"], PASSAGE_QUOTE)
                 self.assertEqual(json.loads(outputs["source_writing_report"])["status"], "ready")
+
+    def test_section_passage_index_is_bound_to_frozen_order_and_quote_is_server_built(self):
+        scenario = Scenario(make_input("SECTION"))
+        outputs, errors = self.execute(scenario)
+        self.assertEqual(errors, [])
+        result = json.loads(outputs["source_writing_json"])
+        self.assertEqual(result["status"], "ready")
+        request = scenario.requests["writer"]
+        self.assertEqual(request["sectionWordRange"], {"minimum": 80, "maximum": 120})
+        self.assertEqual(request["paragraphEvidenceMode"].startswith("one supplied passage"), True)
+        self.assertEqual(result["content"]["paragraphs"][0]["citations"][0]["quote"], request["passages"][0]["quote"])
+        self.assertEqual(result["content"]["paragraphs"][0]["citations"][0]["assertionText"], SECTION_PROSE)
+        bad, errors = self.execute(Scenario(make_input("SECTION"), "bad-section-index"))
+        self.assertEqual(errors, [])
+        rejected = json.loads(bad["source_writing_json"])
+        self.assertEqual(rejected["status"], "needs_human")
+        self.assertIsNone(rejected["content"])
+
+    def test_section_word_range_is_guidance_and_reviewer_decides_content_quality(self):
+        concise_scenario = Scenario(make_input("SECTION"), "section-short")
+        concise, errors = self.execute(concise_scenario)
+        self.assertEqual(errors, [])
+        accepted = json.loads(concise["source_writing_json"])
+        self.assertEqual(accepted["status"], "ready")
+        text = accepted["content"]["paragraphs"][0]["text"]
+        self.assertLess(len(text.split()), 80)
+        self.assertEqual(accepted["review"]["modelCalls"], 2)
+        self.assertEqual(accepted["content"]["paragraphs"][0]["citations"][0]["quote"], PASSAGE_QUOTE)
+        self.assertEqual(concise_scenario.requests["reviewer"]["sectionWordRange"],
+                         {"minimum": 80, "maximum": 120})
+
+        insufficient, errors = self.execute(Scenario(make_input("SECTION"), "section-missing-detail"))
+        self.assertEqual(errors, [])
+        flagged = json.loads(insufficient["source_writing_json"])
+        self.assertEqual(flagged["status"], "needs_human")
+        self.assertIsNone(flagged["content"])
+        self.assertEqual(flagged["review"]["modelCalls"], 4)
+
+        water_scenario = Scenario(make_input("SECTION"), "section-water")
+        water, errors = self.execute(water_scenario)
+        self.assertEqual(errors, [])
+        trimmed = json.loads(water["source_writing_json"])
+        self.assertEqual(trimmed["status"], "ready")
+        reviewed_text = water_scenario.requests["reviewer"]["content"]["paragraphs"][0]["text"]
+        self.assertGreater(len(reviewed_text.split()), 120)
+        self.assertEqual(trimmed["content"]["paragraphs"][0]["text"], SECTION_PROSE)
+        self.assertEqual(trimmed["review"]["modelCalls"], 4)
+
+    def test_unrelated_section_fields_are_discarded_before_review(self):
+        outputs, errors = self.execute(Scenario(make_input("SECTION"), "extra-section-fields"))
+        self.assertEqual(errors, [])
+        result = json.loads(outputs["source_writing_json"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["review"]["modelCalls"], 2)
+        self.assertEqual(set(result["content"]), {"sectionId", "paragraphs"})
+        self.assertEqual(result["content"]["paragraphs"][0]["citations"][0]["quote"], PASSAGE_QUOTE)
+
+        outputs, errors = self.execute(Scenario(make_input("SECTION"), "extra-fields-invalid-section"))
+        self.assertEqual(errors, [])
+        rejected = json.loads(outputs["source_writing_json"])
+        self.assertEqual(rejected["status"], "needs_human")
+        self.assertIsNone(rejected["content"])
+
+    def test_indexed_section_patch_preserves_paragraph_identity_and_rechecks_draft(self):
+        scenario = Scenario(make_input("SECTION"), "section-repair")
+        outputs, errors = self.execute(scenario)
+        self.assertEqual(errors, [])
+        result = json.loads(outputs["source_writing_json"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["review"]["modelCalls"], 4)
+        original = scenario.requests["reviewer"]["content"]["paragraphs"][0]
+        repaired = result["content"]["paragraphs"][0]
+        self.assertEqual(repaired["id"], original["id"])
+        self.assertEqual(repaired["citations"][0]["quote"], PASSAGE_QUOTE)
+        self.assertEqual(scenario.counts, {"writer": 1, "reviewer": 1, "repairer": 1, "reviewer_2": 1})
 
     def test_all_channel_formats_have_exact_cover_or_reviewed_script_shape(self):
         for format_name in sorted(runtime_logic.FORMATS):

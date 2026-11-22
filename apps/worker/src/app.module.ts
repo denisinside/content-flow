@@ -40,10 +40,13 @@ import { SourceEvidenceService, SourcePreparationService, SourcePreparationPolle
       const scripts = new ScriptService(health.prisma, telegram);
       const visuals = new VisualService(health.prisma,telegram,scripts,renderer,assets);
       const backgrounds = new VisualBackgroundService(health.prisma,visuals,jobs);
+      const evidence = new SourceEvidenceService(health.prisma, jobs);
+      const config = loadRuntimeConfig();
       return new DurableJobWorker(health.prisma,
-      loadRuntimeConfig().redisUrl, EXTERNAL_PROCESSING_NOTICE.version, [
-        ...createImportJobHandlers({ prisma: health.prisma, assets }),
-        ...createSourceEvidenceJobHandlers({ prisma: health.prisma, evidence: new SourceEvidenceService(health.prisma, jobs) }),
+      config.redisUrl, EXTERNAL_PROCESSING_NOTICE.version, [
+        ...createImportJobHandlers({ prisma: health.prisma, assets,
+          ...(config.nodeEnv === 'test' ? {} : { indexImportedSnapshot: (user: string, project: string, snapshot: string) => evidence.indexNewSnapshot(user, project, snapshot) }) }),
+        ...createSourceEvidenceJobHandlers({ prisma: health.prisma, evidence }),
         createOutlineJobHandler({ prisma: health.prisma, editorial, factualBasis: facts }),
         createBriefProposalJobHandler({ prisma: health.prisma, proposals }),
         createSourceWritingJobHandler({ prisma: health.prisma, editorial, factualBasis: facts,telegram,articles: article,scripts }),

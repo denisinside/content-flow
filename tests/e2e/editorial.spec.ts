@@ -85,10 +85,10 @@ test('manual article structure approves exact revision; late AI remains an expli
   await page.getByRole('button', { name: 'Додати розділ' }).click();
   await page.getByLabel('Назва розділу', { exact: true }).fill('Поїздка містом');
   await page.getByLabel('Про що цей розділ', { exact: true }).fill('Показати щоденний досвід мешканця.');
-  await page.getByRole('button', { name: 'Зберегти структуру', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Схвалити структуру', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: 'Схвалити структуру', exact: true }).click();
-  await expect(page.getByText('Структуру схвалено', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Зберегти план', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Схвалити план', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Схвалити план', exact: true }).click();
+  await expect(page.getByText('План схвалено', { exact: true })).toBeVisible();
   context.candidate();
   await page.reload();
   await expect(page.getByLabel('Назва розділу', { exact: true })).toHaveValue('Поїздка містом');
@@ -96,7 +96,7 @@ test('manual article structure approves exact revision; late AI remains an expli
   await expect(page.getByRole('heading', { name: 'Пропозиція заголовка AI', exact: true })).toBeVisible();
   await page.locator('.outline-edit > summary').click();
   await page.getByLabel('Назва розділу', { exact: true }).fill('Незбережений ручний розділ');
-  await expect(page.getByRole('button', { name: 'Застосувати структуру', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Застосувати план', exact: true })).toBeDisabled();
   mkdirSync(artifacts, { recursive: true });
   for (const width of [1440, 1280, 768, 390]) {
     await page.setViewportSize({ width, height: 900 });
@@ -111,7 +111,7 @@ test('manual article structure approves exact revision; late AI remains an expli
 
 test('outline generation waits for factual prerequisites and exposes retry and cancellation without changing manual work', async ({ page }) => {
   const context = await fixture(page, true);
-  await expect(page.getByRole('button', { name: 'Запропонувати структуру' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Запропонувати план' })).toBeDisabled();
   await fillBrief(page);
   await page.getByRole('button', { name: 'Додати розділ' }).click();
   await page.getByLabel('Назва розділу', { exact: true }).fill('Ручний розділ');
@@ -119,10 +119,10 @@ test('outline generation waits for factual prerequisites and exposes retry and c
   await page.getByLabel('Авторські нотатки').fill('Нові нотатки для брифу.');
   await page.getByRole('button', { name: 'Зберегти бриф', exact: true }).click();
   await expect(page.getByLabel('Назва розділу', { exact: true })).toHaveValue('Ручний розділ');
-  await page.getByRole('button', { name: 'Запропонувати структуру' }).click();
+  await page.getByRole('button', { name: 'Запропонувати план' }).click();
   await expect(page.getByText('Очікує обробки', { exact: true })).toBeVisible();
   context.failJob();
-  await expect(page.getByText('Не вдалося створити структуру', { exact: true })).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText('Не вдалося створити план', { exact: true })).toBeVisible({ timeout: 8000 });
   await expect(page.getByLabel('Назва розділу', { exact: true })).toHaveValue('Ручний розділ');
   await page.getByRole('button', { name: 'Повторити спробу' }).click();
   await expect(page.getByText('Очікує обробки', { exact: true })).toBeVisible();

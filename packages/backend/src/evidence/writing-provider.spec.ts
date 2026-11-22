@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { canonicalManifestHash } from '../jobs/job-service.js';
 import { DifySourceWritingProvider, SourceWritingProviderError, sourceWritingWorkflowRelease, sourceWritingWorkflowSettings } from './writing-provider.js';
@@ -51,6 +52,15 @@ describe('Dify source-writing workflow boundary', () => {
     expect(() => sourceWritingWorkflowSettings({ ...env, DIFY_SOURCE_WRITING_API_KEY: '' })).toThrow(SourceWritingProviderError);
     expect(() => sourceWritingWorkflowSettings({ ...env, DIFY_API_BASE_URL: 'https://user:secret@dify.example/v1' }))
       .toThrow(SourceWritingProviderError);
+  });
+
+  it('accepts the generated indexed-section release only when its digest is pinned', () => {
+    const release = JSON.parse(readFileSync(new URL('./workflows/source-writing/release.json', import.meta.url), 'utf8')) as {
+      configDigest: string; releaseId: string;
+    };
+    expect(release.releaseId).toBe('source-writing-2026-11-22.1');
+    expect(sourceWritingWorkflowRelease({ ...env, DIFY_SOURCE_WRITING_CONFIG_SHA256: release.configDigest }))
+      .toMatchObject({ releaseId: release.releaseId, configDigest: release.configDigest, workflowId });
   });
 
   it('records intent before POST, captures only the matching run, and validates the frozen output', async () => {

@@ -4,6 +4,7 @@ import { z } from 'zod';
 export const EMBEDDING_MODEL = 'gemini-embedding-001';
 export const EMBEDDING_DIMENSIONS = 768;
 export const MAX_EMBEDDING_TEXT_BYTES = 1536;
+export const MAX_EVIDENCE_QUERY_LENGTH = 1000;
 export const MAX_EMBEDDING_TEXT_CHARACTERS = 4000;
 export const MAX_EMBEDDING_BATCH = 16;
 export const MAX_EMBEDDING_REQUEST_BYTES = 64000;
@@ -12,7 +13,7 @@ export const MAX_EMBEDDING_RESPONSE_BYTES = 1024 * 1024;
 const snapshotSelection = z.array(z.uuid()).min(1).max(100)
   .refine(values => new Set(values).size === values.length);
 export const indexSourceEvidenceInput = z.object({ commandKey: z.uuid(), snapshotIds: snapshotSelection }).strict();
-export const searchSourceEvidenceInput = indexSourceEvidenceInput.extend({ query: z.string().trim().min(1).max(1000)
+export const searchSourceEvidenceInput = indexSourceEvidenceInput.extend({ query: z.string().trim().min(1).max(MAX_EVIDENCE_QUERY_LENGTH)
   .refine(value => Buffer.byteLength(value, 'utf8') <= MAX_EMBEDDING_TEXT_BYTES
     && Buffer.from(value, 'utf8').toString('utf8') === value
     && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)) }).strict();

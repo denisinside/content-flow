@@ -14,9 +14,9 @@ export function databasePoolOptions(config: BackendConfig): PoolConfig {
   }
   return {
     connectionString: url.toString(), max: 2, idleTimeoutMillis: 10000,
-    connectionTimeoutMillis: config.dependencyTimeoutMs,
-    query_timeout: config.dependencyTimeoutMs,
-    statement_timeout: config.dependencyTimeoutMs,
+    connectionTimeoutMillis: Math.max(config.dependencyTimeoutMs, 10000),
+    query_timeout: Math.max(config.dependencyTimeoutMs, 10000),
+    statement_timeout: Math.max(config.dependencyTimeoutMs, 10000),
     ...(ssl ? { ssl } : {})
   };
 }

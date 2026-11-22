@@ -192,7 +192,7 @@ test('live M3.4 channels-only ZIP, immutable reviewed export, factual source pro
   expect(stale.items[0]).toMatchObject({ ready: false, revisionId: directVersion.id, reviewCounter: 0 });
   await page.goto(`/projects/${directProject.project.id}/export`);
   await expect(page.getByText('Потрібне погодження редактора.')).toHaveCount(0);
-  await expect(page.getByText('Залежності змінилися — перегляньте матеріал.')).toBeVisible();
+  await expect(page.getByText('Після погодження змінився бриф.', { exact: false })).toBeVisible();
   await capture(page, 'direct-stale');
   const deniedStale = await page.request.get(`${directBase}/exports/${zipExport.exportId}/download`);
   expect([403, 409]).toContain(deniedStale.status());

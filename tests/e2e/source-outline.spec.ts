@@ -4,6 +4,17 @@ import { projectId } from './fixtures/m63-editorial.js';
 
 const briefUrl = `/projects/${projectId}/brief`;
 
+test('offers a new source plan when the approved plan belongs to the previous brief', async ({ page }) => {
+  const fixture = await installSourceOutlineFixture(page, 'succeed', true);
+  await page.goto(briefUrl);
+  await expect(page.getByText('План для попереднього брифу', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Зберегти план' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Оновити план із джерел' }).click();
+  await page.getByText('Пропозиція AI · Не застосовано', { exact: true }).click({ timeout: 12_000 });
+  await expect(page.getByRole('button', { name: 'Застосувати план' })).toBeEnabled();
+  expect(fixture.prepareBodies).toHaveLength(1);
+});
+
 test('explains insufficient useful source passages and keeps manual outline notes', async ({ page }) => {
   const fixture = await installSourceOutlineFixture(page, 'irrelevant');
   await page.goto(briefUrl);
@@ -45,7 +56,7 @@ test('factual outline uses source passages directly and preserves manual edits',
   await expect(candidate.getByText('Пропозиція AI · Не застосовано')).toBeVisible();
   await candidate.locator('summary').click();
   await expect(candidate.getByText('У плані використано 1 уривок із джерел.')).toBeVisible();
-  await expect(candidate.getByRole('button', { name: 'Застосувати структуру' })).toBeVisible();
+  await expect(candidate.getByRole('button', { name: 'Застосувати план' })).toBeVisible();
   await expect(page.getByText(/фактична основа|затверджені факти|обов’язкові факти/iu)).toHaveCount(0);
   await expect(page.locator('.brief-claims')).toHaveCount(0);
   expect(legacyRequests).toEqual([]);

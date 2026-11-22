@@ -90,7 +90,7 @@ export class ExportService {
   }
 
   private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = false): Promise<T> {
-    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); }, { maxWait: 5_000, timeout: 30_000 });
+    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); }, { maxWait: 5_000, timeout: 60_000 });
   }
 
   private async evidenceSources(tx: Prisma.TransactionClient, project: string, edges: Array<{ claimRevisionId: string; evidenceId: string }>,
@@ -471,11 +471,12 @@ export class ExportService {
         }
         const inspection = this.visuals ? await this.visuals.inspectRevision(tx, projectId, version) : { eligible: false, approved: false, staleReasons: [], blockingReasons: ['VISUAL_SERVICE_UNAVAILABLE'] };
         const parentKindMatches = base.endsWith('COVER') ? version.parentKind === 'ADAPTATION' : version.parentKind === 'SCRIPT';
-        const parent = parentKindMatches ? await this.selectedItem(tx, projectId,
+        const checkParent = !inspection.blockingReasons.some(reason => reason === 'PARENT_UNAVAILABLE' || reason === 'PARENT_NOT_ELIGIBLE');
+        const parent = checkParent && parentKindMatches ? await this.selectedItem(tx, projectId,
           version.parentKind === 'SCRIPT' ? `${base}_SCRIPT` as CreateExportInput['items'][number]['format'] : base,
           version.parentRevisionId, version.parentReviewCounter).catch(() => null) : null;
         const reasons = [...new Set([...(inspection.approved ? [] : ['APPROVAL_REQUIRED']), ...inspection.staleReasons, ...inspection.blockingReasons,
-          ...(parent ? [] : ['PARENT_UNAVAILABLE'])])];
+          ...(!checkParent || parent ? [] : ['PARENT_UNAVAILABLE'])])];
         items.push({ format, title: formatTitle(format), revisionId: version.id, number: version.number, reviewCounter: version.reviewCounter,
           contentMode: parent?.contentMode ?? null, ready: !!parent && inspection.approved && inspection.eligible && !reasons.length, reasons });
         continue;
@@ -491,11 +492,11 @@ export class ExportService {
     return items;
   }
 
-  async readiness(userId: string, projectId: string) {
+  async readiness(userId: string, projectId: string, view?: 'items' | 'history') {
     return this.command(userId, projectId, async tx => {
       const project = await tx.project.findUniqueOrThrow({ where: { id: projectId }, select: { revision: true, formats: true } });
-      const items = await this.readinessItems(tx, projectId, project.formats);
-      const exports = await this.exportList(tx, projectId);
+      const items = view === 'history' ? [] : await this.readinessItems(tx, projectId, project.formats);
+      const exports = view === 'items' ? [] : await this.exportList(tx, projectId);
       return { projectRevision: project.revision, ready: items.length > 0 && items.every(item => item.ready), items, exports };
     });
   }
@@ -679,7 +680,7 @@ export class ExportService {
   }
 
   async build(job: Job, signal?: AbortSignal): Promise<FrozenStage> {
-    const { manifest } = await this.prisma.$transaction(tx => this.frozenRequest(tx, job), { maxWait: 5_000, timeout: 30_000 });
+    const { manifest } = await this.prisma.$transaction(tx => this.frozenRequest(tx, job), { maxWait: 5_000, timeout: 60_000 });
     const contents = new Map<string, { kind: ExportContentKind; content: unknown }>();
     const visualAssets = await this.readVisualAssets(job.projectId, manifest);
     for (const item of manifest.items) {
@@ -790,7 +791,7 @@ export class ExportService {
     });
   }
 
-  async download(userId: string, projectId: string, requestId: string) {
+  async download(userId: string, projectId: string, requestId: string, recheckSession?: () => Promise<void>) {
     const request = await this.authorizedRequest(userId, projectId, requestId);
     await this.readVisualAssets(projectId, exportManifestSchema.parse(request.manifest));
     const asset = request.artifact!.asset;
@@ -798,6 +799,7 @@ export class ExportService {
     if (BigInt(bytes.byteLength) !== asset.bytes || asset.sha256 !== request.artifact!.sha256 || bytes.byteLength !== request.artifact!.byteSize) {
       throw new ServiceUnavailableException('Stored export failed integrity checks');
     }
+    await recheckSession?.();
     await this.assertDownloadReadable(userId, projectId, requestId);
     return { bytes, filename: request.artifact!.filename, contentType: request.artifact!.contentType };
   }

@@ -47,8 +47,13 @@ export const sourceWritingCitationSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('source_passage'), passageId: z.uuid(), ...citationCommon }).strict(),
   z.object({ kind: z.literal('approved_claim'), claimRevisionId: z.uuid(), evidenceId: z.uuid(), ...citationCommon }).strict(),
 ]);
+// The published outline runtime treats model-owned section IDs as lowercase UUID-shaped labels.
+const outlineSectionLabel = z.union([
+  z.uuid(),
+  z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u),
+]);
 export const sourceOutlineBodySchema = z.object({ title: nonempty(500), sections: z.array(sectionSchema.extend({
-  passageIds: ids, requiredClaimRevisionIds: ids }).strict()).min(1).max(30) }).strict();
+  id: outlineSectionLabel, passageIds: ids, requiredClaimRevisionIds: ids }).strict()).min(1).max(30) }).strict();
 const paragraphSchema = z.object({ id: z.uuid(), text: nonempty(20000), citations: z.array(sourceWritingCitationSchema).max(100) }).strict();
 export const sourceSectionBodySchema = z.object({ sectionId: z.uuid(), paragraphs: z.array(paragraphSchema).min(1).max(300) }).strict();
 export const sourceFrameBodySchema = paragraphSchema.extend({ purpose: nonempty(200),visualHint: text(1000),transition: text(300),text: nonempty(3000) }).strict();
@@ -56,7 +61,7 @@ export const sourceAdaptationBodySchema = z.object({ title: nonempty(500).option
   paragraphs: z.array(paragraphSchema).min(1).max(300),frames: z.array(sourceFrameBodySchema).min(1).max(30).optional() }).strict();
 const reviewSchema = z.object({ status: z.enum(['ready', 'needs_human', 'insufficient_evidence']), issues: z.array(z.object({
   id: nonempty(100), severity: z.enum(['minor', 'major', 'critical']), paragraphId: z.uuid().optional(),
-  sectionId: z.uuid().optional(), reason: nonempty(2000) }).strict()).max(100), reasons: z.array(nonempty(2000)).max(100),
+  sectionId: outlineSectionLabel.optional(), reason: nonempty(2000) }).strict()).max(100), reasons: z.array(nonempty(2000)).max(100),
   modelCalls: z.number().int().min(0).max(4) }).strict();
 export const sourceWritingOutputSchema = z.object({ schemaVersion: z.literal('source-writing-v1'), requestId: z.uuid(),
   inputHash: hash, task: z.enum(['OUTLINE', 'SECTION', 'ADAPTATION']), status: z.enum(['ready', 'needs_human', 'insufficient_evidence']),
@@ -71,11 +76,22 @@ function exactlyOnce(haystack: string, needle: string): boolean {
   return start >= 0 && haystack.indexOf(needle, start + 1) < 0;
 }
 
+function canonicalOutlineSectionId(requestId: string, label: string): string {
+  if (z.uuid().safeParse(label).success) return label;
+  const digest = canonicalManifestHash({ requestId, outlineSectionLabel: label });
+  // UUIDv8 holds the server-derived ID with the RFC variant.
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-8${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
 /** Validates location and allowed evidence, not semantic truth or human approval. */
 export function validateSourceWritingOutput(raw: unknown, input: SourceWritingInput) {
   const request = sourceWritingInputSchema.parse(input), output = sourceWritingOutputSchema.parse(raw);
   if (output.requestId !== request.requestId || output.task !== request.task || output.inputHash !== canonicalManifestHash(request)
     || output.review.status !== output.status || Buffer.byteLength(JSON.stringify(output)) > 500000) throw new Error('Writing output identity or bounds mismatch');
+  if ((request.task !== 'OUTLINE' || output.status !== 'ready')
+    && output.review.issues.some(issue => issue.sectionId && !z.uuid().safeParse(issue.sectionId).success)) {
+    throw new Error('Writing review contains an invalid section identity');
+  }
   if (output.status !== 'ready') {
     if (output.content !== null) throw new Error('An unresolved writing output cannot contain accepted content');
     return { ...output, content: null };
@@ -86,13 +102,18 @@ export function validateSourceWritingOutput(raw: unknown, input: SourceWritingIn
   const requiredIds = new Set(request.requiredClaims.map(row => row.claimRevisionId));
   if (request.task === 'OUTLINE') {
     const content = sourceOutlineBodySchema.parse(output.content);
-    if (new Set(content.sections.map(row => row.id)).size !== content.sections.length
+    const sectionIds = new Map(content.sections.map(row => [row.id, canonicalOutlineSectionId(request.requestId, row.id)]));
+    if (new Set(sectionIds.values()).size !== content.sections.length
       || content.sections.some(row => row.passageIds.some(id => !passageIds.has(id))
         || row.requiredClaimRevisionIds.some(id => !requiredIds.has(id)))
       || content.sections.reduce((sum, row) => sum + row.targetWords, 0) !== request.brief.targetLength
       || request.requiredClaims.some(claim => !content.sections.some(row => row.requiredClaimRevisionIds.includes(claim.claimRevisionId)))
       || !content.sections.some(row => row.passageIds.length || row.requiredClaimRevisionIds.length)) throw new Error('Outline contains invalid evidence coverage or word allocation');
-    return { ...output, content };
+    const sections = content.sections.map(row => ({ ...row, id: sectionIds.get(row.id)! }));
+    const issues = output.review.issues.map(issue => issue.sectionId
+      ? { ...issue, sectionId: z.uuid().parse(sectionIds.get(issue.sectionId) ?? issue.sectionId) }
+      : issue);
+    return { ...output, content: { ...content, sections }, review: { ...output.review, issues } };
   }
   const content = request.task === 'SECTION' ? sourceSectionBodySchema.parse(output.content) : sourceAdaptationBodySchema.parse(output.content);
   if (request.task === 'SECTION' && (!('sectionId' in content) || content.sectionId !== request.section?.id)) throw new Error('Section identity changed');
@@ -128,9 +149,5 @@ export function validateSourceWritingOutput(raw: unknown, input: SourceWritingIn
   }
   if (request.requiredClaims.some(row => !citedClaims.has(row.claimRevisionId))
     || !content.paragraphs.some(row => row.citations.length)) throw new Error('Writing output omits its required supporting evidence');
-  if (request.task === 'SECTION') {
-    const words = content.paragraphs.map(row => row.text).join(' ').match(/\S+/gu)?.length ?? 0;
-    if (words < Math.ceil(request.section!.targetWords * 0.8) || words > Math.floor(request.section!.targetWords * 1.2)) throw new Error('Section length is outside its reviewed range');
-  }
   return { ...output, content };
 }

@@ -25,7 +25,8 @@ function failure(error: unknown): never {
   throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
 }
 
-export function createImportJobHandlers(dependencies: { prisma: PrismaClient; assets: PrivateAssetStore; providers?: ImportProviders }): JobHandler[] {
+export function createImportJobHandlers(dependencies: { prisma: PrismaClient; assets: PrivateAssetStore; providers?: ImportProviders;
+  indexImportedSnapshot?: (userId: string, projectId: string, snapshotId: string) => Promise<void> }): JobHandler[] {
   const providers = dependencies.providers ?? new ImportProviders();
   return (['WEB_IMPORT', 'DOCUMENT_IMPORT'] as const).map(operation => ({ operation,
     async execute(context) {
@@ -53,6 +54,12 @@ export function createImportJobHandlers(dependencies: { prisma: PrismaClient; as
         const document = validateDigitalDocument({ originalname: manifest.originalFilename, mimetype: manifest.mediaType, buffer: bytes, size: bytes.length });
         return await providers.document(document, manifest.settings, context.signal, () => context.recordSubmissionIntent());
       } catch (error) { return failure(error); }
+    },
+    async completed({ job }) {
+      if (!dependencies.indexImportedSnapshot) return;
+      const savedJob = await dependencies.prisma.job.findFirst({ where: { id: job.id, status: 'SUCCEEDED' }, select: { resultRefs: true } });
+      const result = z.object({ snapshotId: z.uuid() }).safeParse(savedJob?.resultRefs);
+      if (result.success) await dependencies.indexImportedSnapshot(job.requestedBy, job.projectId, result.data.snapshotId);
     },
     async commit(tx, raw, job) {
       try {

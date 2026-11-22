@@ -25,6 +25,7 @@ MAX_MODEL_CALLS = 4
 MAX_OUTPUT_BYTES = 450_000
 MAX_STATE_BYTES = 750_000
 MAX_SECTION_WORDS = 20_000
+MAX_PASSAGE_INDEX = MAX_PASSAGES
 FORMATS = frozenset(("TELEGRAM_POST", "LINKEDIN_TEXT", "LINKEDIN_COVER", "INSTAGRAM_COVER",
                      "LINKEDIN_CAROUSEL", "INSTAGRAM_CAROUSEL", "INSTAGRAM_STORIES"))
 SEVERITIES = frozenset(("minor", "major", "critical"))
@@ -247,16 +248,80 @@ def _paragraph(value):
     return value
 
 
+def _indexed_section_mode(state):
+    value = state["input"]
+    return value["task"] == "SECTION" and not value["requiredClaims"]
+
+
+def _section_word_range(section):
+    target = section["targetWords"]
+    return {"minimum": math.ceil(target * 0.8), "maximum": math.floor(target * 1.2)}
+
+
+def _section_paragraph(text, passage_index, state, ordinal, paragraph_id=None):
+    text = string(text, 20_000)
+    passage_index = integer(passage_index, 0, MAX_PASSAGE_INDEX)
+    passages = state["input"]["passages"]
+    if passage_index == len(passages):
+        citations = []
+    else:
+        if passage_index >= len(passages):
+            fail("SECTION_PASSAGE_INDEX")
+        passage = passages[passage_index]
+        citations = [{"kind": "source_passage", "passageId": passage["id"],
+                      "quote": passage["quote"], "assertionText": text}]
+    if paragraph_id is None:
+        namespace = uuid.UUID(state["input"]["requestId"])
+        paragraph_id = str(uuid.uuid5(namespace,
+            "source-section-paragraph:" + state["input"]["section"]["id"] + ":" + str(ordinal)))
+    else:
+        paragraph_id = canonical_uuid(paragraph_id)
+    result = {"id": paragraph_id, "text": text, "citations": citations}
+    _paragraph(result)
+    return result
+
+
+def _indexed_section_candidate(value, state):
+    object_shape(value, ("task", "title", "sectionId", "sections", "paragraphs", "sectionParagraphs",
+                         "frames", "coverInstruction"))
+    # The frozen request selects the task. Only the matching section body is
+    # passed to review; model-supplied metadata for other tasks is discarded.
+    if canonical_uuid(value["sectionId"]) != state["input"]["section"]["id"]:
+        fail("SECTION_ID")
+    raw_paragraphs = array(value["sectionParagraphs"], MAX_PARAGRAPHS, 1)
+    paragraphs = []
+    for ordinal, raw in enumerate(raw_paragraphs):
+        object_shape(raw, ("text", "passageIndex"))
+        paragraphs.append(_section_paragraph(raw["text"], raw["passageIndex"], state, ordinal))
+    if len({row["id"] for row in paragraphs}) != len(paragraphs):
+        fail("DUPLICATE_PARAGRAPH")
+    return {"sectionId": state["input"]["section"]["id"], "paragraphs": paragraphs}
+
+
 def _candidate(raw, state):
     value = load(raw)
-    object_shape(value, ("task", "title", "sectionId", "sections", "paragraphs", "frames", "coverInstruction"))
+    if _indexed_section_mode(state):
+        return _indexed_section_candidate(value, state)
+    object_shape(value, ("task", "title", "sectionId", "sections", "paragraphs", "sectionParagraphs", "frames", "coverInstruction"))
     task = state["input"]["task"]
+    if task == "SECTION":
+        section_id = canonical_uuid(value["sectionId"])
+        if section_id != state["input"]["section"]["id"]:
+            fail("SECTION_ID")
+        paragraphs = [_clean_paragraph(row) for row in array(value["paragraphs"], MAX_PARAGRAPHS, 1)]
+        for paragraph in paragraphs:
+            _paragraph(paragraph)
+        if len({row["id"] for row in paragraphs}) != len(paragraphs):
+            fail("DUPLICATE_PARAGRAPH")
+        return {"sectionId": section_id, "paragraphs": paragraphs}
     if value["task"] != task:
         fail("CANDIDATE_TASK")
     title = string(value["title"], 500, empty=True)
     section_id = string(value["sectionId"], 36, empty=True)
     raw_sections = array(value["sections"], MAX_SECTIONS)
     raw_paragraphs = array(value["paragraphs"], 300)
+    if array(value["sectionParagraphs"], MAX_PARAGRAPHS):
+        fail("CANDIDATE_TASK_FIELDS")
     raw_frames = array(value["frames"], 30)
     cover_instruction = string(value["coverInstruction"], 2000, empty=True)
     if task != "ADAPTATION" and (raw_frames or cover_instruction):
@@ -273,18 +338,6 @@ def _candidate(raw, state):
         if sum(row["targetWords"] for row in sections) != state["input"]["brief"]["targetLength"]:
             fail("OUTLINE_WORD_BUDGET")
         return {"title": title, "sections": sections}
-    if task == "SECTION":
-        if title or raw_sections:
-            fail("CANDIDATE_TASK_FIELDS")
-        if canonical_uuid(section_id) != state["input"]["section"]["id"]:
-            fail("SECTION_ID")
-        paragraphs = [_clean_paragraph(row) for row in raw_paragraphs]
-        array(paragraphs, MAX_PARAGRAPHS, 1)
-        for paragraph in paragraphs:
-            _paragraph(paragraph)
-        if len({row["id"] for row in paragraphs}) != len(paragraphs):
-            fail("DUPLICATE_PARAGRAPH")
-        return {"sectionId": section_id, "paragraphs": paragraphs}
     if section_id or raw_sections:
         fail("CANDIDATE_TASK_FIELDS")
     paragraphs = [_clean_paragraph(row) for row in raw_paragraphs]
@@ -614,7 +667,7 @@ def _review(raw, state):
 
 def _patch(raw, state):
     patch_value = load(raw)
-    object_shape(patch_value, ("reviewedHash", "paragraphReplacements", "sectionReplacements"))
+    object_shape(patch_value, ("reviewedHash", "paragraphReplacements", "sectionParagraphReplacements", "sectionReplacements"))
     if patch_value["reviewedHash"] != state["contentHash"]:
         fail("STALE_PATCH")
     content = copy.deepcopy(state["content"])
@@ -622,9 +675,27 @@ def _patch(raw, state):
     flagged_paragraphs = {issue["paragraphId"] for issue in issues if issue["paragraphId"]}
     flagged_sections = {issue["sectionId"] for issue in issues if issue["sectionId"]}
     paragraph_replacements = array(patch_value["paragraphReplacements"], MAX_PARAGRAPHS)
+    section_paragraph_replacements = array(patch_value["sectionParagraphReplacements"], MAX_PARAGRAPHS)
     section_replacements = array(patch_value["sectionReplacements"], MAX_SECTIONS)
     seen_paragraphs = set()
     seen_sections = set()
+    if _indexed_section_mode(state):
+        if paragraph_replacements or section_replacements:
+            fail("PATCH_TASK_FIELDS")
+        for replacement in section_paragraph_replacements:
+            object_shape(replacement, ("paragraphId", "text", "passageIndex"))
+            ident = canonical_uuid(replacement["paragraphId"])
+            if ident not in flagged_paragraphs or ident in seen_paragraphs:
+                fail("UNFLAGGED_PARAGRAPH_PATCH")
+            seen_paragraphs.add(ident)
+            target = next((row for row in content["paragraphs"] if row["id"] == ident), None)
+            if target is None:
+                fail("UNKNOWN_PATCH_PARAGRAPH")
+            revised = _section_paragraph(replacement["text"], replacement["passageIndex"], state,
+                                         content["paragraphs"].index(target), ident)
+            content["paragraphs"][content["paragraphs"].index(target)] = revised
+    elif section_paragraph_replacements:
+        fail("PATCH_TASK_FIELDS")
     for replacement in paragraph_replacements:
         object_shape(replacement, ("paragraphId", "paragraph"))
         ident = canonical_uuid(replacement["paragraphId"])
@@ -735,6 +806,10 @@ def execute(operation, payload):
         request = {key: state["input"].get(key) for key in
                    ("task", "brief", "style", "context", "section", "approvedOutline", "format", "approvedArticle", "passages", "requiredClaims")
                    if key in state["input"]}
+        if state["input"]["task"] == "SECTION":
+            request["sectionWordRange"] = _section_word_range(state["input"]["section"])
+        if _indexed_section_mode(state):
+            request["paragraphEvidenceMode"] = "one supplied passage per factual paragraph; passageIndex is zero-based"
         return {"state": state, "request": request, "status": "running"}
 
     if operation == "draft":
@@ -749,12 +824,6 @@ def execute(operation, payload):
                 passage_ids, claim_ids = _validate_paragraph_citations(_prose_rows(content), state)
             else:
                 passage_ids, claim_ids = _validate_outline(state, content)
-            section = state["input"].get("section")
-            if section and "paragraphs" in content:
-                words = sum(len(row["text"].split()) for row in content["paragraphs"])
-                target = section["targetWords"]
-                if not math.ceil(target * 0.8) <= words <= math.floor(target * 1.2):
-                    fail("SECTION_WORD_BUDGET")
             state.update({"content": content, "contentHash": digest(content), "phase": "review",
                           "usedPassageIds": passage_ids, "usedClaimRevisionIds": claim_ids})
         except ValueError as exc:
@@ -774,6 +843,10 @@ def execute(operation, payload):
                    "format": state["input"].get("format"),
                    "passages": state["input"]["passages"], "requiredClaims": state["input"]["requiredClaims"],
                    "content": state["content"], "reviewedHash": state["contentHash"]}
+        if state["input"]["task"] == "SECTION":
+            request["sectionWordRange"] = _section_word_range(state["input"]["section"])
+        if _indexed_section_mode(state):
+            request["paragraphEvidenceMode"] = "Each factual paragraph has one exact full-passage citation."
         return {"state": state, "request": request, "status": "running"}
 
     if operation == "review":
@@ -814,6 +887,10 @@ def execute(operation, payload):
                    "content": state["content"],
                    "reviewedHash": state["contentHash"],
                    "issues": [issue for issue in state["review"]["issues"] if issue["severity"] in BLOCKING]}
+        if state["input"]["task"] == "SECTION":
+            request["sectionWordRange"] = _section_word_range(state["input"]["section"])
+        if _indexed_section_mode(state):
+            request["paragraphEvidenceMode"] = "For each flagged factual paragraph choose one passageIndex; preserve paragraphId."
         return {"state": state, "request": request, "status": "running"}
 
     if operation == "patch":
@@ -822,11 +899,6 @@ def execute(operation, payload):
         state["modelCalls"] += 1
         try:
             state["content"], state["usedPassageIds"], state["usedClaimRevisionIds"] = _patch(value.get("model_json"), state)
-            section = state["input"].get("section")
-            if section and "paragraphs" in state["content"]:
-                words = sum(len(row["text"].split()) for row in state["content"]["paragraphs"])
-                if not math.ceil(section["targetWords"] * 0.8) <= words <= math.floor(section["targetWords"] * 1.2):
-                    fail("SECTION_WORD_BUDGET")
             state["contentHash"] = digest(state["content"])
             state["phase"] = "review_again"
         except ValueError as exc:

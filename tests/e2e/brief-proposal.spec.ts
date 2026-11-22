@@ -4,6 +4,17 @@ import { projectId } from './fixtures/m63-editorial.js';
 
 const briefUrl = `/projects/${projectId}/brief`;
 
+test('an incomplete AI proposal offers an editable starter without overwriting existing fields', async ({ page }) => {
+  const fixture = await installBriefProposalFixture(page, 'needs-human');
+  await page.goto(briefUrl);
+  await page.locator('#brief-audience').fill('Моя аудиторія');
+  await page.getByRole('button', { name: 'Запропонувати бриф' }).click();
+  await page.getByRole('button', { name: 'Заповнити порожні поля' }).click();
+  await expect(page.locator('#brief-audience')).toHaveValue('Моя аудиторія');
+  await expect(page.locator('#brief-message')).not.toHaveValue('');
+  expect(fixture.briefSaves).toHaveLength(0);
+});
+
 test('AI brief proposal is a reviewable draft and only the normal save persists it', async ({ page }) => {
   const fixture = await installBriefProposalFixture(page);
   await page.goto(briefUrl);

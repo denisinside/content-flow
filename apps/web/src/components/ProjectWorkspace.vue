@@ -11,7 +11,9 @@ import EvidenceWorkspace from './EvidenceWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
 import EditorPresence from './EditorPresence.vue'
 import ProjectLifecycle from './ProjectLifecycle.vue'
-const ArticleWorkspace = defineAsyncComponent(() => import('./ArticleWorkspace.vue'))
+const loadArticleWorkspace = () => import('./ArticleWorkspace.vue')
+const ArticleWorkspace = defineAsyncComponent(loadArticleWorkspace)
+function preloadArticleWorkspace() { void loadArticleWorkspace().catch(() => {}) }
 const TelegramWorkspace = defineAsyncComponent(() => import('./TelegramWorkspace.vue'))
 const ScriptWorkspace = defineAsyncComponent(() => import('./ScriptWorkspace.vue'))
 const ExportWorkspace = defineAsyncComponent(() => import('./ExportWorkspace.vue'))
@@ -90,6 +92,7 @@ let requestController: AbortController | null = null
 
 const page = computed(() => pathname.value.match(/^\/projects\/([0-9a-f-]{36})(?:\/(?:sources|facts|brief|article|channels|telegram|visuals|export))?\/?$/i)?.[1] ?? null)
 const isArticle = computed(() => /\/article\/?$/i.test(pathname.value))
+const openArticleHistory = computed(() => new URLSearchParams(search.value).get('review') === '1')
 const isChannels = computed(() => /\/(?:channels|telegram)\/?$/i.test(pathname.value))
 const channelFormats = computed(() => (currentProject.value?.formats.filter((format): format is ChannelFormat => ['LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'TELEGRAM_POST'].includes(format)) ?? []))
 const selectedChannelFormat = computed<ChannelFormat>(() => {
@@ -164,6 +167,14 @@ function routeTo(path: string, push = true) {
     currentProject.value = null
     void loadProjects()
   }
+}
+
+function openExportMaterial(projectId: string, format: string) {
+  const root = `/projects/${projectId}`
+  if (format === 'ARTICLE') return routeTo(`${root}/article?review=1`)
+  const visual = format.endsWith('_VISUAL')
+  const channelFormat = format.replace(/_(VISUAL|SCRIPT)$/u, '')
+  routeTo(`${root}/${visual ? 'visuals' : 'channels'}?format=${encodeURIComponent(channelFormat)}`)
 }
 
 function chooseListState(value: 'ACTIVE' | 'ARCHIVED' | 'TRASHED') {
@@ -741,6 +752,8 @@ onBeforeUnmount(() => {
             v-if="currentProject.formats.includes('ARTICLE') || historicalArticle || isArticle"
             :href="`/projects/${currentProject.id}/article`"
             :aria-current="isArticle ? 'page' : undefined"
+            @pointerenter="preloadArticleWorkspace"
+            @focus="preloadArticleWorkspace"
             @click.prevent="routeTo(`/projects/${currentProject.id}/article`)"
           >Стаття</a>
           <a
@@ -804,6 +817,22 @@ onBeforeUnmount(() => {
       </Alert>
 
       <template v-else-if="currentProject">
+        <KeepAlive
+          :key="`${userId}:${currentProject.id}:${isTrashed}:${Boolean(currentProject.archivedAt)}`"
+          :max="1"
+        >
+          <ArticleWorkspace
+            v-if="isArticle && !isTrashed"
+            :project-id="currentProject.id"
+            :project-topic="currentProject.topic"
+            :csrf-token="csrfToken"
+            :user-id="userId"
+            :archived="Boolean(currentProject.archivedAt)"
+            :open-history="openArticleHistory"
+            @session-expired="emit('session-expired')"
+            @open-brief="routeTo(`/projects/${currentProject.id}/brief`)"
+          />
+        </KeepAlive>
         <section
           v-if="isTrashed"
           class="project-trashed-state"
@@ -831,16 +860,9 @@ onBeforeUnmount(() => {
           />
         </section>
         <template v-else-if="isArticle">
-          <ArticleWorkspace
-            :key="currentProject.id"
-            :project-id="currentProject.id"
-            :project-topic="currentProject.topic"
-            :csrf-token="csrfToken"
-            :user-id="userId"
-            :archived="Boolean(currentProject.archivedAt)"
-            @session-expired="emit('session-expired')"
-          />
-        </template><template v-else-if="isChannels">
+          <!-- The retained editor is mounted above. -->
+        </template>
+        <template v-else-if="isChannels">
           <TelegramWorkspace
             :key="currentProject.id"
             :project-id="currentProject.id"
@@ -852,6 +874,7 @@ onBeforeUnmount(() => {
             :archived="Boolean(currentProject.archivedAt)"
             @session-expired="emit('session-expired')"
             @format-change="routeTo(`/projects/${currentProject.id}/channels?format=${$event}`)"
+            @review-article="routeTo(`/projects/${currentProject.id}/article?review=1`)"
             @caption-generated="scriptRefreshEpoch++"
           />
           <ScriptWorkspace
@@ -877,6 +900,7 @@ onBeforeUnmount(() => {
             @session-expired="emit('session-expired')"
             @dirty="visualDirty = $event"
             @format-change="routeTo(`/projects/${currentProject.id}/visuals?format=${$event}`)"
+            @open-source="routeTo(`/projects/${currentProject.id}/channels?format=${selectedVisualFormat}`)"
           />
         </template><template v-else-if="isExport">
           <ExportWorkspace
@@ -887,6 +911,7 @@ onBeforeUnmount(() => {
             :user-id="userId"
             :archived="Boolean(currentProject.archivedAt)"
             @session-expired="emit('session-expired')"
+            @open-material="openExportMaterial(currentProject.id, $event)"
           />
         </template><template v-else-if="isBrief">
           <BriefWorkspace
@@ -1144,7 +1169,7 @@ onBeforeUnmount(() => {
               <div>
                 <h2>Готовність і експорт</h2>
                 <p class="project-detail-copy">
-                  Перевірте погоджені матеріали й завантажте вибраний файл.
+                  Якщо файл недоступний, почніть тут. Для кожного матеріалу показано причину й перехід до потрібної вкладки.
                 </p>
               </div>
               <Button

@@ -167,7 +167,7 @@ test('shows a useful empty-result state without inventing a supported passage', 
   await query.fill('Яких даних немає у звіті?')
   await page.getByRole('button', { name: 'Знайти в джерелах', exact: true }).click()
 
-  await expect(page.getByText('Спробуйте переформулювати запит або змінити вибрані джерела.')).toBeVisible()
+  await expect(page.getByText('За цим запитом уривків не знайдено.', { exact: false })).toBeVisible()
   await expect(page.getByText('У дослідженні взяли участь 12 мешканців міста.', { exact: true })).toHaveCount(0)
   expect(fixture.searchBodies).toHaveLength(1)
   expect(fixture.searchBodies[0]).toMatchObject({ query: 'Яких даних немає у звіті?' })

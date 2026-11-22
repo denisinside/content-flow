@@ -366,7 +366,12 @@ async function toggleIncluded(material: Material) {
 }
 
 async function closeReader() {
-  if (busy.value || editing.value || detailState.value === 'loading') return
+  if (busy.value || editing.value) return
+  if (detailState.value === 'loading') {
+    controller?.abort()
+    epoch++
+  }
+  detailState.value = 'idle'
   const materialId = selectedMaterial.value?.id
   selectedMaterial.value = null
   selectedSnapshot.value = null
@@ -798,6 +803,7 @@ onBeforeUnmount(() => {
             <h3 id="source-list-title">
               Збережені джерела
             </h3>
+            <p>Вибрані фактичні джерела використовуються для пошуку доказів і генерації з джерел.</p>
           </div>
         </div>
         <p
@@ -852,11 +858,11 @@ onBeforeUnmount(() => {
               type="button"
               :disabled="archived || busy || detailState === 'loading' || includeBusyId === material.id || (editing && selectedMaterial?.id === material.id)"
               :aria-pressed="material.included"
-              :aria-label="`${material.included ? 'Ураховується' : 'Виключено'}: ${material.included ? 'Виключити' : 'Включити'} ${material.label}`"
+              :aria-label="`${material.included ? 'Вибрано для проєкту' : 'Не вибрано'}: ${material.label}`"
               @click="toggleIncluded(material)"
             >
               <span aria-hidden="true">{{ material.included ? '✓' : '＋' }}</span>
-              {{ material.included ? 'Ураховується' : 'Виключено' }}
+              {{ material.included ? 'Вибрано для проєкту' : 'Не вибрано' }}
             </button>
           </li>
         </ul>
@@ -885,7 +891,7 @@ onBeforeUnmount(() => {
               v-if="!editing"
               class="source-button"
               variant="ghost"
-              :disabled="busy || detailState === 'loading'"
+              :disabled="busy"
               @click="closeReader"
             >
               До списку

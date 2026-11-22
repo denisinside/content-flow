@@ -101,8 +101,8 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await page.getByLabel('Назва', { exact: true }).fill('Ручне джерело');
   await page.getByLabel('Текст джерела').fill(safePayload);
   await page.getByRole('button', { name: 'Додати джерело' }).click();
-  await expect(page.locator('.source-plain-text')).toContainText(safePayload);
-  expect(await page.locator('.source-plain-text script').count()).toBe(0);
+  await expect(page.locator('.source-raw-text pre')).toContainText(safePayload);
+  expect(await page.locator('.source-formatted-text script').count()).toBe(0);
   expect(await page.locator('script').evaluateAll(nodes => nodes.every(node => !node.textContent?.includes('must remain text')))).toBe(true);
   await page.locator('.source-metadata > summary').click();
   await page.locator('.source-fragments > summary').click();
@@ -118,15 +118,15 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await page.getByLabel('Назва', { exact: true }).fill('Завантажений конспект');
   await page.locator('#source-file').setInputFiles({ name: 'interview.md', mimeType: 'text/markdown', buffer: Buffer.from(markdown, 'utf8') });
   await page.getByRole('button', { name: 'Додати джерело' }).click();
-  await expect(page.locator('.source-plain-text')).toContainText('Це файл **Markdown**');
-  await expect(page.locator('.source-plain-text')).not.toContainText('<script>');
+  await expect(page.locator('.source-formatted-text')).toContainText('Це файл Markdown');
+  await expect(page.locator('.source-formatted-text')).not.toContainText('<script>');
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Завантажити оригінал' }).click();
   expect((await downloadPromise).suggestedFilename()).toBe('interview.md');
   await captureAtWidths(page, 'uploaded');
 
   await sourceItem(page, 'Ручне джерело').click();
-  await expect(page.locator('.source-plain-text')).toContainText('Надійні факти потребують точного контексту.');
+  await expect(page.locator('.source-formatted-text')).toContainText('Надійні факти потребують точного контексту.');
   await page.getByRole('button', { name: 'Редагувати текст' }).click();
   const revisedText = 'Нова редакція збережена окремою версією.\nСтарий текст залишається доступним в історії.';
   await page.getByLabel('Нова версія тексту').fill(revisedText);
@@ -134,13 +134,13 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await expect(page.getByRole('button', { name: 'Додати джерело' })).toBeDisabled();
   await expect(page.getByLabel('Нова версія тексту')).toHaveValue(revisedText);
   await page.getByRole('button', { name: 'Зберегти нову версію' }).click();
-  await expect(page.locator('.source-plain-text')).toContainText('Нова редакція збережена');
+  await expect(page.locator('.source-formatted-text')).toContainText('Нова редакція збережена');
   await page.locator('.source-history').locator('summary').click();
   await page.getByRole('button', { name: /Версія 1/ }).click();
-  await expect(page.locator('.source-plain-text')).toContainText('Надійні факти потребують точного контексту.');
+  await expect(page.locator('.source-formatted-text')).toContainText('Надійні факти потребують точного контексту.');
   await page.locator('.source-history').locator('summary').click();
   await page.getByRole('button', { name: /Версія 2/ }).click();
-  await expect(page.locator('.source-plain-text')).toContainText('Нова редакція збережена');
+  await expect(page.locator('.source-formatted-text')).toContainText('Нова редакція збережена');
 
   const versionConflictText = 'Мій текст після конфлікту лишається доступним.';
   await page.getByRole('button', { name: 'Редагувати текст' }).click();
@@ -164,14 +164,14 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await expect(page.getByLabel('Нова версія тексту')).toHaveValue(versionConflictText);
   await expect(page.getByText('Завантажено актуальну версію. Ваш текст залишився у полі редагування.')).toBeVisible();
   await page.getByRole('button', { name: 'Зберегти нову версію' }).click();
-  await expect(page.locator('.source-plain-text')).toContainText(versionConflictText);
+  await expect(page.locator('.source-formatted-text')).toContainText(versionConflictText);
 
-  await page.getByRole('button', { name: 'Виключити Ручне джерело' }).click();
-  await expect(page.getByRole('button', { name: 'Включити Ручне джерело' })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('button', { name: 'Вибрано для проєкту: Ручне джерело' }).click();
+  await expect(page.getByRole('button', { name: 'Не вибрано: Ручне джерело' })).toHaveAttribute('aria-pressed', 'false');
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Включити Ручне джерело' })).toHaveAttribute('aria-pressed', 'false');
-  await page.getByRole('button', { name: 'Включити Ручне джерело' }).click();
-  await expect(page.getByRole('button', { name: 'Виключити Ручне джерело' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Не вибрано: Ручне джерело' })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('button', { name: 'Не вибрано: Ручне джерело' }).click();
+  await expect(page.getByRole('button', { name: 'Вибрано для проєкту: Ручне джерело' })).toHaveAttribute('aria-pressed', 'true');
 
   let releaseDownload!: () => void;
   let markDownloadStarted!: () => void;
@@ -189,7 +189,7 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   const fileRevisionText = 'Файл оновлено вручну, його попередній оригінал залишається доступним.';
   await page.getByLabel('Нова версія тексту').fill(fileRevisionText);
   await page.getByRole('button', { name: 'Зберегти нову версію' }).click();
-  await expect(page.locator('.source-plain-text')).toContainText(fileRevisionText);
+  await expect(page.locator('.source-formatted-text')).toContainText(fileRevisionText);
   releaseDownload();
   await expect(page.getByRole('button', { name: 'Завантажити оригінал' })).toBeEnabled();
 
@@ -226,7 +226,7 @@ test('members add, inspect, revise and download immutable source snapshots', asy
   await expect(page.getByRole('button', { name: 'Завантажити оригінал' })).toBeDisabled();
   await expect(sourceItem(page, 'Ручне джерело')).toHaveCount(0);
   releaseRefresh();
-  await expect(page.locator('.source-plain-text')).toContainText(pendingWriteText);
+  await expect(page.locator('.source-formatted-text')).toContainText(pendingWriteText);
   await expect(page.getByRole('button', { name: 'Завантажити оригінал' })).toBeEnabled();
 
   await openSourceForm(page);
@@ -238,7 +238,7 @@ test('members add, inspect, revise and download immutable source snapshots', asy
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ message: 'Unavailable' }) });
   });
   await page.getByRole('button', { name: 'Додати джерело' }).click();
-  await expect(page.locator('.source-plain-text')).toContainText('Запис уже збережено');
+  await expect(page.locator('.source-formatted-text')).toContainText('Запис уже збережено');
   await expect(page.getByRole('button', { name: 'Оновити список джерел' })).toBeVisible();
   await page.unroute('**/api/v1/projects/*/materials');
   await page.getByRole('button', { name: 'Оновити список джерел' }).click();

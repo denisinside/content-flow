@@ -1,9 +1,15 @@
 import { z } from 'zod';
 import { sourceWritingInputSchema, validateSourceWritingOutput, type SourceWritingInput } from './writing-contracts.js';
 
+export const sourceWritingReleaseId = z.enum(['source-writing-2026-10-20.1', 'source-writing-2026-11-07.1', 'source-writing-2026-11-08.1', 'source-writing-2026-11-22.1']);
+type SourceWritingReleaseId = z.infer<typeof sourceWritingReleaseId>;
+const RELEASE_DIGESTS: Record<SourceWritingReleaseId, string> = {
+  'source-writing-2026-10-20.1': '627ff3011fa324418e2d420290eb1e42ebb03f1a511b7822e376e3f13c024b75',
+  'source-writing-2026-11-07.1': '2f81d936d16c47aeb2eacc071a72c211dd83af0352d349d70ee3bf81d04f2fa2',
+  'source-writing-2026-11-08.1': 'e61f1cfc3b69f40ee8500c3fb3e34986b661d9f01228c084dcec4aa66e22e1c4',
+  'source-writing-2026-11-22.1': 'b86d6c9334b9bef8e1450ee7715641320d3dd62e49f426bced0dec25f33bb624',
+};
 const RELEASE = {
-  releaseId: 'source-writing-2026-10-20.1',
-  configDigest: '627ff3011fa324418e2d420290eb1e42ebb03f1a511b7822e376e3f13c024b75',
   workflowIdEnv: 'DIFY_SOURCE_WRITING_PUBLISHED_WORKFLOW_ID',
   configDigestEnv: 'DIFY_SOURCE_WRITING_CONFIG_SHA256',
   apiKeyEnv: 'DIFY_SOURCE_WRITING_API_KEY',
@@ -21,7 +27,7 @@ const MAX_OUTPUT_BYTES = 500_000;
 export type SourceWritingWorkflowSettings = Readonly<{
   endpoint: string;
   workflowId: string;
-  releaseId: typeof RELEASE.releaseId;
+  releaseId: SourceWritingReleaseId;
   configDigest: string;
   apiKey: string;
 }>;
@@ -51,10 +57,11 @@ function configuredRelease(env: Record<string, string | undefined>): Omit<Source
   const endpoint = safeEndpoint(env[RELEASE.apiBaseEnv], env['NODE_ENV'] !== 'production');
   const workflowId = env[RELEASE.workflowIdEnv];
   const digest = env[RELEASE.configDigestEnv];
-  if (!endpoint || !uuid(workflowId) || digest !== RELEASE.configDigest) {
+  const releaseId = digest && sourceWritingReleaseId.options.find(id => RELEASE_DIGESTS[id] === digest);
+  if (!endpoint || !uuid(workflowId) || !digest || !releaseId) {
     throw new SourceWritingProviderError('CONFIG', 'The published source-writing workflow release is not configured', 'NOT_SUBMITTED');
   }
-  return { endpoint, workflowId, releaseId: RELEASE.releaseId, configDigest: RELEASE.configDigest };
+  return { endpoint, workflowId, releaseId, configDigest: digest };
 }
 
 export function sourceWritingWorkflowRelease(env: Record<string, string | undefined> = process.env): Omit<SourceWritingWorkflowSettings, 'apiKey'> {

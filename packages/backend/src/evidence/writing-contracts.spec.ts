@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { canonicalManifestHash } from '../jobs/job-service.js';
 import { sourceWritingInputSchema, validateSourceWritingOutput, type SourceWritingInput } from './writing-contracts.js';
 
@@ -28,6 +29,26 @@ describe('source writing acceptance boundary', () => {
     expect(validateSourceWritingOutput(outline(request), request).status).toBe('ready');
     expect(request.requiredClaims).toEqual([]);
   });
+  it('assigns a stable UUID to a model-owned outline label with a non-RFC variant', () => {
+    const request = input();
+    const output = outline(request);
+    const label = 'c3d4e5f6-a7b8-4c3d-0e4f-5a6b7c8d9e0f';
+    output.content.sections[0]!.id = label;
+    const withReview = { ...output, review: { ...output.review,
+      issues: [{ id: 'minor', severity: 'minor', sectionId: label, reason: 'Уточнити назву' }] } };
+    const parsed = validateSourceWritingOutput(withReview, request);
+    if (!parsed.content || !('sections' in parsed.content)) throw new Error('Expected a ready outline');
+    const section = parsed.content.sections[0]!;
+    expect(z.uuid().safeParse(section.id).success).toBe(true);
+    expect(section.id).not.toBe(label);
+    expect(parsed.review.issues[0]?.sectionId).toBe(section.id);
+    expect(section.passageIds).toEqual([request.passages[0]!.id]);
+    expect(validateSourceWritingOutput(parsed, request)).toEqual(parsed);
+    expect(validateSourceWritingOutput(withReview, request)).toEqual(parsed);
+    output.content.sections[0]!.targetWords = 50;
+    output.content.sections.push({ ...output.content.sections[0]! });
+    expect(() => validateSourceWritingOutput(withReview, request)).toThrow(/evidence coverage/);
+  });
   it('rejects another request/hash, invented passage and word allocation changes', () => {
     const request = input();
     expect(() => validateSourceWritingOutput({ ...outline(request), requestId: randomUUID() }, request)).toThrow();
@@ -46,6 +67,14 @@ describe('source writing acceptance boundary', () => {
     expect(() => validateSourceWritingOutput(ambiguous, request)).toThrow();
     const foreign = section(request); foreign.content.paragraphs[0]!.citations[0]!.passageId = randomUUID();
     expect(() => validateSourceWritingOutput(foreign, request)).toThrow();
+  });
+  it('accepts a reviewed cited section when its length differs from the target', () => {
+    const request = input('SECTION');
+    const output = section(request);
+    output.content.paragraphs[0]!.text = output.content.paragraphs[0]!.citations[0]!.assertionText;
+    expect(validateSourceWritingOutput(output, request).status).toBe('ready');
+    output.review.status = 'needs_human';
+    expect(() => validateSourceWritingOutput(output, request)).toThrow();
   });
   it('requires every explicitly selected legacy claim and its exact evidence', () => {
     const request = input();

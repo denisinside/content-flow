@@ -16,8 +16,8 @@ DIRECTORY = ROOT / "packages/backend/src/evidence/workflows/source-writing"
 RUNTIME = ROOT / "scripts/dify/source_writing_runtime.py"
 OUTPUT_PATH = DIRECTORY / "source-writing-v1.yml"
 RELEASE_PATH = DIRECTORY / "release.json"
-RELEASE_ID = "source-writing-2026-10-20.1"
-PROMPT_VERSION = "source-writing-prompt-v1"
+RELEASE_ID = "source-writing-2026-11-22.1"
+PROMPT_VERSION = "source-writing-prompt-v3"
 TARGET = {"difyVersion": "1.17.1", "graphonVersion": "0.7.0", "dslVersion": "0.7.0"}
 LIMITS = {"maxInputBytes": 150000, "maxContextBytes": 60000, "maxContextSnapshots": 100,
           "maxPassages": 1000,
@@ -66,6 +66,9 @@ def schemas() -> dict[str, dict]:
     }, "Use passageId only for source_passage; use claimRevisionId and evidenceId only for approved_claim. Unused ID fields are empty strings.")
     paragraph = object_schema({"id": string(36, 36), "text": string(20000, 1),
                                "citations": array(citation, 100)})
+    section_paragraph = object_schema({"text": string(20000, 1),
+        "passageIndex": {"type": "integer", "minimum": 0, "maximum": LIMITS["maxPassages"]}},
+        "Write one factual idea per paragraph and select one supplied passage by its zero-based index.")
     frame = object_schema({"id": string(36,36),"text": string(3000,1),"citations": array(citation,100),
         "purpose": string(200,1),"visualHint": string(1000),"transition": string(300)})
     section = object_schema({"id": string(36, 36), "title": string(300, 1), "purpose": string(2000, 1),
@@ -74,7 +77,9 @@ def schemas() -> dict[str, dict]:
                             "requiredClaimRevisionIds": array(string(36, 36), 100)})
     writer = object_schema({"task": {"type": "string", "enum": ["OUTLINE", "SECTION", "ADAPTATION"]},
         "title": string(500), "sectionId": string(36), "sections": array(section, 30),
-        "paragraphs": array(paragraph, 300),"frames": array(frame,30),"coverInstruction": string(2000)},
+        "paragraphs": array(paragraph, LIMITS["maxParagraphs"]),
+        "sectionParagraphs": array(section_paragraph, LIMITS["maxParagraphs"]),
+        "frames": array(frame,30),"coverInstruction": string(2000)},
         "For the selected task fill only its fields; return empty strings/arrays for unused fields.")
     issue = object_schema({"id": string(100, 1),
         "severity": {"type": "string", "enum": ["minor", "major", "critical"]},
@@ -83,11 +88,13 @@ def schemas() -> dict[str, dict]:
     review = object_schema({"reviewedHash": string(64, 64),
         "status": {"type": "string", "enum": ["ready", "needs_human", "insufficient_evidence"]},
         "issues": array(issue, 40), "reasons": array(string(2000, 1), 10)})
+    section_paragraph_replacement = object_schema({"paragraphId": string(36, 36), **section_paragraph["properties"]})
     paragraph_replacement = object_schema({"paragraphId": string(36, 36), "paragraph": paragraph})
     section_replacement = object_schema({"sectionId": string(36, 36), "section": section})
     patch = object_schema({"reviewedHash": string(64, 64),
-        "paragraphReplacements": array(paragraph_replacement, 300),
-        "sectionReplacements": array(section_replacement, 30)})
+        "paragraphReplacements": array(paragraph_replacement, LIMITS["maxParagraphs"]),
+        "sectionParagraphReplacements": array(section_paragraph_replacement, LIMITS["maxParagraphs"]),
+        "sectionReplacements": array(section_replacement, LIMITS["maxSections"])})
     return {"writer": writer, "review": review, "patch": patch}
 
 
@@ -200,7 +207,7 @@ class Builder:
         self.condition("has_context", "Evidence is available?", ["prepare", "status"], "running", 820, 380)
         self.code("author_request", "author_request", "Prepare task and selected evidence", {"state_json": ["prepare", "state_json"]}, 1180, 380)
         self.llm("writer", "Writer", "writer", "author_request", 1550, 380)
-        self.code("compile_draft", "draft", "Validate cited draft and word budget", {
+        self.code("compile_draft", "draft", "Validate cited draft structure and evidence", {
             "state_json": ["author_request", "state_json"], "model_json": ["writer", "structured_output"]}, 1980, 380)
         self.condition("draft_valid", "Candidate passed deterministic guards?", ["compile_draft", "status"], "running", 2360, 380)
         self.code("review_request", "review_request", "Prepare the exact version for independent review", {

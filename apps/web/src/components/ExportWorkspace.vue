@@ -41,13 +41,15 @@ interface Selection {
   contentMode: 'FACTUAL' | 'CREATIVE' | null
 }
 const props = defineProps<{ projectId: string; topic: string; csrfToken: string; userId: string; archived?: boolean }>()
-const emit = defineEmits<{ 'session-expired': [] }>()
+const emit = defineEmits<{ 'session-expired': []; 'open-material': [format: string] }>()
 const base = `/api/v1/projects/${encodeURIComponent(props.projectId)}/exports`
 const projectBase = `/api/v1/projects/${encodeURIComponent(props.projectId)}`
 const state = ref<Readiness | null>(null)
 const selected = ref<Selection[]>([])
 const packageFormat = ref<PackageFormat>('TXT')
 const loading = ref(true)
+const historyLoading = ref(false)
+const historyError = ref(false)
 const busy = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -106,6 +108,18 @@ function removeSelection(item: Selection) {
   else if (selected.value.length > 1) packageFormat.value = 'ZIP'
 }
 function reasonLabel(reason: string) {
+  const specific: Record<string, string> = {
+    BRIEF_CHANGED: 'Після погодження змінився бриф.',
+    OUTLINE_CHANGED: 'Після погодження змінився план статті.',
+    WORKSPACE_STYLE_CHANGED: 'Після погодження змінився стиль простору.',
+    SOURCE_ARTICLE_CHANGED: 'Змінилася погоджена версія статті, на якій ґрунтується матеріал.',
+    SOURCE_ARTICLE_NEEDS_REVIEW: 'Погоджена стаття потребує перегляду.',
+    PARENT_CHANGED: 'Змінився текст або сценарій, з якого створено візуал.',
+    PARENT_UNAVAILABLE: 'Погодьте актуальний текст або сценарій для цього візуалу.',
+    PARENT_NOT_ELIGIBLE: 'Текст або сценарій візуалу потребує перегляду.',
+    PARENT_INTEGRITY: 'Оновіть зв’язок візуалу з погодженим текстом або сценарієм.',
+  }
+  if (specific[reason]) return specific[reason]
   const value = reason.toLowerCase()
   if (value.includes('visual') && (value.includes('approval') || value.includes('unapproved') || value.includes('not_approved'))) return 'Потрібне окреме погодження візуальної версії.'
   if (value.includes('visual') && (value.includes('stale') || value.includes('review') || value.includes('changed'))) return 'Візуал або його сценарій змінилися — перегляньте версію.'
@@ -165,16 +179,34 @@ function exportError(status: number) {
   return 'Не вдалося виконати запит. Спробуйте ще раз.'
 }
 
-async function getState(): Promise<boolean> {
-  const response = await fetch(base, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
-  if (response.status === 401) { sessionEnded = true; emit('session-expired'); return false }
+async function readState(url: string): Promise<Readiness | null> {
+  const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
+  if (response.status === 401) { sessionEnded = true; emit('session-expired'); return null }
   if (!response.ok) throw new Error(exportError(response.status))
-  state.value = await response.json() as Readiness
+  return await response.json() as Readiness
+}
+async function getState(firstLoad = false): Promise<boolean> {
+  const result = await readState(firstLoad ? `${base}?view=items` : base)
+  if (!result || disposed) return false
+  state.value = result
+  historyError.value = false
+  if (firstLoad) {
+    const initialState = state.value
+    loading.value = false
+    historyLoading.value = true
+    try {
+      const history = await readState(`${base}?view=history`)
+      if (!history || disposed) return false
+      if (state.value === initialState) state.value = { ...result, exports: history.exports }
+    } catch {
+      if (!disposed && !sessionEnded && state.value === initialState) historyError.value = true
+    } finally { historyLoading.value = false }
+  }
   return true
 }
 async function refresh() {
   try {
-    if (await getState()) {
+    if (await getState(loading.value && !state.value)) {
       error.value = ''
       if (pendingExports.value) schedulePoll(1800)
       else clearTimeout(pollTimer)
@@ -354,8 +386,16 @@ onBeforeUnmount(() => {
             v-if="!item.ready || !supported(item)"
             class="export-reasons"
           >
-            {{ item.reasons.length ? [...new Set(item.reasons.map(reasonLabel))].join(' ') : reasonLabel('UNIMPLEMENTED') }}
+            {{ item.reasons.length ? [...new Set(item.reasons.filter(reason => reason !== 'INPUTS_CHANGED' || item.reasons.length === 1).map(reasonLabel))].join(' ') : reasonLabel('UNIMPLEMENTED') }}
           </p>
+          <Button
+            v-if="supported(item) && !item.ready"
+            variant="outline"
+            class="workspace-button"
+            @click="emit('open-material', item.format)"
+          >
+            {{ item.format === 'ARTICLE' ? 'Відкрити версії статті' : item.format.endsWith('_VISUAL') ? 'Відкрити візуал' : 'Відкрити в каналах' }}
+          </Button>
           <details
             v-if="item.revisionId"
             class="export-provenance"
@@ -519,10 +559,31 @@ onBeforeUnmount(() => {
           Оновлюємо стан підготовки, поки файл у черзі.
         </p>
         <p
-          v-if="!state.exports.length"
+          v-if="historyLoading"
+          role="status"
+          class="export-muted"
+        >
+          Завантажуємо історію файлів…
+        </p>
+        <p
+          v-if="!historyLoading && !historyError && !state.exports.length"
           class="export-muted"
         >
           Створені файли з’являться тут.
+        </p>
+        <p
+          v-if="historyError"
+          role="alert"
+        >
+          Не вдалося завантажити історію файлів.
+          <Button
+            variant="outline"
+            class="workspace-button"
+            :disabled="busy"
+            @click="refresh"
+          >
+            Повторити перевірку
+          </Button>
         </p>
         <article
           v-for="item in state.exports"

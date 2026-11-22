@@ -123,6 +123,12 @@ test('channels-only LinkedIn and Instagram edits stay separate; language proposa
   await page.getByRole('textbox', { name: 'Завдання для обкладинки' }).fill('Використати світлу фотографію міської вулиці.');
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Зберегти версію' }).click();
+  await expect(page.getByText('Версію 1 збережено.', { exact: true })).toBeVisible();
+  await caption.fill('Нова правка в чернетці.');
+  await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
+  await expect(page.getByText('Версію 1 збережено.', { exact: true })).toHaveCount(0);
+  await caption.fill('Міський сервіс оновлюється.');
+  await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Перевірити мову' }).click();
   await expect(page.getByText('Перегляньте пропозиції та виберіть, які застосувати.')).toBeVisible();
   await expect(caption).toHaveValue('Міський сервіс оновлюється.');

@@ -17,14 +17,14 @@ import type { ScriptService } from '../editorial/script.service.js';
 import { sourceArticleContext } from './source-article-context.js';
 import type { ArticleService } from '../editorial/article.service.js';
 import { sourceWritingInputSchema, sourceWritingOutputSchema, validateSourceWritingOutput } from './writing-contracts.js';
-import { DifySourceWritingProvider, SourceWritingProviderError, sourceWritingWorkflowSettings } from './writing-provider.js';
+import { DifySourceWritingProvider, SourceWritingProviderError, sourceWritingReleaseId, sourceWritingWorkflowSettings } from './writing-provider.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 const commonManifest = { schemaVersion: z.literal('source-writing-job-v1'), requestId: z.uuid(),
   briefRevisionId: z.uuid(), briefHash: hash, workspaceId: z.uuid(),
   workspaceStyleRevision: z.number().int().positive(), expectedRevision: z.number().int().nonnegative(),
   sourceEvidenceSetId: z.uuid(), setHash: hash, request: sourceWritingInputSchema,
-  release: z.object({ endpoint: z.url(), workflowId: z.uuid(), releaseId: z.literal('source-writing-2026-10-20.1'), configDigest: hash }).strict(),
+  release: z.object({ endpoint: z.url(), workflowId: z.uuid(), releaseId: sourceWritingReleaseId, configDigest: hash }).strict(),
   noticeVersion: z.string().min(1).max(64), acceptedAt: z.iso.datetime() };
 export const sourceWritingJobManifestSchema = z.discriminatedUnion('task', [
   z.object({ ...commonManifest, task: z.literal('OUTLINE') }).strict(),
@@ -36,13 +36,20 @@ export const sourceWritingJobManifestSchema = z.discriminatedUnion('task', [
 type Manifest = z.infer<typeof sourceWritingJobManifestSchema>;
 type Provider = Pick<DifySourceWritingProvider, 'execute' | 'resume'>;
 function json(value: unknown): Prisma.InputJsonValue { return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue; }
-function failure(error: unknown): never {
+function failure(error: unknown, beforeProvider = false): never {
   if (error instanceof JobFailure || error instanceof JobFenceLost || error instanceof HttpException) throw error;
   if (error instanceof SourceWritingProviderError) throw new JobFailure(({ CONFIG: 'CONFIG_CHANGED', AUTH: 'PROVIDER_AUTH',
     INVALID_INPUT: 'INVALID_INPUT', INCOMPATIBLE_CONTRACT: 'INVALID_CONTRACT', QUOTA: 'QUOTA', RATE_LIMIT: 'RATE_LIMIT',
     TRANSIENT_TRANSPORT: 'TRANSIENT_TRANSPORT', TIMEOUT: 'TIMEOUT', UNKNOWN_OUTCOME: 'UNKNOWN_OUTCOME',
     PROVIDER_FAILED: 'PROVIDER_FAILED' })[error.code], error.outcome);
-  throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
+  const detail = error instanceof Error ? error as Error & { code?: string; meta?: { code?: string } } : null;
+  if (beforeProvider && (detail?.message.includes('Query read timeout') || detail?.message.includes('timeout exceeded when trying to connect')
+    || detail?.meta?.code === '57014'
+    || ['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2034'].includes(detail?.code ?? ''))) {
+    throw new JobFailure('ENGINE_UNAVAILABLE', 'NOT_SUBMITTED');
+  }
+  if (error instanceof z.ZodError) throw new JobFailure('INVALID_CONTRACT', 'KNOWN_FAILED');
+  throw error;
 }
 function manifestFor(job: JobContext['job']): Manifest {
   const parsed = sourceWritingJobManifestSchema.safeParse(job.inputManifest);
@@ -128,15 +135,20 @@ export function createSourceWritingJobHandler(deps: { prisma: PrismaClient; edit
   telegram?: TelegramService; articles?: ArticleService; scripts?: ScriptService; provider?: Provider; env?: Record<string, string | undefined> }): JobHandler {
   const provider = deps.provider ?? new DifySourceWritingProvider(), env = deps.env ?? process.env;
   async function call(context: JobContext, runId?: string) {
+    let beforeProvider = !runId;
     try {
       const manifest = manifestFor(context.job), settings = sourceWritingWorkflowSettings(env);
       const { apiKey: _key, ...release } = settings; void _key;
       if (canonicalManifestHash(release) !== canonicalManifestHash(manifest.release)) throw new JobFailure('CONFIG_CHANGED', 'NOT_SUBMITTED');
-      await deps.prisma.$transaction(tx => validateFrozen(tx, context.job, manifest, deps.factualBasis,deps.articles));
+      // New submissions validate under the provider-intent lock immediately before sending.
+      if (runId) await deps.prisma.$transaction(tx => validateFrozen(tx, context.job, manifest, deps.factualBasis,deps.articles),
+        { maxWait: 10000, timeout: 20000 });
       const execution = await deps.prisma.aIExecution.upsert({ where: { attemptId: context.attempt.id }, update: {}, create: {
         id: randomUUID(), projectId: context.job.projectId, jobId: context.job.id, attemptId: context.attempt.id,
         workflowId: release.workflowId, releaseId: release.releaseId, configDigest: release.configDigest, contractVersion: 'source-writing-v1',
-        promptTemplateVersion: 'source-writing-prompt-v1', inputManifest: json(context.job.inputManifest), inputHash: context.job.inputHash,
+        promptTemplateVersion: release.releaseId === 'source-writing-2026-10-20.1' ? 'source-writing-prompt-v1'
+          : release.releaseId === 'source-writing-2026-11-07.1' ? 'source-writing-prompt-v2' : 'source-writing-prompt-v3',
+        inputManifest: json(context.job.inputManifest), inputHash: context.job.inputHash,
         providerRunId: runId ?? null } });
       let captured = runId;
       const recordRun = async (id: string) => {
@@ -147,7 +159,8 @@ export function createSourceWritingJobHandler(deps: { prisma: PrismaClient; edit
       let response: Awaited<ReturnType<Provider['execute']>>;
       if (runId) response = await provider.resume(settings, runId, manifest.request, context.signal);
       else {
-        try { response = await provider.execute(settings, context.job.id, manifest.request, context.signal, () => context.recordSubmissionIntent(), recordRun); }
+        try { response = await provider.execute(settings, context.job.id, manifest.request, context.signal,
+          async () => { await context.recordSubmissionIntent(); beforeProvider = false; }, recordRun); }
         catch (error) {
           if (!captured || !(error instanceof SourceWritingProviderError) || !['UNKNOWN_OUTCOME', 'TRANSIENT_TRANSPORT', 'TIMEOUT'].includes(error.code)) throw error;
           response = await provider.resume(settings, captured, manifest.request, context.signal);
@@ -156,7 +169,7 @@ export function createSourceWritingJobHandler(deps: { prisma: PrismaClient; edit
       if (captured && captured !== response.workflowRunId) throw new SourceWritingProviderError('INCOMPATIBLE_CONTRACT', 'Writing workflow returned another run');
       await recordRun(response.workflowRunId);
       return { output: response.output, executionId: execution.id, providerRunId: response.workflowRunId, model: response.model };
-    } catch (error) { return failure(error); }
+    } catch (error) { return failure(error, beforeProvider); }
   }
   return { operation: 'SOURCE_WRITING',
     async validateSubmission(tx, job) { await validateFrozen(tx, job, manifestFor(job), deps.factualBasis,deps.articles); },
@@ -167,7 +180,13 @@ export function createSourceWritingJobHandler(deps: { prisma: PrismaClient; edit
         const manifest = manifestFor(job);
         await validateFrozen(tx, job, manifest, deps.factualBasis,deps.articles);
         const output = validateSourceWritingOutput(result.output, manifest.request);
-        if (output.status !== 'ready' || !output.content) throw new JobFailure(output.status === 'insufficient_evidence' ? 'INSUFFICIENT_EVIDENCE' : 'NEEDS_HUMAN', 'KNOWN_SUCCEEDED');
+        if (output.status !== 'ready' || !output.content) {
+          if (manifest.task === 'SECTION' && output.status === 'needs_human' && output.review.modelCalls === 1
+            && output.review.reasons.some(reason => /: (?:CANDIDATE_TASK_FIELDS|QUOTE_LOCATOR_NOT_UNIQUE|ASSERTION_LOCATOR_NOT_UNIQUE|ASSERTION_LOCATOR_OVERLAP|MISSING_CITATIONS|SECTION_WORD_BUDGET)$/u.test(reason))) {
+            throw new JobFailure('SECTION_DRAFT_INVALID', 'KNOWN_SUCCEEDED');
+          }
+          throw new JobFailure(output.status === 'insufficient_evidence' ? 'INSUFFICIENT_EVIDENCE' : 'NEEDS_HUMAN', 'KNOWN_SUCCEEDED');
+        }
         let refs: unknown;
         if (manifest.task === 'OUTLINE') refs = await deps.editorial.commitSourceGenerated(tx,job,output.content,result.executionId,manifest.sourceEvidenceSetId);
         else if (manifest.task === 'SECTION') refs = { content: output.content,output,outputHash: canonicalManifestHash(output) };

@@ -29,6 +29,9 @@ export function jobDeadlineMs(input: Pick<CreateJobInput, 'operation' | 'deadlin
 export class DurableJobService {
   constructor(readonly prisma: PrismaClient, private readonly options: { noticeVersion: string; leaseMs?: number; retryBaseMs?: number }) {}
   get leaseMs(): number { return this.options.leaseMs ?? 30_000; }
+  private leaseFor(operation: Job['operation']): number {
+    return this.options.leaseMs ?? (operation === 'EXPORT_BUILD' ? 90_000 : this.leaseMs);
+  }
 
   async assertEffects(tx: Prisma.TransactionClient, projectId: string, userId: string, requiresExternalProcessing = true): Promise<void> {
     const access = await tx.$queryRaw<Array<{ id: string }>>`SELECT p."id" FROM contextflow."Project" p
@@ -155,7 +158,7 @@ export class DurableJobService {
       const previous = await tx.jobAttempt.findFirst({ where: { jobId: id }, orderBy: { ordinal: 'desc' } });
       const resume = job.providerOutcome === 'MAY_STILL_RUN' && previous?.providerRunId;
       const attempt = await tx.jobAttempt.create({ data: { id: randomUUID(), jobId: id, ordinal, fencingToken: token,
-        leaseOwner: owner, heartbeatAt: now, leaseExpiresAt: new Date(now.getTime() + this.leaseMs),
+        leaseOwner: owner, heartbeatAt: now, leaseExpiresAt: new Date(now.getTime() + this.leaseFor(job.operation)),
         ...(resume ? { providerRunId: previous.providerRunId, providerSubmittedAt: previous.providerSubmittedAt, providerOutcome: 'MAY_STILL_RUN' } : {}) } });
       const claimed = await tx.job.update({ where: { id }, data: { status: 'RUNNING', attemptCount: ordinal,
         fencingToken: token, providerOutcome: resume ? 'MAY_STILL_RUN' : 'NOT_SUBMITTED', progressStage: 'PREPARING', errorCategory: null, updatedAt: now } });
@@ -176,7 +179,7 @@ export class DurableJobService {
       await this.owned(tx, job, attempt);
       await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD');
       const now = new Date();
-      await tx.jobAttempt.update({ where: { id: attempt.id }, data: { heartbeatAt: now, leaseExpiresAt: new Date(now.getTime() + this.leaseMs) } });
+      await tx.jobAttempt.update({ where: { id: attempt.id }, data: { heartbeatAt: now, leaseExpiresAt: new Date(now.getTime() + this.leaseFor(job.operation)) } });
     });
   }
   async progress(job: Job, attempt: JobAttempt, stage: string): Promise<void> {
@@ -196,6 +199,7 @@ export class DurableJobService {
     });
   }
   async succeed(job: Job, attempt: JobAttempt, handler: JobHandler, result: unknown): Promise<void> {
+    const exportBuild = job.operation === 'EXPORT_BUILD';
     await this.prisma.$transaction(async tx => {
       const current = await this.owned(tx, job, attempt);
       // Claim commits serialize with review/basis edits before acquiring shared
@@ -205,13 +209,21 @@ export class DurableJobService {
         await tx.$queryRaw`SELECT "id" FROM contextflow."Project" WHERE "id" = ${job.projectId}::uuid FOR UPDATE`;
       }
       await this.assertEffects(tx, job.projectId, job.requestedBy, job.operation !== 'EXPORT_BUILD');
+      if (exportBuild) {
+        // The final manifest check holds the locks needed by the ordinary heartbeat.
+        await this.owned(tx, job, attempt);
+        const now = new Date();
+        await tx.jobAttempt.update({ where: { id: attempt.id }, data: { heartbeatAt: now,
+          leaseExpiresAt: new Date(now.getTime() + this.leaseFor(job.operation)) } });
+      }
       const resultRefs = await handler.commit(tx, result, current);
       await this.owned(tx, job, attempt);
       const now = new Date();
       await tx.jobAttempt.update({ where: { id: attempt.id }, data: { finishedAt: now, providerOutcome: 'KNOWN_SUCCEEDED' } });
       await tx.job.update({ where: { id: job.id }, data: { status: 'SUCCEEDED', resultRefs,
         progressStage: 'COMPLETE', providerOutcome: 'KNOWN_SUCCEEDED', updatedAt: now } });
-    });
+    }, exportBuild ? { maxWait: 5000, timeout: 60_000 }
+      : job.operation === 'SOURCE_WRITING' ? { maxWait: 10000, timeout: 20000 } : undefined);
   }
   async fail(job: Job, attempt: JobAttempt, error: unknown): Promise<void> {
     await this.prisma.$transaction(async tx => {
@@ -226,8 +238,12 @@ export class DurableJobService {
       const unknown = ['MAY_STILL_RUN', 'UNKNOWN'].includes(failure.outcome);
       const now = new Date();
       const delay = Math.max(failure.retryAfterMs, (this.options.retryBaseMs ?? 2000) * 5 ** (attempt.ordinal - 1));
-      const safeRetry = ['NOT_SUBMITTED', 'KNOWN_FAILED'].includes(failure.outcome) && SAFE_RETRY_CATEGORIES.has(failure.category)
-        && attempt.ordinal < 3 && now.getTime() + delay < current.deadlineAt.getTime();
+      // One fresh draft is safe after the provider completed and the section failed structural validation.
+      const canRegenerateSection = current.operation === 'SOURCE_WRITING' && failure.category === 'SECTION_DRAFT_INVALID'
+        && failure.outcome === 'KNOWN_SUCCEEDED' && attempt.ordinal === 1;
+      const canRetryFailure = ['NOT_SUBMITTED', 'KNOWN_FAILED'].includes(failure.outcome)
+        && SAFE_RETRY_CATEGORIES.has(failure.category) && attempt.ordinal < 3;
+      const safeRetry = (canRegenerateSection || canRetryFailure) && now.getTime() + delay < current.deadlineAt.getTime();
       await tx.jobAttempt.update({ where: { id: attempt.id }, data: { finishedAt: now, providerOutcome: failure.outcome, errorCategory: failure.category } });
       await tx.job.update({ where: { id: job.id }, data: { status: unknown ? 'OUTCOME_UNKNOWN' : safeRetry ? 'RETRY_WAIT' : 'FAILED',
         nextAttemptAt: new Date(now.getTime() + delay), publishedAt: null, errorCategory: failure.category,

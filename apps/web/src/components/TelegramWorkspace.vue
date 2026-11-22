@@ -18,7 +18,7 @@ interface LanguageSuggestion { id: string; sourceRevisionId: string; locator: { 
 interface RecoveredDraft { content: Content; inputMode: InputMode; contentMode: ContentMode; includeLink: boolean; expectedRevision: number }
 interface State { adaptation: { id: string; revision: number; draft: Draft | null; currentApprovedRevisionId: string | null; revisions: Revision[] } | null; formatSelected?: boolean; telegramSelected?: boolean; brief: { id: string; revision: number; currentRevision: { id: string; contentMode: ContentMode } | null; history: unknown[] } | null; style: { revision: number }; approvedArticle: { id: string; number: number; sourceEvidenceSetId?: string | null; contentMode: ContentMode; title?: string; approvedAt?: string; inspection?: { eligible?: boolean; staleReasons?: string[]; blockingReasons: string[] } } | null; eligibleSourcePassages?: SourcePassage[]; staleReasons: string[]; mappingIssues: { locator: string; reason: string }[]; hasUnmapped: boolean; blockingReasons: string[] }
 const props = withDefaults(defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; formats?: ChannelFormat[]; initialFormat?: ChannelFormat; archived?: boolean }>(), { formats: () => ['TELEGRAM_POST'], initialFormat: 'TELEGRAM_POST' })
-const emit = defineEmits<{ 'session-expired': []; 'format-change': [format: ChannelFormat]; 'caption-generated': [] }>()
+const emit = defineEmits<{ 'session-expired': []; 'format-change': [format: ChannelFormat]; 'caption-generated': []; 'review-article': [] }>()
 const base = computed(() => `/api/v1/projects/${encodeURIComponent(props.projectId)}/telegram?format=${encodeURIComponent(format.value)}`)
 const projectBase = `/api/v1/projects/${encodeURIComponent(props.projectId)}`
 const recoveryKey = computed(() => `cf:channel:${props.userId}:${props.projectId}:${format.value}`)
@@ -36,6 +36,8 @@ const saving = ref(false)
 const busy = ref(false)
 const loading = ref(true)
 const error = ref('')
+const savedVersionNumber = ref<number | null>(null)
+const checkpointing = ref(false)
 const conflict = ref(false)
 const recovered = ref<RecoveredDraft | null>(null)
 const historyOpen = ref(false)
@@ -43,7 +45,10 @@ const reviewAcknowledgements = ref<Record<string, boolean>>({})
 const editor = ref<HTMLTextAreaElement | null>(null)
 const coverEditor = ref<HTMLTextAreaElement | null>(null)
 const selection = ref<{ start: number; end: number } | null>(null)
-const dirty = computed(() => baseline.value !== serialize())
+// On an empty editor these options are inputs for generation, and autosaving
+// them would move the adaptation revision while its first proposal is running.
+const dirty = computed(() => !!(state.value?.adaptation?.draft || text.value || coverText.value || coverInstruction.value)
+  && baseline.value !== serialize())
 const readonly = computed(() => props.archived || !(state.value?.formatSelected ?? (format.value === 'TELEGRAM_POST' && state.value?.telegramSelected)))
 const isCover = computed(() => format.value === 'LINKEDIN_COVER' || format.value === 'INSTAGRAM_COVER')
 const textLimit = computed(() => format.value === 'TELEGRAM_POST' ? 4096 : 10000)
@@ -83,8 +88,9 @@ function content(): Content { return { text: text.value, mappings: [...mappings.
 function fieldText(field?: 'text' | 'cover') { return field === 'cover' ? coverText.value : text.value }
 function serialize() { return JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value }) }
 function retain() { if (sessionEnded || !props.userId || hydration || !dirty.value) return; try { sessionStorage.setItem(recoveryKey.value, JSON.stringify({ content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value, expectedRevision: expectedRevision.value })) } catch { /* Live text remains available if session storage is full. */ } }
-function changed() { if (hydration || disposed) return; retain(); clearTimeout(timer); if (!conflict.value && !recovered.value) timer = setTimeout(() => void save(), 700) }
+function changed() { if (hydration || disposed) return; savedVersionNumber.value = null; retain(); clearTimeout(timer); if (!conflict.value && !recovered.value) timer = setTimeout(() => void save(), 700) }
 function populate(draft?: Draft | null) {
+  savedVersionNumber.value = null
   hydration = true
   text.value = draft?.content.text ?? ''
   coverText.value = draft?.content.cover?.text ?? ''
@@ -120,6 +126,7 @@ async function save(): Promise<boolean> {
   if (inFlight) { const ok = await inFlight; return ok && dirty.value ? save() : ok }
   if (!dirty.value) return true
   if (readonly.value || conflict.value || recovered.value) return false
+  savedVersionNumber.value = null
   const saveFormat = format.value, saveEpoch = formatEpoch, saveRecoveryKey = recoveryKey.value
   const submitted = serialize(), submittedContent = content(), submittedInputMode = inputMode.value, submittedContentMode = contentMode.value, submittedIncludeLink = includeLink.value, submittedExpectedRevision = expectedRevision.value
   saving.value = true; error.value = ''
@@ -156,17 +163,26 @@ async function command(path: string, extra: Record<string, unknown> = {}, replac
   const commandFormat = format.value, commandEpoch = formatEpoch
   if (busy.value || readonly.value || !await save() || commandEpoch !== formatEpoch || commandFormat !== format.value) return
   busy.value = true; error.value = ''
+  if (path === '/checkpoint') savedVersionNumber.value = null
   try {
     const result = await request(path, { expectedRevision: expectedRevision.value, ...extra }) as State
     if (commandEpoch !== formatEpoch || commandFormat !== format.value) return
     state.value = result; expectedRevision.value = state.value.adaptation?.revision ?? expectedRevision.value
     if (replace) populate(state.value.adaptation?.draft); else reviewAcknowledgements.value = {}
+    if (path === '/checkpoint' && !replace) {
+      const baseRevisionId = result.adaptation?.draft?.baseRevisionId
+      savedVersionNumber.value = result.adaptation?.revisions.find(row => row.id === baseRevisionId)?.number ?? null
+    }
     if (/\/(?:approve|withdraw|rereview)$/u.test(path)) emit('caption-generated')
   }
   catch (cause) { if (commandEpoch === formatEpoch && commandFormat === format.value) error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
   finally { busy.value = false }
 }
-async function checkpoint() { await command('/checkpoint') }
+async function checkpoint() {
+  checkpointing.value = true
+  try { await command('/checkpoint') }
+  finally { checkpointing.value = false }
+}
 async function refreshInputs() {
   if (!await save()) return
   await command('/draft', { content: content(), inputMode: inputMode.value, contentMode: contentMode.value, includeLink: includeLink.value, refreshInputs: true }, true)
@@ -402,7 +418,8 @@ function insertPlaceholder() {
 }
 function inputFreshness(reasons: string[]) {
   const labels: Record<string, string> = { BRIEF_CHANGED: 'змінився бриф', WORKSPACE_STYLE_CHANGED: 'змінився стиль простору', FACTUAL_BASIS_CHANGED: 'змінилися джерельні докази', MISSING_FACTUAL_BASIS: 'бракує джерельних доказів', INVALID_ORIGINAL_FACTUAL_BASIS: 'джерельні докази початкової версії втратили придатність', SOURCE_ARTICLE_CHANGED: 'змінилася погоджена стаття', INVALID_ORIGINAL_SOURCE_ARTICLE: 'початкова стаття більше не погоджена', INVALID_ORIGINAL_SOURCE_EVIDENCE: 'докази початкової статті потребують перегляду' }
-  return reasons.map(reason => labels[reason] ?? 'змінилися редакційні залежності').join('; ')
+  const specific = reasons.flatMap(reason => labels[reason] ? [labels[reason]] : [])
+  return [...new Set(specific)].join(', ') || 'змінилися джерела або налаштування'
 }
 function hasUnresolvedReviewBlock(revision: Revision) {
   return revision.blockingReasons.some(reason => reason !== 'UNMAPPED_NOT_ACKNOWLEDGED' || !reviewAcknowledgements.value[revision.id])
@@ -510,18 +527,33 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         {{ props.archived ? 'Архівований проєкт доступний лише для перегляду.' : `${formatLabel} не вибрано серед форматів цього проєкту.` }}
       </p>
       <div
-        v-if="state.staleReasons.length"
+        v-if="articleSourceNeedsReview || state.staleReasons.length"
         class="telegram-notice telegram-stale"
         role="status"
       >
-        <p>Входи чернетки потребують перегляду: {{ inputFreshness(state.staleReasons) }}. Оновлення збереже текст; погоджені версії залишаться в історії.</p>
+        <p v-if="articleSourceNeedsReview">
+          Після погодження статті {{ inputFreshness(selectedArticle?.inspection?.staleReasons ?? []) }}. Допис можна редагувати й зберігати. Для нової пропозиції спочатку перегляньте погодження статті.
+        </p>
+        <p v-else>
+          Щоб погодити цю версію допису, оновіть її основу. Причина — {{ inputFreshness(state.staleReasons) }}. Текст допису збережеться.
+        </p>
         <Button
+          v-if="articleSourceNeedsReview"
+          class="workspace-button"
+          variant="outline"
+          :disabled="busy || saving"
+          @click="emit('review-article')"
+        >
+          Перейти до погодження статті
+        </Button>
+        <Button
+          v-else
           class="workspace-button"
           variant="outline"
           :disabled="busy || readonly || conflict || !!recovered || state.brief?.currentRevision?.contentMode !== contentMode || (inputMode === 'ARTICLE_DERIVED' && (!selectedArticle || articleSourceNeedsReview))"
           @click="refreshInputs"
         >
-          Оновити входи чернетки
+          Оновити основу допису
         </Button>
       </div>
       <div
@@ -630,13 +662,6 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         Джерело: {{ selectedArticle?.title || `погоджена стаття · версія ${selectedArticle?.number ?? ''}` }}. Зміни чернетки статті не змінюють цю адаптацію.
       </p>
       <p
-        v-if="articleSourceNeedsReview"
-        class="telegram-stale"
-        role="status"
-      >
-        Погоджену статтю потрібно переглянути, перш ніж використовувати її для нової пропозиції.
-      </p>
-      <p
         v-if="state.brief?.currentRevision?.contentMode !== contentMode"
         class="telegram-notice"
       >
@@ -740,7 +765,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             role="status"
             aria-live="polite"
           >
-            {{ saveStatus }}<span v-if="dirty && !saving"> · зміни збережуться автоматично</span>
+            {{ state.adaptation?.draft || dirty || saving ? saveStatus : '' }}<span v-if="dirty && !saving"> · зміни збережуться автоматично</span>
           </p>
           <div class="telegram-actions">
             <Button
@@ -762,12 +787,18 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             </Button>
             <Button
               class="workspace-button workspace-button-primary"
-              :disabled="readonly || busy || conflict || !!recovered || !text.trim() || text.length > textLimit || coverText.length > 200 || coverInstruction.length > 2000"
+              :disabled="readonly || busy || checkpointing || conflict || !!recovered || !text.trim() || text.length > textLimit || coverText.length > 200 || coverInstruction.length > 2000"
               @click="checkpoint"
             >
-              Зберегти версію
+              {{ checkpointing ? 'Зберігаємо версію…' : 'Зберегти версію' }}
             </Button>
           </div>
+          <p
+            v-if="savedVersionNumber !== null && !dirty"
+            role="status"
+          >
+            Версію {{ savedVersionNumber }} збережено.
+          </p>
           <section
             class="telegram-language"
             aria-labelledby="language-heading"
@@ -905,7 +936,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             class="telegram-review-controls"
           >
             <p v-if="activeApproval">
-              Поточне погодження · версія {{ activeApproval.number }}
+              {{ activeApproval.staleReasons.length ? 'Раніше погоджена версія допису' : 'Погоджена версія допису' }} · {{ activeApproval.number }}
             </p>
           </div>
         </section>

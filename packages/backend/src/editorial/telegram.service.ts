@@ -37,7 +37,9 @@ export class TelegramService {
     if (!rows.length) throw new NotFoundException('Project not found');
   }
   private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = true) {
-    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); });
+    // Channel state validates revisions and their approved article within the project lock.
+    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); },
+      { maxWait: 5_000, timeout: 30_000 });
   }
   private async adaptation(tx: Prisma.TransactionClient, project: string, expected: number, format: AdaptationFormat = 'TELEGRAM_POST', create = true) {
     const p = await tx.project.findUniqueOrThrow({ where: { id: project } });
@@ -204,7 +206,10 @@ export class TelegramService {
       : adaptation?.revisions.find(row => row.sourceEvidenceSetId) ? { id: adaptation.revisions.find(row => row.sourceEvidenceSetId)!.sourceEvidenceSetId!,briefRevisionId: adaptation.revisions.find(row => row.sourceEvidenceSetId)!.briefRevisionId }
       : !inputs && approvedArticle?.sourceEvidenceSetId && approvedArticle.briefRevisionId ? { id: approvedArticle.sourceEvidenceSetId,briefRevisionId: approvedArticle.briefRevisionId } : null;
     const grounding = selectedSet ? await this.grounding.inspectSet(tx,project,selectedSet.id,selectedSet.briefRevisionId,false) : null;
-    const sourceSnapshots = grounding ? await tx.sourceSnapshot.findMany({ where: { projectId: project,id: { in: grounding.snapshots.map(row => row.snapshotId) } },include: { material: true } }) : [];
+    const sourceSnapshots = grounding ? await tx.sourceSnapshot.findMany({
+      where: { projectId: project, id: { in: grounding.snapshots.map(row => row.snapshotId) } },
+      select: { id: true, materialId: true, material: { select: { label: true } } },
+    }) : [];
     const eligibleSourcePassages = grounding?.passages.map(row => ({ passageId: row.id,packetId: row.packetId,snapshotId: row.snapshotId,
       quote: row.quote,startOffset: row.startOffset,endOffset: row.endOffset,materialId: sourceSnapshots.find(snapshot => snapshot.id === row.snapshotId)!.materialId,
       materialTitle: sourceSnapshots.find(snapshot => snapshot.id === row.snapshotId)!.material.label })) ?? [];

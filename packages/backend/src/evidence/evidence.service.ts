@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Prisma, PrismaClient, Job } from '../generated/prisma/client.js';
 import { DurableJobService, canonicalManifestHash } from '../jobs/job-service.js';
@@ -150,15 +150,32 @@ export class SourceEvidenceService {
         WHERE i."projectId"=${projectId}::uuid AND i."snapshotId"=ANY(${ids}::uuid[]) AND i."configDigest"=${digest}
         GROUP BY i."id",i."snapshotId"` : [];
       const bySnapshot = new Map(indexes.map(row => [row.snapshotId, row]));
+      const running = indexes.some(row => row.readyChunkCount < row.chunkCount)
+        ? await tx.$queryRaw<Array<{ indexId: string }>>`SELECT DISTINCT "inputManifest"->>'indexId' AS "indexId"
+          FROM contextflow."Job" WHERE "projectId"=${projectId}::uuid AND operation='SOURCE_EMBEDDING'
+          AND status IN ('QUEUED','RUNNING','RETRY_WAIT') AND ("inputManifest"->>'indexId')=ANY(${indexes.map(row => row.id)}::text[])`
+        : [];
+      const indexing = new Set(running.map(row => row.indexId));
       return { configuration: { configured: !!release }, materials: materials.map(material => {
         const snapshotId = material.currentSnapshotId;
         const indexed = snapshotId ? bySnapshot.get(snapshotId) : undefined;
         const chunkCount = indexed?.chunkCount ?? 0, readyChunkCount = indexed?.readyChunkCount ?? 0;
         return { id: material.id, label: material.label, snapshotId, snapshotSequence: material.currentSnapshot?.sequence ?? null,
           indexState: !indexed || chunkCount === 0 ? 'MISSING' as const : readyChunkCount === chunkCount ? 'READY' as const : 'PARTIAL' as const,
-          chunkCount, readyChunkCount };
+          chunkCount, readyChunkCount, indexing: !!indexed && indexing.has(indexed.id) };
       }) };
     });
+  }
+
+  async indexNewSnapshot(userId: string, projectId: string, snapshotId: string) {
+    try {
+      const snapshot = await this.prisma.sourceSnapshot.findFirst({ where: { id: snapshotId, projectId,
+        currentForMaterials: { some: { included: true, purpose: 'FACTUAL_SOURCE' } } }, select: { id: true } });
+      if (snapshot) await this.index(userId, projectId, { commandKey: snapshot.id, snapshotIds: [snapshot.id] });
+    } catch (error) {
+      // The source is already saved. Evidence keeps its explicit retry path.
+      new Logger(SourceEvidenceService.name).warn(`Automatic index was not queued (${error instanceof Error ? error.name : 'Error'})`);
+    }
   }
 
   async index(userId: string, projectId: string, rawInput: IndexSourceEvidenceInput) {

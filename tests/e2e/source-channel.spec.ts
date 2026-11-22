@@ -1,6 +1,16 @@
 import { expect, test } from '@playwright/test';
 import { installSourceChannelFixture, passageId, quote, sourceSetId } from './fixtures/source-channel.js';
 
+test('an older article approval leaves channel saving available and links directly to article versions', async ({ page }) => {
+  await installSourceChannelFixture(page, { oldApproval: true });
+  await expect(page.getByText('Після погодження статті змінився бриф.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Запропонувати текст' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Зберегти версію' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Перейти до погодження статті' }).click();
+  await expect(page).toHaveURL(/\/article\?review=1$/);
+  await expect(page.getByRole('heading', { name: 'Версії статті' })).toBeVisible();
+});
+
 test('source citation opens its exact saved passage in context and preserves the editor text', async ({ page }) => {
   const fixture = await installSourceChannelFixture(page, { linkedCitation: true });
   const editor = page.getByRole('textbox', { name: 'Текст публікації' });
@@ -57,4 +67,18 @@ test('pending source generation resumes after reload without another generation 
   fixture.completeRequest();
   await expect(page.getByText('Пропозиція з доказами готова. Перегляньте її в історії.')).toBeVisible({ timeout: 10000 });
   expect(fixture.calls.filter(call => call.path.endsWith('/telegram/source-prepare'))).toHaveLength(1);
+});
+
+test('initial generation choices do not autosave an empty channel draft', async ({ page }) => {
+  const fixture = await installSourceChannelFixture(page, { emptyDraft: true, pending: true });
+  await page.clock.install();
+  await page.getByLabel('Джерело матеріалу').selectOption('ARTICLE_DERIVED');
+  await page.getByLabel('Передбачити місце для посилання').check();
+  await page.getByRole('button', { name: 'Запропонувати текст', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Скасувати підготовку', exact: true })).toBeVisible();
+  await page.clock.fastForward(1_000);
+  expect(fixture.calls.filter(call => call.path.endsWith('/draft'))).toHaveLength(0);
+  expect(fixture.calls.find(call => call.path.endsWith('/source-prepare'))?.body).toMatchObject({
+    expectedRevision: 0, inputMode: 'ARTICLE_DERIVED', includeLink: true,
+  });
 });

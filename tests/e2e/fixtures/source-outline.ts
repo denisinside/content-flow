@@ -7,7 +7,7 @@ const outlineId = 'fbcce323-69d8-4c08-b3b0-636bdddb20c7';
 const sourceEvidenceSetId = 'a93c4674-b653-4992-a3e0-910f6a3487d3';
 const passageId = '36646e4f-e76a-4f2f-8318-7bd8fb692ba9';
 
-export async function installSourceOutlineFixture(page: Page, mode: 'succeed' | 'cancel' | 'fail' | 'irrelevant' | 'unconfigured' = 'succeed') {
+export async function installSourceOutlineFixture(page: Page, mode: 'succeed' | 'cancel' | 'fail' | 'irrelevant' | 'unconfigured' = 'succeed', outdated = false) {
   const baseFixture = await installM63Fixture(page, false, false, true);
   const violations: string[] = [];
   const prepareBodies: unknown[] = [];
@@ -21,7 +21,9 @@ export async function installSourceOutlineFixture(page: Page, mode: 'succeed' | 
   const editorial = () => ({ brief: { revision: 1, currentRevision: { id: 'brief-1', number: 1, contentMode: 'FACTUAL', topic,
     audience: 'Мешканці міста', centralMessage: 'Пояснити щоденний досвід поїздок.', category: '', tone: '', targetLength: 600,
     cta: '', exclusions: [], notes: '', requiredClaimRevisionIds: [], workspaceStyleRevision: 3 }, history: [] },
-  outline: { revision: pollCount >= 2 && mode === 'succeed' ? 1 : 0, currentRevision: null, currentApprovedRevisionId: null,
+  outline: { revision: pollCount >= 2 && mode === 'succeed' ? 1 : 0,
+    currentRevision: outdated ? { ...candidate, id: 'previous-plan', briefRevisionId: 'previous-brief', status: 'APPROVED' } : null,
+    currentApprovedRevisionId: outdated ? 'previous-plan' : null,
     revisions: pollCount >= 2 && mode === 'succeed' ? [candidate] : [] },
   style: { revision: 3, tone: '', brandbook: '', settings: {} }, articleSelected: true,
   });

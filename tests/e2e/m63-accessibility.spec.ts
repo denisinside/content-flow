@@ -22,7 +22,7 @@ const artifacts = process.env['M63_ARTIFACT_DIR'] ?? `.local-checks/m63/${round}
 const sourceFiles = [
   'apps/web/src/App.vue', 'apps/web/src/style.css', 'apps/web/src/components/WorkspaceHub.vue',
   'apps/web/src/components/ProjectWorkspace.vue', 'apps/web/src/components/SourceWorkspace.vue',
-  'apps/web/src/components/FactsWorkspace.vue', 'apps/web/src/components/BriefWorkspace.vue',
+  'apps/web/src/components/EvidenceWorkspace.vue', 'apps/web/src/components/BriefWorkspace.vue',
   'apps/web/src/components/ArticleWorkspace.vue', 'apps/web/src/components/ProfileSettings.vue',
   'apps/web/src/components/VisualWorkspace.vue', 'apps/web/src/components/WorkspaceStyleEditor.vue',
   'apps/web/src/components/TelegramWorkspace.vue', 'apps/web/src/components/ScriptWorkspace.vue',

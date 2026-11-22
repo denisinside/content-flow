@@ -13,6 +13,7 @@ interface EvidenceMaterial {
   indexState: IndexState
   chunkCount: number
   readyChunkCount: number
+  indexing?: boolean
 }
 interface Passage {
   id: string
@@ -228,7 +229,9 @@ function command<T>(path: string, body: unknown, signal?: AbortSignal) {
   })
 }
 
+let automaticIndexTimer: ReturnType<typeof setTimeout> | undefined
 async function loadEvidence() {
+  clearTimeout(automaticIndexTimer)
   requestController?.abort()
   requestController = new AbortController()
   const signal = requestController.signal
@@ -249,6 +252,9 @@ async function loadEvidence() {
   } catch (cause) {
     if (!disposed && !(cause instanceof DOMException && cause.name === 'AbortError')) loadError.value = displayError(cause, 'Не вдалося завантажити вибрані джерела. Спробуйте оновити їх.')
   } finally {
+    if (!disposed && !signal.aborted && materials.value.some(item => item.indexing)) {
+      automaticIndexTimer = setTimeout(() => void loadEvidence(), 5000)
+    }
     initialLoaded = true
     if (!disposed && !signal.aborted) loading.value = false
   }
@@ -428,6 +434,7 @@ function clearSources() {
 function isSelected(item: EvidenceMaterial) { return Boolean(item.snapshotId && selectedSnapshotIds.value.includes(item.snapshotId)) }
 function indexStateLabel(item: EvidenceMaterial) {
   if (!item.snapshotId) return 'Текст ще не готовий'
+  if (item.indexing && item.indexState !== 'READY') return 'Автоматично готується до пошуку…'
   if (item.indexState === 'READY') return 'Готове до пошуку'
   if (item.indexState === 'PARTIAL') return `Частково готове · ${item.readyChunkCount} з ${item.chunkCount} фрагментів`
   return 'Потрібно підготувати для пошуку'
@@ -695,6 +702,7 @@ onBeforeUnmount(() => {
   requestController?.abort()
   inspectorController?.abort()
   if (indexTimer) clearTimeout(indexTimer)
+  clearTimeout(automaticIndexTimer)
   if (searchTimer) clearTimeout(searchTimer)
   if (inspectorDialog.value?.open) inspectorDialog.value.close()
 })
@@ -865,7 +873,7 @@ onBeforeUnmount(() => {
             </li>
           </ul>
           <Button
-            v-if="materials.some(item => item.snapshotId && item.indexState !== 'READY')"
+            v-if="materials.some(item => item.snapshotId && item.indexState !== 'READY' && !item.indexing)"
             type="button"
             variant="outline"
             class="evidence-secondary"
@@ -928,7 +936,7 @@ onBeforeUnmount(() => {
       <div class="evidence-section-heading">
         <div>
           <h2 id="evidence-results-title">
-            Знайдені уривки
+            {{ packet ? 'Знайдені уривки' : 'Результати пошуку' }}
           </h2>
           <p
             v-if="packet && !packetIsCurrent"
@@ -1030,13 +1038,13 @@ onBeforeUnmount(() => {
         v-else-if="packet && !packet.passages.length && !searchError"
         class="evidence-muted"
       >
-        Спробуйте переформулювати запит або змінити вибрані джерела.
+        За цим запитом уривків не знайдено. Спробуйте уточнити запит або вибрати інші джерела.
       </p>
       <p
         v-else-if="!packet && !searchError && !activeSearch() && !loading"
         class="evidence-muted evidence-empty-results"
       >
-        Тут з’являться знайдені уривки з джерел.
+        Пошук ще не запускали. Введіть запит і натисніть «Знайти в джерелах».
       </p>
     </section>
 

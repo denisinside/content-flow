@@ -12,7 +12,7 @@ type Data = { projectRevision: number; ready: boolean; items: Item[]; exports: E
 type Command = { expectedProjectRevision: number; commandKey: string; format: string; items: { format: string; revisionId: string; reviewCounter: number }[] };
 
 function json(route: Route, body: unknown, status = 200) { return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }); }
-async function fixture(page: Page, initial: Data) {
+async function fixture(page: Page, initial: Data, historyFails = false) {
   let data = structuredClone(initial);
   let staleOnce = false;
   let downloadDenied = true;
@@ -22,7 +22,7 @@ async function fixture(page: Page, initial: Data) {
   const jobs: { action: string; jobId: string }[] = [];
   const projectFormats = initial.items.map(row => row.format);
   await page.route('**/api/**', async route => {
-    const request = route.request(), path = new URL(request.url()).pathname;
+    const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (path === '/api/auth/session') return json(route, { authenticated: true, csrfToken: 'csrf', user: { id: 'editor', email: 'test@example.test', displayName: 'Редактор' } });
     if (path === '/api/auth/preferences') return json(route, { preferences: { idleTimeoutMinutes: 60 } });
     if (path === '/api/auth/external-processing') return json(route, { notice: { version: '1', text: 'Тестова згода' }, accepted: true });
@@ -34,8 +34,10 @@ async function fixture(page: Page, initial: Data) {
     if (path === base) return json(route, { project: { id: projectId, workspaceId, topic: 'Міські поїздки', formats: projectFormats, revision: 1, createdAt: '2026-10-10T10:00:00Z', updatedAt: '2026-10-10T10:00:00Z', archivedAt: null } });
     if (path === `${base}/exports` && request.method() === 'GET') {
       readinessReads++;
+      if (historyFails && url.searchParams.get('view') === 'history') return json(route, {}, 503);
       if (rejectNextRead) { rejectNextRead = false; return json(route, { error: 'UNAVAILABLE' }, 503); }
-      return json(route, data);
+      return json(route, url.searchParams.get('view') === 'items' ? { ...data, exports: [] }
+        : url.searchParams.get('view') === 'history' ? { ...data, items: [] } : data);
     }
     if (path === `${base}/exports` && request.method() === 'POST') {
       expect(request.headers()['x-csrf-token']).toBe('csrf');
@@ -58,10 +60,27 @@ async function fixture(page: Page, initial: Data) {
 }
 const readiness = (items: Item[], exports: ExportRow[] = []): Data => ({ projectRevision: 4, ready: items.every(item => item.ready), items, exports });
 
+test('a blocked article gives a concrete reason and opens its review', async ({ page }) => {
+  await fixture(page, readiness([{ ...article, ready: false, reasons: ['BRIEF_CHANGED'] }]));
+  await expect(page.getByText('Після погодження змінився бриф.')).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: 'Вибрати Стаття' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Відкрити версії статті' }).click();
+  await expect(page).toHaveURL(/\/article\?review=1$/);
+});
+
+test('a history error preserves readiness and offers retry', async ({ page }) => {
+  await fixture(page, readiness([telegram]), true);
+  await expect(page.getByRole('checkbox', { name: 'Вибрати Допис у Telegram' })).toBeEnabled();
+  await expect(page.getByRole('alert')).toContainText('Не вдалося завантажити історію файлів.');
+  await expect(page.getByText('Створені файли з’являться тут.')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Повторити перевірку' }).click();
+  await expect(page.getByText('Створені файли з’являться тут.')).toBeVisible();
+});
+
 test('channels-only creative Telegram exports without an Article and preserves its label', async ({ page }) => {
   const context = await fixture(page, readiness([telegram]));
   await expect(page.getByRole('checkbox', { name: 'Вибрати Стаття' })).toHaveCount(0);
-  await expect(page.getByText('Авторський текст · без перевіреної основи')).toBeVisible();
+  await expect(page.getByText('Авторський текст · без перевірки в джерелах', { exact: true })).toBeVisible();
   await expect(page.getByText(/відсутній.*статт/i)).toHaveCount(0);
   const choice = page.getByRole('checkbox', { name: 'Вибрати Допис у Telegram' });
   await choice.focus(); await page.keyboard.press('Space');

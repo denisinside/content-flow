@@ -166,8 +166,11 @@ test('accepts a suggestion into a candidate and leaves manual article text uncha
   await page.getByRole('button', { name: 'Створити версію з правкою' }).click();
   await expect(page.getByRole('heading', { name: 'Пропозиція правки' })).toBeVisible();
   await expect(page.getByText('Виправлений текст.', { exact: true })).toBeVisible();
-  await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
   await expect(page.getByRole('button', { name: 'Застосувати до чернетки' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Поточна чернетка' }).click();
+  await expect(page.getByRole('complementary', { name: 'Пропозиція правки' }).getByText(initialText, { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Закрити контекст' }).click();
+  await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
 });
 
 test('Article language acceptance opens its manual candidate without replacing the saved text', async ({ page }) => {
@@ -189,12 +192,15 @@ test('Article language acceptance opens its manual candidate without replacing t
     }
     return route.fulfill({ json: { suggestions: [finding] } });
   });
-  await page.getByRole('button', { name: 'Перевірити мову' }).click();
+  await page.getByRole('button', { name: 'Перевірити пробіли' }).click();
   await expect(page.getByText('Синтетична мовна пропозиція')).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
   await page.getByRole('button', { name: 'Створити версію з вибраними правками' }).click();
   await expect(page.getByRole('button', { name: 'Застосувати до чернетки' })).toBeEnabled();
+  await page.screenshot({ path: '.local-checks/m41/article-language.png', fullPage: true });
+  await page.getByRole('button', { name: 'Поточна чернетка' }).click();
+  await expect(page.getByRole('complementary', { name: 'Пропозиція правки' }).getByText(initialText, { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Закрити контекст' }).click();
   await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
   expect(context.article.currentApprovedVersionId).toBeNull();
-  await page.screenshot({ path: '.local-checks/m41/article-language.png', fullPage: true });
 });
