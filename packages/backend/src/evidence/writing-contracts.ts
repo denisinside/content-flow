@@ -54,13 +54,16 @@ const outlineSectionLabel = z.union([
 ]);
 export const sourceOutlineBodySchema = z.object({ title: nonempty(500), sections: z.array(sectionSchema.extend({
   id: outlineSectionLabel, passageIds: ids, requiredClaimRevisionIds: ids }).strict()).min(1).max(30) }).strict();
-const paragraphSchema = z.object({ id: z.uuid(), text: nonempty(20000), citations: z.array(sourceWritingCitationSchema).max(100) }).strict();
+// Published model-owned paragraph/frame labels can have UUID-shaped text without
+// RFC version/variant bits. Canonicalize only output IDs; source/claim IDs stay strict.
+const outputParagraphLabel = outlineSectionLabel;
+const paragraphSchema = z.object({ id: outputParagraphLabel, text: nonempty(20000), citations: z.array(sourceWritingCitationSchema).max(100) }).strict();
 export const sourceSectionBodySchema = z.object({ sectionId: z.uuid(), paragraphs: z.array(paragraphSchema).min(1).max(300) }).strict();
 export const sourceFrameBodySchema = paragraphSchema.extend({ purpose: nonempty(200),visualHint: text(1000),transition: text(300),text: nonempty(3000) }).strict();
 export const sourceAdaptationBodySchema = z.object({ title: nonempty(500).optional(),coverInstruction: text(2000).optional(),
   paragraphs: z.array(paragraphSchema).min(1).max(300),frames: z.array(sourceFrameBodySchema).min(1).max(30).optional() }).strict();
 const reviewSchema = z.object({ status: z.enum(['ready', 'needs_human', 'insufficient_evidence']), issues: z.array(z.object({
-  id: nonempty(100), severity: z.enum(['minor', 'major', 'critical']), paragraphId: z.uuid().optional(),
+  id: nonempty(100), severity: z.enum(['minor', 'major', 'critical']), paragraphId: outputParagraphLabel.optional(),
   sectionId: outlineSectionLabel.optional(), reason: nonempty(2000) }).strict()).max(100), reasons: z.array(nonempty(2000)).max(100),
   modelCalls: z.number().int().min(0).max(4) }).strict();
 export const sourceWritingOutputSchema = z.object({ schemaVersion: z.literal('source-writing-v1'), requestId: z.uuid(),
@@ -80,6 +83,12 @@ function canonicalOutlineSectionId(requestId: string, label: string): string {
   if (z.uuid().safeParse(label).success) return label;
   const digest = canonicalManifestHash({ requestId, outlineSectionLabel: label });
   // UUIDv8 holds the server-derived ID with the RFC variant.
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-8${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function canonicalGeneratedParagraphId(requestId: string, label: string): string {
+  if (z.uuid().safeParse(label).success) return label;
+  const digest = canonicalManifestHash({ requestId, generatedParagraphLabel: label });
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-8${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
@@ -115,7 +124,16 @@ export function validateSourceWritingOutput(raw: unknown, input: SourceWritingIn
       : issue);
     return { ...output, content: { ...content, sections }, review: { ...output.review, issues } };
   }
-  const content = request.task === 'SECTION' ? sourceSectionBodySchema.parse(output.content) : sourceAdaptationBodySchema.parse(output.content);
+  const parsed = request.task === 'SECTION' ? sourceSectionBodySchema.parse(output.content) : sourceAdaptationBodySchema.parse(output.content);
+  const rows = [...parsed.paragraphs, ...('frames' in parsed ? parsed.frames ?? [] : [])];
+  const canonicalIds = new Map(rows.map(row => [row.id, canonicalGeneratedParagraphId(request.requestId, row.id)]));
+  if (canonicalIds.size !== rows.length || new Set(canonicalIds.values()).size !== rows.length) {
+    throw new Error('Duplicate paragraph or frame identity');
+  }
+  const content = { ...parsed,
+    paragraphs: parsed.paragraphs.map(row => ({ ...row, id: canonicalIds.get(row.id)! })),
+    ...('frames' in parsed && parsed.frames
+      ? { frames: parsed.frames.map(row => ({ ...row, id: canonicalIds.get(row.id)! })) } : {}) };
   if (request.task === 'SECTION' && (!('sectionId' in content) || content.sectionId !== request.section?.id)) throw new Error('Section identity changed');
   const frames = 'frames' in content ? content.frames ?? [] : [];
   if (request.task === 'ADAPTATION') {
@@ -149,5 +167,11 @@ export function validateSourceWritingOutput(raw: unknown, input: SourceWritingIn
   }
   if (request.requiredClaims.some(row => !citedClaims.has(row.claimRevisionId))
     || !content.paragraphs.some(row => row.citations.length)) throw new Error('Writing output omits its required supporting evidence');
-  return { ...output, content };
+  const issues = output.review.issues.map(issue => {
+    if (!issue.paragraphId) return issue;
+    const mapped = canonicalIds.get(issue.paragraphId);
+    if (!mapped) throw new Error('Writing review references an unknown paragraph or frame');
+    return { ...issue, paragraphId: mapped };
+  });
+  return { ...output, content, review: { ...output.review, issues } };
 }

@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { ServiceUnavailableException } from '@nestjs/common';
 import type { Prisma, PrismaClient } from '../generated/prisma/client.js';
 import { JobFailure, JobFenceLost, type JobContext, type JobHandler } from '../jobs/contracts.js';
 import { canonicalManifestHash } from '../jobs/job-service.js';
@@ -6,6 +7,7 @@ import { BACKGROUND_MODEL, backgroundManifestSchema } from './background-contrac
 import { backgroundWorkflowSettings, BackgroundProviderError, DifyBackgroundProvider } from './background-provider.js';
 import type { VisualBackgroundService } from './background.service.js';
 import type { VisualRenderer } from './visual-renderer.js';
+import { normalizeGeneratedBackground } from './background-normalization.js';
 import type { PrivateAssetStore } from '../storage/private-asset-store.js';
 const json=(value:unknown):Prisma.InputJsonValue=>JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 type Result={assetId:string;bucket:string;objectKey:string;sha256:string;bytes:number;executionId:string;report:Prisma.InputJsonValue};
@@ -22,22 +24,32 @@ export function createBackgroundJobHandler(deps:{prisma:PrismaClient;backgrounds
     const {apiKey:_key,fileOrigins:_origins,...release}=settings;void _key;void _origins;
     if(canonicalManifestHash(release)!==canonicalManifestHash(manifest.release))throw new JobFailure('CONFIG_CHANGED','NOT_SUBMITTED');
     const execution=await deps.prisma.aIExecution.upsert({where:{attemptId:context.attempt.id},update:{},create:{projectId:context.job.projectId,jobId:context.job.id,attemptId:context.attempt.id,workflowId:settings.workflowId,releaseId:settings.releaseId,configDigest:settings.configDigest,contractVersion:settings.contractVersion,promptTemplateVersion:settings.promptTemplateVersion,inputManifest:json(manifest),inputHash:context.job.inputHash,providerRunId:runId??null}});
-    let captured=runId;
+    let captured=runId,phase='provider_request';
     const record=async(id:string)=>{if(captured&&captured!==id)throw new JobFailure('INVALID_CONTRACT');captured=id;await context.recordProviderRun(id);await deps.prisma.aIExecution.updateMany({where:{id:execution.id,status:'RUNNING'},data:{providerRunId:id}});};
     try{
       let generated:Awaited<ReturnType<DifyBackgroundProvider['execute']>>;
       if(runId)generated=await provider.resume(settings,runId,context.signal);
       else try{generated=await provider.execute(settings,context.job.id,manifest.request,context.signal,context.recordSubmissionIntent,record);}catch(error){if(!captured||!(error instanceof BackgroundProviderError)||!['UNKNOWN_OUTCOME','TIMEOUT','FILE_UNAVAILABLE'].includes(error.code))throw error;generated=await provider.resume(settings,captured,context.signal);}
+      phase='provider_result_validation';
       if(captured&&generated.providerRunId!==captured||generated.report.frameId!==manifest.frameId||generated.report.width!==manifest.request.width||generated.report.height!==manifest.request.height)throw new JobFailure('INVALID_CONTRACT');
       if(context.signal.aborted)throw new JobFenceLost();
-      const normalized=await deps.renderer.normalizeImage(generated.bytes,generated.mediaType);
+      phase='normalize_image';
+      const normalized=await normalizeGeneratedBackground(deps.renderer,generated.bytes,generated.mediaType,context.signal);
       if(context.signal.aborted)throw new JobFenceLost();
+      phase='store_image';
       const assetId=randomUUID(),stored=await deps.assets.put(context.job.projectId,assetId,normalized.bytes);
       const result={assetId,bucket:stored.bucket,objectKey:stored.objectKey,sha256:createHash('sha256').update(normalized.bytes).digest('hex'),bytes:normalized.bytes.length,executionId:execution.id,report:json(generated.report)};
       staged.set(context.attempt.id,result);
       if(context.signal.aborted){await discard(context);throw new JobFenceLost();}
       return result;
-    }catch(error){if(error instanceof JobFailure||error instanceof JobFenceLost)throw error;if(error instanceof BackgroundProviderError)throw new JobFailure(error.code,error.outcome);throw new JobFailure('INVALID_CONTRACT',captured?'UNKNOWN':'NOT_SUBMITTED');}
+    }catch(error){
+      console.error(JSON.stringify({event:'VISUAL_BACKGROUND_GENERATION_ERROR',jobId:context.job.id,attemptId:context.attempt.id,phase,errorType:error instanceof Error?error.constructor.name:typeof error,code:error instanceof BackgroundProviderError?error.code:undefined,status:error&&typeof error==='object'&&'status' in error?(error as {status:unknown}).status:undefined}));
+      if(error instanceof JobFailure||error instanceof JobFenceLost)throw error;
+      if(error instanceof BackgroundProviderError)throw new JobFailure(error.code,error.outcome);
+      if(error instanceof ServiceUnavailableException && phase==='normalize_image')throw new JobFailure('ENGINE_UNAVAILABLE',captured?'UNKNOWN':'NOT_SUBMITTED');
+      if(error instanceof ServiceUnavailableException && phase==='store_image')throw new JobFailure('STORAGE_UNAVAILABLE',captured?'UNKNOWN':'NOT_SUBMITTED');
+      throw new JobFailure('INVALID_CONTRACT',captured?'UNKNOWN':'NOT_SUBMITTED');
+    }
   }
   return{operation:'VISUAL_BACKGROUND_GENERATION',validateSubmission:(tx,job)=>deps.backgrounds.validateSubmission(tx,job),execute:context=>call(context),resume:(context,id)=>call(context,id),
     async commit(tx,raw,job){const result=raw as Result,manifest=backgroundManifestSchema.parse(job.inputManifest);

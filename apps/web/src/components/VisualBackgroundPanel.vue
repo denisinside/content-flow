@@ -7,7 +7,7 @@ const props = defineProps<{projectId:string;format:string;frameId:string;csrfTok
 const emit = defineEmits<{'session-expired':[]}>()
 const state = ref<{configured:boolean;jobs:Job[];candidates:Candidate[]}|null>(null)
 const brief = ref(''),error = ref(''),busy = ref(false),images = ref<Record<string,string>>({}),reviewed = ref<Record<string,boolean>>({})
-const jobs = computed(() => state.value?.jobs.filter(row => row.frameId === props.frameId) ?? [])
+const jobs = computed(() => state.value?.jobs.filter(row => row.frameId === props.frameId).slice(0,1) ?? [])
 const candidates = computed(() => state.value?.candidates.filter(row => row.frameId === props.frameId) ?? [])
 let timer:ReturnType<typeof setInterval>|undefined,disposed=false,pending:{key:string;brief:string;frameId:string}|null=null
 const controller = new AbortController()
@@ -18,7 +18,7 @@ async function request(path='',body?:unknown) {
   if (!response.ok) throw new Error(response.status===409?'Композицію змінено. Ваші правки збережені; оновіть стан перед застосуванням.':'Не вдалося виконати дію. Перевірте з’єднання та повторіть спробу.')
   return response.json() as Promise<unknown>
 }
-async function refresh() {
+async function refreshOnce() {
   if (disposed||document.hidden) return
   try {
     const next = await request() as NonNullable<typeof state.value>
@@ -34,6 +34,12 @@ async function refresh() {
       if (!disposed) images.value[candidate.id]=image
     }
   } catch (cause) {if (!disposed) error.value=cause instanceof Error?cause.message:'Стан недоступний.'}
+}
+let refreshInFlight: Promise<void> | null = null
+function refresh(): Promise<void> {
+  if (refreshInFlight) return refreshInFlight
+  refreshInFlight = refreshOnce().finally(() => { refreshInFlight = null })
+  return refreshInFlight
 }
 async function generate() {
   if (busy.value||props.disabled||!brief.value.trim()) return
@@ -55,7 +61,7 @@ async function applyCandidate(candidate:Candidate) {
 async function action(job:Job,name:'cancel'|'retry') {
   try {const response=await fetch(`/api/v1/projects/${props.projectId}/jobs/${job.id}/${name}`,{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':props.csrfToken},signal:controller.signal});if(!response.ok)throw new Error('Дію не виконано. Оновіть стан.');await refresh()}catch(cause){error.value=cause instanceof Error?cause.message:'Дію не виконано.'}
 }
-function label(job:Job) {return ({QUEUED:'У черзі',RUNNING:'Генеруємо фон',SUCCEEDED:'Кандидат готовий',FAILED:'Не вдалося згенерувати фон',CANCELLED:'Скасовано',RETRY_WAIT:'Очікуємо повтору'} as Record<string,string>)[job.status]??job.status}
+function label(job:Job) {return ({QUEUED:'У черзі',RUNNING:'Генеруємо фон',SUCCEEDED:'Кандидат готовий',FAILED:'Не вдалося згенерувати фон',CANCELLED:'Скасовано',RETRY_WAIT:'Очікуємо повтору',OUTCOME_UNKNOWN:'Результат генерації не підтверджено'} as Record<string,string>)[job.status]??job.status}
 watch(()=>props.frameId,()=>{error.value='';brief.value='';void refresh()})
 onMounted(()=>{void refresh();timer=setInterval(()=>{if(state.value?.jobs.some(row=>['QUEUED','RUNNING','RETRY_WAIT'].includes(row.status)))void refresh()},2000)})
 onBeforeUnmount(()=>{disposed=true;clearInterval(timer);controller.abort()})
@@ -103,7 +109,7 @@ onBeforeUnmount(()=>{disposed=true;clearInterval(timer);controller.abort()})
         >
           Повторити безпечно
         </button>
-        <span v-if="['UNKNOWN','MAY_STILL_RUN'].includes(job.providerOutcome) && job.status === 'FAILED'">Результат невідомий. Автоматичного повтору немає; нову генерацію можна запустити явно.</span>
+        <span v-if="job.status === 'OUTCOME_UNKNOWN' || (['UNKNOWN','MAY_STILL_RUN'].includes(job.providerOutcome) && job.status === 'FAILED')">AI міг створити зображення, але його не вдалося зберегти. Повторна генерація — новий запит до AI.</span>
       </p>
       <figure
         v-for="candidate in candidates"
