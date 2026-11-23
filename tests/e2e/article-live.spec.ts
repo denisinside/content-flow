@@ -30,11 +30,11 @@ test('real editor saves and reloads a ready article without outline, checkpoints
   const imported = await checked<ArticleState>(await page.request.get(`${base}/article`)); expect(imported.article!.draft.origin).toBe('UNVERIFIED_IMPORTED'); expect(imported.article!.versions).toHaveLength(0);
   await page.reload(); await expect(writing).toContainText('Автобус відкриває двері');
   await writing.fill('Відредагована сцена: пасажир дивиться у вікно.'); await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Зберегти версію' }).click(); await page.getByRole('button', { name: 'Історія версій' }).click(); await page.getByLabel('Переглянув твердження без посилань').check();
+  await page.getByRole('button', { name: 'Зберегти версію' }).click(); await page.getByRole('button', { name: 'Історія версій' }).click();
   const firstApprovalResponse = page.waitForResponse(response => response.url().endsWith('/approve') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Погодити версію 1', exact: true }).click();
   await checked<ArticleState>(await firstApprovalResponse);
-  await expect(page.getByText(/Погоджено · Версія 1/)).toBeVisible();
+  await expect(page.getByText('Погоджено, версія 1', { exact: true })).toBeVisible();
   const approved = await checked<ArticleState>(await page.request.get(`${base}/article`)); const firstVersion = approved.article!.versions[0]!; expect(firstVersion.status).toBe('APPROVED'); expect(firstVersion.approvedAt).toBeTruthy(); expect(approved.article!.currentApprovedVersionId).toBe(firstVersion.id);
   await capture(page, 'approved-history');
   await writing.fill('Нова сцена для окремої чернетки.'); await expect(page.getByText('Збережено', { exact: true })).toBeVisible(); await page.reload(); await expect(writing).toContainText('Нова сцена для окремої чернетки.');
@@ -69,6 +69,6 @@ test('real editor saves and reloads a ready article without outline, checkpoints
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
   expect((await checked<ArticleState>(await page.request.get(`${base}/article`))).mappingIssues).toEqual([]);
   await page.getByRole('button', { name: 'Зберегти версію' }).click(); await page.getByRole('button', { name: 'Історія версій' }).click();
-  await page.getByLabel('Переглянув твердження без посилань').check(); await page.getByRole('button', { name: 'Погодити версію 2', exact: true }).click(); await expect(page.getByText(/Погоджено · Версія 2/)).toBeVisible();
+  await page.getByRole('button', { name: 'Погодити версію 2', exact: true }).click(); await expect(page.getByText('Погоджено, версія 2', { exact: true })).toBeVisible();
   writeFileSync('.codex/artifacts/m32/article-live-accessibility.yml', await page.locator('.article-workspace').ariaSnapshot()); expect(errors).toEqual([]);
 });

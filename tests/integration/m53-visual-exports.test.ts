@@ -102,7 +102,7 @@ describe('M5.3 approved visual export path', () => {
     expect(coverBytes.subarray(0, 8)).toEqual(pngSignature);
     coverState = await visuals.get(owner, project, 'LINKEDIN_COVER');
     coverState = await visuals.review(owner, project, 'LINKEDIN_COVER', coverRevision.id, 'approve', {
-      expectedRevision: coverState.composition!.revision, expectedReviewCounter: coverRevision.reviewCounter, acknowledgeUnmapped: true });
+      expectedRevision: coverState.composition!.revision, expectedReviewCounter: coverRevision.reviewCounter });
 
     const carousel = await visuals.get(owner, project, 'LINKEDIN_CAROUSEL');
     let carouselState = await visuals.initialize(owner, project, 'LINKEDIN_CAROUSEL', { parentRevisionId: carousel.parent!.id });

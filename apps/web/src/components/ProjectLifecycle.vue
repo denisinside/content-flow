@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { Archive, Trash2 } from '@lucide/vue'
 
 const props = defineProps<{
   projectId: string
@@ -127,17 +128,33 @@ async function act(action: 'archive' | 'trash' | 'restore' | 'purge') {
         type="button"
         class="project-lifecycle-quiet"
         :disabled="busy"
+        :aria-label="compact ? 'До архіву' : undefined"
+        :title="compact ? 'До архіву' : undefined"
         @click="act('archive')"
       >
-        До архіву
+        <Archive
+          v-if="compact"
+          aria-hidden="true"
+          :size="18"
+        /><template v-else>
+          До архіву
+        </template>
       </button>
       <button
         type="button"
         class="project-lifecycle-quiet"
         :disabled="busy"
+        :aria-label="compact ? 'У кошик' : undefined"
+        :title="compact ? 'У кошик' : undefined"
         @click="act('trash')"
       >
-        У кошик
+        <Trash2
+          v-if="compact"
+          aria-hidden="true"
+          :size="18"
+        /><template v-else>
+          У кошик
+        </template>
       </button>
     </template>
     <span
@@ -162,5 +179,7 @@ async function act(action: 'archive' | 'trash' | 'restore' | 'purge') {
 .project-lifecycle-message { flex-basis: 100%; }
 .project-lifecycle-message.is-error { color: var(--review, #945000); }
 .project-lifecycle-compact { margin-top: 8px; gap: 4px 12px; }
+.project-lifecycle-compact .project-lifecycle-quiet { display: inline-flex; align-items: center; justify-content: center; width: 40px; padding: 0; border-radius: 3px; }
+.project-lifecycle-compact .project-lifecycle-quiet:hover:not(:disabled) { color: var(--ink); background: var(--paper); }
 @media (max-width: 760px) { .project-lifecycle { align-items: flex-start; gap: 4px 12px; } }
 </style>

@@ -412,7 +412,6 @@ export class ArticleService {
         const sourceMappings = await this.mappings(tx, project, articleContentSchema.parse(version.content), sourceInputs);
         if (sourceMappings.issues.length || !await this.sourceCitationIntegrity(tx, project, version, sourceMappings)) throw new ConflictException('Source citations must remain valid for re-review');
       }
-      if (mappings.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge unmapped wording during re-review');
       await tx.articleVersion.update({ where: { id: version.id }, data: { reviewCounter: { increment: 1 }, reviewedBriefRevisionId: current.briefRevisionId,
         reviewedBasisRevisionId: current.basisRevisionId, reviewedSourceEvidenceSetId: version.sourceEvidenceSetId, reviewedOutlineRevisionId: version.outlineRevisionId ? current.outlineRevisionId : null,
         reviewedWorkspaceStyleRevision: current.workspaceStyleRevision, reviewedBy: user, reviewedAt: new Date() } });
@@ -461,7 +460,6 @@ export class ArticleService {
       } else {
         if (version.approvedAt || !article.draft || article.draft.baseVersionId !== versionId || article.draft.sha256 !== version.sha256 || !this.sameInputs(article.draft, version)) throw new ConflictException('Approve only the exact current saved checkpoint');
         const details = await this.reviewable(tx, project, version);
-        if (details.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge that unmapped prose has not been completely fact checked');
         await tx.articleVersion.update({ where: { id: versionId }, data: { approvedBy: user, approvedAt: new Date(), acknowledgedUnmapped: details.hasUnmapped && input.acknowledgeUnmapped === true } });
         await tx.article.update({ where: { id: article.id }, data: { currentApprovedVersionId: versionId, revision: { increment: 1 } } });
       }

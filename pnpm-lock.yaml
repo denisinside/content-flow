@@ -104,6 +104,9 @@ importers:
       '@contextflow/visuals':
         specifier: workspace:*
         version: link:../../packages/visuals
+      '@lucide/vue':
+        specifier: 1.77.0
+        version: 1.77.0(vue@3.5.43(typescript@5.9.3))
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.3.1(@types/node@24.19.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -540,6 +543,11 @@ packages:
 
   '@keyv/serialize@1.1.1':
     resolution: {integrity: sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==}
+
+  '@lucide/vue@1.77.0':
+    resolution: {integrity: sha512-B+okr/d8qC2imLzNPJ5tW8Nf7uKC19DgiOafxU0bOMfLnkd5Tkss4GW640+s5FierTJjgl99LpuO40u+yni0qQ==}
+    peerDependencies:
+      vue: '>=3.0.1'
 
   '@lukeed/csprng@1.1.0':
     resolution: {integrity: sha512-Z7C/xXCiGWsg0KuKsHTKJxbWhpI3Vs5GwLfOean7MGyVFGqdRgBbAjOCh6u4bbjPc/8MJ2pZmK/0DLdCbivLDA==}
@@ -3442,6 +3450,10 @@ snapshots:
       keyv: 5.6.0
 
   '@keyv/serialize@1.1.1': {}
+
+  '@lucide/vue@1.77.0(vue@3.5.43(typescript@5.9.3))':
+    dependencies:
+      vue: 3.5.43(typescript@5.9.3)
 
   '@lukeed/csprng@1.1.0': {}
 

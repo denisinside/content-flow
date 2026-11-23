@@ -201,7 +201,6 @@ test('live M3.4 channels-only ZIP, immutable reviewed export, factual source pro
 
   await page.goto(`/projects/${directProject.project.id}/telegram`);
   await page.getByRole('button', { name: 'Історія й походження' }).click();
-  await page.getByLabel('Я переглянув непов’язані твердження').check();
   const rereviewResponse = page.waitForResponse(row => row.request().method() === 'POST' && row.url().endsWith(`/telegram/${directVersion.id}/rereview`));
   await page.getByRole('button', { name: 'Переглянути без зміни тексту' }).click();
   const rereview = await checked<TelegramState>(await rereviewResponse);

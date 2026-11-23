@@ -8,6 +8,9 @@ import type { AdaptationFormat } from './telegram-contracts.js';
 
 const SCRIPT_FORMATS = ['LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES'] as const;
 type ScriptFormat = typeof SCRIPT_FORMATS[number];
+type ParentInspection = Awaited<ReturnType<TelegramService['inspectRevision']>>;
+interface ParentInspectionCache { id: string; inspection: ParentInspection }
+
 const json = (v: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringify(v)) as Prisma.InputJsonValue;
 const isScriptFormat = (v: string): v is ScriptFormat => (SCRIPT_FORMATS as readonly string[]).includes(v);
 
@@ -22,7 +25,8 @@ export class ScriptService {
     if (!rows.length) throw new NotFoundException('Project not found');
   }
   private command<T>(user: string, project: string, action: (tx: Prisma.TransactionClient) => Promise<T>, write = true) {
-    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); });
+    return this.prisma.$transaction(async tx => { await this.lock(tx, user, project, write); return action(tx); },
+      { maxWait: 5_000, timeout: 30_000 });
   }
   private format(raw: string): ScriptFormat {
     if (!isScriptFormat(raw)) throw new BadRequestException('Scripts are available only for carousel and stories formats');
@@ -168,7 +172,7 @@ export class ScriptService {
       await tx.scriptRevision.update({ where: { id: revisionId }, data: { claimsSealed: true } });
     }
   }
-  private async inspectParent(tx: Prisma.TransactionClient, project: string, format: ScriptFormat, row: { parentAdaptationRevisionId: string; parentAdaptationRevisionHash: string; parentAdaptationReviewCounter: number }) {
+  private async inspectParent(tx: Prisma.TransactionClient, project: string, format: ScriptFormat, row: { parentAdaptationRevisionId: string; parentAdaptationRevisionHash: string; parentAdaptationReviewCounter: number }, cache?: ParentInspectionCache) {
     const adaptation = await tx.adaptation.findUnique({ where: { projectId_format: { projectId: project, format } } });
     const parent = adaptation ? await tx.adaptationRevision.findFirst({ where: { id: row.parentAdaptationRevisionId, projectId: project, adaptationId: adaptation.id } }) : null;
     const staleReasons: string[] = [];
@@ -177,18 +181,21 @@ export class ScriptService {
     if (!adaptation || adaptation.currentApprovedRevisionId !== row.parentAdaptationRevisionId) staleReasons.push('PARENT_CHANGED');
     if (parent) {
       if (parent.reviewCounter !== row.parentAdaptationReviewCounter) staleReasons.push('PARENT_REVIEW_CHANGED');
-      const inspection = await this.channels.inspectRevision(tx, project, parent);
+      // Reuse this request's inspection only for the exact same approved parent revision.
+      // Historical revisions and other calls still receive their own full verification.
+      const inspection = cache?.id === parent.id
+        ? cache.inspection : await this.channels.inspectRevision(tx, project, parent);
       staleReasons.push(...inspection.staleReasons);
       blockingReasons.push(...inspection.blockingReasons);
       if (!parent.approvedAt || parent.withdrawnAt) blockingReasons.push('PARENT_NOT_APPROVED');
     }
     return { parent, staleReasons: [...new Set(staleReasons)], blockingReasons: [...new Set(blockingReasons)] };
   }
-  async inspectRevision(tx: Prisma.TransactionClient, project: string, row: ScriptRevisionRow) {
+  async inspectRevision(tx: Prisma.TransactionClient, project: string, row: ScriptRevisionRow, cache?: ParentInspectionCache) {
     const script = await tx.script.findUnique({ where: { id: row.scriptId } });
     if (!script) throw new ConflictException('Script aggregate is unavailable');
     const content = scriptContentSchema.safeParse(row.content);
-    const parent = await this.inspectParent(tx, project, script.format as ScriptFormat, row);
+    const parent = await this.inspectParent(tx, project, script.format as ScriptFormat, row, cache);
     const details = content.success && parent.parent
       ? await this.validateContent(tx, project, script.format as ScriptFormat, parent.parent, content.data) : { hasUnmapped: false, issues: [] as string[] };
     const blockingReasons = [...parent.blockingReasons];
@@ -197,7 +204,6 @@ export class ScriptService {
     if (content.success && !await this.sourceCitationIntegrity(tx, project, row, content.data, parent.parent?.sourceEvidenceSetId ?? null)) blockingReasons.push('SOURCE_CITATION_INTEGRITY');
     if (!row.claimsSealed) blockingReasons.push('UNSEALED_EVIDENCE');
     if (row.withdrawnAt) blockingReasons.push('APPROVAL_WITHDRAWN');
-    if (details.hasUnmapped && !row.acknowledgedUnmapped) blockingReasons.push('UNMAPPED_NOT_ACKNOWLEDGED');
     return { staleReasons: parent.staleReasons, blockingReasons: [...new Set(blockingReasons)], hasUnmapped: details.hasUnmapped,
       eligible: !!row.approvedAt && !row.withdrawnAt && !parent.staleReasons.length && !blockingReasons.length };
   }
@@ -237,9 +243,11 @@ export class ScriptService {
     const parentInspection = currentParent ? await this.channels.inspectRevision(tx, project, currentParent) : null;
     const grounding = currentParent?.sourceEvidenceSetId
       ? await this.channels.inspectSourceSet(tx,project,currentParent.sourceEvidenceSetId,currentParent.briefRevisionId,false) : null;
+    const parentCache: ParentInspectionCache | undefined = currentParent && parentInspection
+      ? { id: currentParent.id, inspection: parentInspection } : undefined;
     return { format, formatSelected: p.formats.includes(format as AdaptationFormat),
       adaptation: adaptation ? { id: adaptation.id, revision: adaptation.revision, currentApprovedRevisionId: adaptation.currentApprovedRevisionId, revisions: adaptation.revisions } : null,
-      script: script ? { ...script, draft, revisions: await Promise.all(revisions.map(async row => ({ ...row, ...(await this.inspectRevision(tx, project, row)) }))) } : null,
+      script: script ? { ...script, draft, revisions: await Promise.all(revisions.map(async row => ({ ...row, ...(await this.inspectRevision(tx, project, row, parentCache)) }))) } : null,
       eligibleSourcePassages: grounding?.passages.map(row => ({ passageId: row.id,packetId: row.packetId,quote: row.quote,snapshotId: row.snapshotId })) ?? [],
       parent: currentParent ? { id: currentParent.id, sha256: currentParent.sha256, reviewCounter: currentParent.reviewCounter, ...(parentInspection ?? {}) } : null };
   }
@@ -342,7 +350,6 @@ export class ScriptService {
         if (row.approvedAt || input.expectedReviewCounter !== row.reviewCounter) throw new ConflictException('Script review counter is missing or stale');
         const details = await this.validateContent(tx, project, format, parentRow, content);
         this.assertContent(details);
-        if (details.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge unmapped frame text before approval');
         await tx.scriptRevision.update({ where: { id: row.id }, data: { approvedBy: user, approvedAt: new Date(), acknowledgedUnmapped: details.hasUnmapped && input.acknowledgeUnmapped === true } });
         await tx.script.update({ where: { id: script.id }, data: { currentApprovedRevisionId: row.id, revision: { increment: 1 } } });
       }

@@ -39,7 +39,7 @@ export class ScriptLanguageService {
       || draft.parentAdaptationRevisionHash !== source.parentAdaptationRevisionHash
       || draft.parentAdaptationReviewCounter !== source.parentAdaptationReviewCounter
       || canonicalManifestHash(draft.content) !== source.sha256 || canonicalManifestHash(source.content) !== source.sha256
-      || inspection.staleReasons.length || inspection.blockingReasons.some(reason => reason !== 'UNMAPPED_NOT_ACKNOWLEDGED')) {
+      || inspection.staleReasons.length || inspection.blockingReasons.length) {
       throw new ConflictException('Script language suggestions are stale; preserve local text and save a new checkpoint');
     }
     return { source, script, draft, content: scriptContentSchema.parse(draft.content) };

@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import WorkspaceStyleEditor from './WorkspaceStyleEditor.vue'
 
-interface Member { userId: string; displayName?: string | null; email?: string }
+interface Member { userId: string; displayName?: string | null; email?: string | null }
 interface Workspace {
   id: string
   name: string

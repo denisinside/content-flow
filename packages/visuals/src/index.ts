@@ -20,20 +20,24 @@ export const fontSchema = z.enum(['onest', 'source-serif', 'lora', 'plex-sans', 
 export const colorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const imageRefSchema = z.object({ type: z.enum(['project', 'workspace']), id: z.uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export type ImageRef = z.infer<typeof imageRefSchema>;
-const bounds = { id: z.uuid(), x: z.number().int().min(0).max(1920), y: z.number().int().min(0).max(1920), width: z.number().int().min(16).max(1920), height: z.number().int().min(16).max(1920) };
+const layerState = { hidden: z.boolean().optional(), locked: z.boolean().optional(), groupId: z.uuid().optional() };
+const bounds = { ...layerState, id: z.uuid(), x: z.number().int().min(0).max(1920), y: z.number().int().min(0).max(1920), width: z.number().int().min(16).max(1920), height: z.number().int().min(16).max(1920) };
 export const mappingSchema = z.object({ startOffset: z.number().int().nonnegative(), endOffset: z.number().int().positive(), quote: z.string().max(3000), claimRevisionId: z.uuid(), evidenceId: z.uuid() }).strict();
 export const sourceMappingSchema = z.object({ startOffset: z.number().int().nonnegative(),endOffset: z.number().int().positive(),quote: z.string().min(1).max(10000),linkedText: z.string().min(1).max(3000),passageId: z.uuid(),packetId: z.uuid() }).strict();
 export const textLayerSchema = z.object({ ...bounds, type: z.literal('text'), text: z.string().max(3000), font: fontSchema, fontSize: z.number().int().min(14).max(180), fontWeight: z.enum(['400', '600', '700']), color: colorSchema, align: z.enum(['left', 'center', 'right']), lineHeight: z.number().min(1).max(2), mappings: z.array(mappingSchema).max(100),sourceMappings: z.array(sourceMappingSchema).max(100).optional() }).strict();
 const imageLayerSchema = z.object({ ...bounds, type: z.literal('image'), resource: imageRefSchema, fit: z.enum(['cover', 'contain']), role: z.enum(['background', 'graphic']).optional() }).strict();
-const rectLayerSchema = z.object({ ...bounds, type: z.literal('rect'), color: colorSchema }).strict();
+const rectLayerSchema = z.object({ ...bounds, type: z.literal('rect'), color: colorSchema, role: z.enum(['template', 'custom']).optional() }).strict();
 export const layerSchema = z.discriminatedUnion('type', [textLayerSchema, imageLayerSchema, rectLayerSchema]);
 export const TEMPLATE_CATALOG = [
   { id: 'editorial', label: 'Редакційний', description: 'Виразний заголовок і спокійне біле поле' },
   { id: 'statement', label: 'Контрастна фраза', description: 'Великий текст на кольоровому тлі' },
   { id: 'photo-caption', label: 'Фото й підпис', description: 'Власне фото з окремим текстовим полем' },
   { id: 'fact', label: 'Картка факту', description: 'Чіткий акцент і простір для висновку' },
+  { id: 'minimal', label: 'Мінімалізм', description: 'Повітря і стримана типографіка' },
+  { id: 'split', label: 'Дві площини', description: 'Контрастний боковий блок і текст' },
+  { id: 'quote', label: 'Цитата', description: 'Велика цитата з декоративною рискою' },
 ] as const;
-export const frameSchema = z.object({ id: z.uuid(), sourceFrameId: z.uuid().nullable(), purpose: z.string().max(500), templateId: z.enum(['editorial', 'statement', 'photo-caption', 'fact']), background: colorSchema, layers: z.array(layerSchema).min(1).max(12) }).strict();
+export const frameSchema = z.object({ id: z.uuid(), sourceFrameId: z.uuid().nullable(), purpose: z.string().max(500), templateId: z.enum(['editorial', 'statement', 'photo-caption', 'fact', 'minimal', 'split', 'quote']), background: colorSchema, layers: z.array(layerSchema).min(1).max(12) }).strict();
 export const compositionSchema = z.object({ schemaVersion: z.literal('visual-v1'), rendererVersion: z.literal(RENDERER_VERSION), width: z.literal(1080), height: z.union([z.literal(1080), z.literal(1350), z.literal(1920)]), frames: z.array(frameSchema).min(1).max(30) }).strict().superRefine((composition, context) => {
   const ids = new Set<string>();
   let textLength = 0;
@@ -61,14 +65,26 @@ export type VisualTextLayer = z.infer<typeof textLayerSchema>;
 export type VisualLayer = z.infer<typeof layerSchema>;
 export interface VisualDefaults { background: string; text: string; accent: string; font: VisualTextLayer['font']; logo: ImageRef | null }
 export const DEFAULT_VISUAL_STYLE: VisualDefaults = { background: '#ffffff', text: '#20262b', accent: '#343a40', font: 'onest', logo: null };
+function contrastText(background: string): string {
+  const hex = background.slice(1);
+  const channels = [0, 2, 4].map(index => {
+    const value = parseInt(hex.slice(index, index + 2), 16) / 255;
+    return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
+  });
+  const luminosity = channels[0]! * .2126 + channels[1]! * .7152 + channels[2]! * .0722;
+  return luminosity < .18 ? '#ffffff' : '#20262b';
+}
 export function makeFrame(input: { id: string; text: string; purpose: string; mappings?: VisualTextLayer['mappings'];sourceMappings?: VisualTextLayer['sourceMappings'] }, height: VisualComposition['height'], templateId: VisualFrame['templateId'], style: VisualDefaults): VisualFrame {
-  const top = templateId === 'photo-caption' ? Math.round(height * .66) : 110;
-  const text: VisualTextLayer = { id: crypto.randomUUID(), type: 'text', x: 84, y: top, width: 912, height: height - top - 110, text: input.text, font: style.font, fontSize: templateId === 'statement' ? 72 : 56, fontWeight: '600', color: style.text, align: 'left', lineHeight: 1.2, mappings: JSON.parse(JSON.stringify(input.mappings ?? [])) as VisualTextLayer['mappings'],...(input.sourceMappings ? { sourceMappings: structuredClone(input.sourceMappings) } : {}) };
+  const top = templateId === 'photo-caption' ? Math.round(height * .66) : templateId === 'minimal' ? Math.round(height * .30) : templateId === 'quote' ? Math.round(height * .24) : 110;
+  const text: VisualTextLayer = { id: crypto.randomUUID(), type: 'text', x: templateId === 'split' ? 400 : templateId === 'quote' ? 125 : 84, y: top, width: templateId === 'split' ? 590 : templateId === 'quote' ? 830 : 912, height: height - top - 110, text: input.text, font: templateId === 'quote' ? 'source-serif' : style.font, fontSize: templateId === 'statement' ? 72 : templateId === 'quote' ? 68 : templateId === 'minimal' ? 52 : 56, fontWeight: templateId === 'minimal' ? '400' : '600', color: templateId === 'statement' ? contrastText(style.accent) : style.text, align: 'left', lineHeight: 1.2, mappings: JSON.parse(JSON.stringify(input.mappings ?? [])) as VisualTextLayer['mappings'],...(input.sourceMappings ? { sourceMappings: structuredClone(input.sourceMappings) } : {}) };
   const layers: VisualLayer[] = [];
-  if (templateId === 'editorial' || templateId === 'fact') layers.push({ id: crypto.randomUUID(), type: 'rect', x: 84, y: 64, width: templateId === 'fact' ? 360 : 120, height: 16, color: style.accent });
+  if (templateId === 'editorial' || templateId === 'fact') layers.push({ id: crypto.randomUUID(), type: 'rect', x: 84, y: 64, width: templateId === 'fact' ? 360 : 120, height: 16, color: style.accent, role: 'template' });
+  if (templateId === 'split') layers.push({ id: crypto.randomUUID(), type: 'rect', x: 0, y: 0, width: 320, height, color: style.accent, role: 'template' });
+  if (templateId === 'quote') layers.push({ id: crypto.randomUUID(), type: 'rect', x: 125, y: top - 54, width: 108, height: 12, color: style.accent, role: 'template' });
+  if (templateId === 'minimal') layers.push({ id: crypto.randomUUID(), type: 'rect', x: 84, y: height - 98, width: 912, height: 3, color: style.accent, role: 'template' });
   layers.push(text);
   if (style.logo) layers.push({ id: crypto.randomUUID(), type: 'image', x: 876, y: height - 88, width: 120, height: 48, resource: style.logo, fit: 'contain' });
-  return { id: input.id, sourceFrameId: input.id, purpose: input.purpose, templateId, background: style.background, layers };
+  return { id: input.id, sourceFrameId: input.id, purpose: input.purpose, templateId, background: templateId === 'statement' ? style.accent : style.background, layers };
 }
 export function imageRefs(composition: VisualComposition): ImageRef[] {
   return composition.frames.flatMap(frame => frame.layers.flatMap(layer => layer.type === 'image' ? [layer.resource] : []));
@@ -86,6 +102,7 @@ export async function renderVisualStage(K: typeof KonvaType, container: HTMLDivE
   const overflow: string[] = [];
   try {
     for (const layer of frame.layers) {
+      if (layer.hidden) continue;
       if (layer.type === 'rect') canvas.add(new K.Rect({ ...layer, fill: layer.color, name: layer.id, listening: false }));
       if (layer.type === 'text') {
         const family = FONT_CATALOG.find(font => font.id === layer.font)!.family;

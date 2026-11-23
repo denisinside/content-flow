@@ -166,9 +166,6 @@ onBeforeUnmount(() => disposeMotion())
       <p class="editorial-footer-name">
         ContextFlow
       </p>
-      <p class="editorial-footer-copy">
-        Від джерел — до змісту.
-      </p>
       <p class="editorial-footer-signature">
         Редакторський простір
       </p>

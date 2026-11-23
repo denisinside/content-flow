@@ -62,14 +62,14 @@ describe('Telegram adaptation checkpoints and approval', () => {
     expect(revision).toMatchObject({ content, claimsSealed: true, reviewCounter: 0, status: 'PROPOSED', hasUnmapped: true });
     expect(revision.mappingDetails).toEqual([]);
     await expect(telegram.review(owner, project, revision.id, 'approve', { expectedRevision: 2, acknowledgeUnmapped: true })).rejects.toMatchObject({ status: 409 });
-    const approved = await telegram.review(member, project, revision.id, 'approve', { expectedRevision: 2, acknowledgeUnmapped: true, expectedReviewCounter: 0 });
+    const approved = await telegram.review(member, project, revision.id, 'approve', { expectedRevision: 2, expectedReviewCounter: 0 });
     expect(approved.adaptation).toMatchObject({ revision: 3, currentApprovedRevisionId: revision.id });
-    expect(approved.adaptation!.revisions[0]).toMatchObject({ reviewCounter: 0, approvedBy: member, acknowledgedUnmapped: true, claimsSealed: true });
+    expect(approved.adaptation!.revisions[0]).toMatchObject({ reviewCounter: 0, approvedBy: member, acknowledgedUnmapped: false, claimsSealed: true });
     await editorial.saveBrief(owner, project, { expectedRevision: 1, contentMode: 'CREATIVE', topic: 'Нова тема', audience: '', centralMessage: '', category: '', targetLength: 250, cta: '', exclusions: [], notes: '', requiredClaimRevisionIds: [] });
     const retained = await telegram.saveDraft(owner, project, { expectedRevision: 3, inputMode: 'DIRECT', contentMode: 'CREATIVE', includeLink: false, content: { ...content, text: 'Збережене ручне повідомлення після зміни Brief.' } });
     expect(retained.adaptation!.draft).toMatchObject({ briefRevisionId: revision.briefRevisionId, content: { text: 'Збережене ручне повідомлення після зміни Brief.' } });
     expect(retained.staleReasons).toContain('BRIEF_CHANGED');
-    const rereviewed = await telegram.rereview(member, project, revision.id, { expectedRevision: 4, expectedReviewCounter: 0, acknowledgeUnmapped: true });
+    const rereviewed = await telegram.rereview(member, project, revision.id, { expectedRevision: 4, expectedReviewCounter: 0 });
     expect(rereviewed.adaptation!.revisions[0]!.reviewCounter).toBe(1);
     expect(rereviewed.adaptation!.revisions[0]!.reviewedBriefRevisionId !== revision.briefRevisionId).toBe(true);
     await editorial.saveBrief(owner, project, { expectedRevision: 2, contentMode: 'CREATIVE', topic: 'Ще новіша тема', audience: '', centralMessage: '', category: '', targetLength: 250, cta: '', exclusions: [], notes: '', requiredClaimRevisionIds: [] });

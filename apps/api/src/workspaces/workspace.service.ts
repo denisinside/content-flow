@@ -6,7 +6,7 @@ import type { SessionUser } from '../auth/session-service.js';
 import type { UpdateStyleInput } from './workspace-input.js';
 
 const workspaceSelect = { id: true, name: true, ownerId: true, styleRevision: true, lifecycleRevision: true, createdAt: true, updatedAt: true, archivedAt: true, trashedAt: true, purgeAfter: true } as const;
-const detailSelect = { ...workspaceSelect, members: { where: { leftAt: null }, select: { userId: true, joinedAt: true, user: { select: { displayName: true } } }, orderBy: { joinedAt: 'asc' } } } as const;
+const detailSelect = { ...workspaceSelect, members: { where: { leftAt: null }, select: { userId: true, joinedAt: true, user: { select: { displayName: true } } }, orderBy: { joinedAt: 'asc' } }, invites: { where: { acceptedBy: { not: null }, acceptedAt: { not: null } }, select: { acceptedBy: true, email: true }, orderBy: { acceptedAt: 'desc' } } } as const;
 type WorkspaceRecord = Prisma.WorkspaceGetPayload<{ select: typeof workspaceSelect }>;
 type WorkspaceDetail = Prisma.WorkspaceGetPayload<{ select: typeof detailSelect }>;
 type WorkspaceTx = Prisma.TransactionClient;
@@ -29,7 +29,7 @@ function view(workspace: WorkspaceRecord | WorkspaceDetail) {
     createdAt: workspace.createdAt.toISOString(), updatedAt: workspace.updatedAt.toISOString(), archivedAt: workspace.archivedAt?.toISOString() ?? null,
     trashedAt: workspace.trashedAt?.toISOString() ?? null, purgeAfter: workspace.purgeAfter?.toISOString() ?? null,
     ...('members' in workspace ? { members: workspace.members.map(member => ({ userId: member.userId,
-      displayName: member.user.displayName, joinedAt: member.joinedAt.toISOString() })) } : {}) };
+      displayName: member.user.displayName, email: workspace.invites.find(invite => invite.acceptedBy === member.userId)?.email ?? null, joinedAt: member.joinedAt.toISOString() })) } : {}) };
 }
 
 function styleView(style: { revision: number; brandbook: string; tone: string; settings: Prisma.JsonValue; createdBy: string; createdAt: Date }) {

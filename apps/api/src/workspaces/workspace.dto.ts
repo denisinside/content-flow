@@ -3,6 +3,7 @@ import { ApiProperty } from '@nestjs/swagger';
 export class WorkspaceMemberDto {
   @ApiProperty({ type: String, format: 'uuid' }) userId!: string;
   @ApiProperty({ type: String, nullable: true }) displayName!: string | null;
+  @ApiProperty({ type: String, format: 'email', nullable: true }) email!: string | null;
   @ApiProperty({ type: String, format: 'date-time' }) joinedAt!: string;
 }
 export class WorkspaceDto {

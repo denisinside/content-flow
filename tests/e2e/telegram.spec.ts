@@ -5,6 +5,8 @@ const projectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const workspaceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const base = `/api/v1/projects/${projectId}`;
 const evidence = { claimRevisionId: 'claim-revision-1', evidenceId: 'evidence-1', wording: 'У звіті описано досвід мешканців.', quote: 'У звіті описано досвід мешканців.', snapshotId: 'snapshot-1', materialTitle: 'Звіт про поїздки' };
+const passage = { passageId: 'passage-1', packetId: 'packet-1', snapshotId: evidence.snapshotId, materialId: 'material-1',
+  materialTitle: evidence.materialTitle, quote: evidence.quote, startOffset: 0, endOffset: evidence.quote.length };
 interface TestContent { text: string; mappings: { startOffset: number; endOffset: number; quote: string; claimRevisionId: string; evidenceId: string }[] }
 interface TestDraft { content: TestContent; inputMode: string; contentMode: string; includeLink: boolean; baseRevisionId: string | null }
 interface TestRevision { id: string; number: number; content: TestContent; hasUnmapped: boolean; status: string; origin: string; reviewCounter: number; approvedAt: string | null; approvedBy: string | null; staleReasons: string[]; reviewedAt: string | null; reviewedBy: string | null; reviewedBriefRevisionId: string | null }
@@ -15,8 +17,8 @@ function state(contentMode = 'FACTUAL') {
     adaptation: null as TestState['adaptation'], telegramSelected: true,
     brief: { id: 'brief', revision: 1, currentRevision: { id: 'brief-revision-1', contentMode }, history: [] },
     style: { revision: 1 }, prerequisites: { blockingReasons: [], missingBasis: false, unverified: false }, approvedArticle: null,
-    eligibleEvidence: [evidence], staleReasons: [], mappingIssues: [], hasUnmapped: false, blockingReasons: [],
-  } satisfies TestState;
+    eligibleEvidence: [evidence], eligibleSourcePassages: [passage], staleReasons: [], mappingIssues: [], hasUnmapped: false, blockingReasons: [],
+  };
 }
 async function fixture(page: Page, hasApprovedArticle = false, contentMode = 'FACTUAL') {
   let current: TestState = state(contentMode); let rejectNextSave = false;
@@ -72,9 +74,9 @@ test('channels-only direct Telegram saves, links exact wording, checkpoints, app
   await expect(page.getByRole('link', { name: 'Канали' })).toHaveAttribute('aria-current', 'page');
   await writing.fill(evidence.wording);
   await writing.selectText();
-  await page.getByRole('button', { name: 'Прив’язати виділення' }).click();
+  await page.getByRole('button', { name: 'Прив’язати виділення до уривка' }).click();
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
-  expect(context.actions.at(-1)?.body.content.mappings).toEqual([{ startOffset: 0, endOffset: evidence.wording.length, quote: evidence.wording, claimRevisionId: evidence.claimRevisionId, evidenceId: evidence.evidenceId }]);
+  expect(context.actions.at(-1)?.body.content).toMatchObject({ sourceMappings: [{ startOffset: 0, endOffset: evidence.wording.length, quote: passage.quote, passageId: passage.passageId, packetId: passage.packetId }] });
   await page.getByRole('button', { name: 'Зберегти версію' }).click();
   await page.getByRole('button', { name: 'Історія й походження' }).click();
   await page.getByRole('button', { name: 'Погодити версію' }).click();
@@ -107,17 +109,17 @@ test('409 retains manuscript through reload and session-local recovery', async (
   await expect(writing).toHaveValue('Локальний текст, який треба зберегти.');
 });
 
-test('shortening linked wording saves bounded ranges and keeps the old quote for review', async ({ page }) => {
+test('shortening linked wording removes the old source link and keeps the edited text', async ({ page }) => {
   const context = await fixture(page);
   const writing = page.getByRole('textbox', { name: 'Текст публікації' });
   await writing.fill(evidence.wording); await writing.selectText();
-  await page.getByRole('button', { name: 'Прив’язати виділення' }).click();
+  await page.getByRole('button', { name: 'Прив’язати виділення до уривка' }).click();
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
   const shortened = 'У звіті описано досвід.';
   await writing.fill(shortened);
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
-  expect(context.actions.at(-1)?.body.content).toMatchObject({ text: shortened, mappings: [{ startOffset: 0, endOffset: shortened.length, quote: evidence.wording }] });
-  await expect(page.locator('.telegram-mapping-warning')).toBeVisible();
+  expect(context.actions.at(-1)?.body.content).toEqual({ text: shortened, mappings: [] });
+  await expect(page.getByRole('region', { name: 'Посилання на уривки' })).toHaveCount(0);
 });
 
 test('ARTICLE_DERIVED becomes available only with a current approved article and saves its explicit route', async ({ page }) => {
@@ -132,22 +134,19 @@ test('ARTICLE_DERIVED becomes available only with a current approved article and
   await expect(page.getByRole('button', { name: 'Запропонувати текст' })).toBeEnabled();
 });
 
-test('unmapped creative text needs an explicit revision-level acknowledgment before approval and re-review', async ({ page }) => {
+test('unmapped creative text can be saved and approved in the editor and re-reviewed from history', async ({ page }) => {
   const context = await fixture(page, false, 'CREATIVE');
   await page.getByRole('textbox', { name: 'Текст публікації' }).fill('Неперевірений творчий текст для погодження.');
-  await page.getByRole('button', { name: 'Зберегти версію' }).click();
-  await page.getByRole('button', { name: 'Історія й походження' }).click();
-  const acknowledgment = page.getByRole('checkbox', { name: /переглянув непов’язані твердження/ });
-  await acknowledgment.check();
-  await page.getByRole('button', { name: 'Погодити версію' }).click();
-  expect(context.actions.at(-1)?.body.acknowledgeUnmapped).toBe(true);
+  await page.getByRole('button', { name: 'Зберегти й погодити', exact: true }).click();
+  await expect.poll(() => context.current().adaptation?.currentApprovedRevisionId).toBe('revision-1');
+  expect(context.actions.at(-1)?.body.acknowledgeUnmapped).toBeUndefined();
   const original = structuredClone(context.current().adaptation!.revisions[0]!);
   context.markStale(); await page.reload(); await page.getByRole('button', { name: 'Історія й походження' }).click();
   const rereview = page.getByRole('button', { name: 'Переглянути без зміни тексту' });
-  await expect(acknowledgment).toBeVisible();
-  await expect(rereview).toBeDisabled();
-  await acknowledgment.check(); await expect(rereview).toBeEnabled(); await rereview.click();
-  expect(context.actions.at(-1)?.body).toMatchObject({ expectedReviewCounter: 0, acknowledgeUnmapped: true });
+  await expect(rereview).toBeEnabled();
+  await rereview.click();
+  await expect.poll(() => context.current().adaptation?.revisions[0]?.reviewCounter).toBe(1);
+  expect(context.actions.at(-1)?.body).toMatchObject({ expectedReviewCounter: 0 });
   expect(context.current().adaptation!.revisions[0]).toMatchObject({ approvedAt: original.approvedAt, approvedBy: original.approvedBy, content: original.content, reviewCounter: 1 });
 });
 

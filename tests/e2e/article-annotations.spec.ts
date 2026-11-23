@@ -192,7 +192,7 @@ test('Article language acceptance opens its manual candidate without replacing t
     }
     return route.fulfill({ json: { suggestions: [finding] } });
   });
-  await page.getByRole('button', { name: 'Перевірити пробіли' }).click();
+  await page.getByRole('button', { name: 'Перевірити', exact: true }).click();
   await expect(page.getByText('Синтетична мовна пропозиція')).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Текст статті' })).toContainText(initialText);
   await page.getByRole('button', { name: 'Створити версію з вибраними правками' }).click();

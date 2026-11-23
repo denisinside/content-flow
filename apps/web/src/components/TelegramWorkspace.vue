@@ -43,7 +43,6 @@ const checkpointing = ref(false)
 const conflict = ref(false)
 const recovered = ref<RecoveredDraft | null>(null)
 const historyOpen = ref(false)
-const reviewAcknowledgements = ref<Record<string, boolean>>({})
 const editor = ref<HTMLTextAreaElement | null>(null)
 const coverEditor = ref<HTMLTextAreaElement | null>(null)
 const selection = ref<{ start: number; end: number } | null>(null)
@@ -56,6 +55,8 @@ const isCover = computed(() => format.value === 'LINKEDIN_COVER' || format.value
 const textLimit = computed(() => format.value === 'TELEGRAM_POST' ? 4096 : 10000)
 const formatLabel = computed(() => ({ TELEGRAM_POST: 'Допис у Telegram', LINKEDIN_TEXT: 'Публікація у LinkedIn', LINKEDIN_COVER: 'Обкладинка LinkedIn', INSTAGRAM_COVER: 'Обкладинка Instagram', LINKEDIN_CAROUSEL: 'Карусель LinkedIn', INSTAGRAM_CAROUSEL: 'Карусель Instagram', INSTAGRAM_STORIES: 'Історії Instagram' })[format.value])
 const selectedArticle = computed(() => state.value?.approvedArticle)
+const proposalOpen = ref(false)
+let requestedProposalId: string | null = null
 const articleSourceNeedsReview = computed(() => inputMode.value === 'ARTICLE_DERIVED' && !!selectedArticle.value && (selectedArticle.value.inspection?.eligible !== true || !!selectedArticle.value.inspection?.staleReasons?.length))
 const activeApproval = computed(() => state.value?.adaptation?.revisions.find(row => row.id === state.value?.adaptation?.currentApprovedRevisionId) ?? null)
 const latestProposal = computed(() => {
@@ -179,28 +180,37 @@ async function save(): Promise<boolean> {
   const ok = await inFlight
   return ok && dirty.value && !disposed ? save() : ok
 }
-async function command(path: string, extra: Record<string, unknown> = {}, replace = false) {
+async function command(path: string, extra: Record<string, unknown> = {}, replace = false, approve = false) {
   const commandFormat = format.value, commandEpoch = formatEpoch
-  if (busy.value || readonly.value || !await save() || commandEpoch !== formatEpoch || commandFormat !== format.value) return
+  if (busy.value || readonly.value || !await save() || busy.value || disposed || commandEpoch !== formatEpoch || commandFormat !== format.value) return
   busy.value = true; error.value = ''
   if (path === '/checkpoint') savedVersionNumber.value = null
   try {
     const result = await request(path, { expectedRevision: expectedRevision.value, ...extra }) as State
     if (commandEpoch !== formatEpoch || commandFormat !== format.value) return
     state.value = result; expectedRevision.value = state.value.adaptation?.revision ?? expectedRevision.value
-    if (replace) populate(state.value.adaptation?.draft); else reviewAcknowledgements.value = {}
+    if (replace) populate(state.value.adaptation?.draft)
     if (path === '/checkpoint' && !replace) {
       const baseRevisionId = result.adaptation?.draft?.baseRevisionId
-      savedVersionNumber.value = result.adaptation?.revisions.find(row => row.id === baseRevisionId)?.number ?? null
+      const version = result.adaptation?.revisions.find(row => row.id === baseRevisionId)
+      savedVersionNumber.value = version?.number ?? null
+      if (approve && version?.status === 'PROPOSED' && !dirty.value) {
+        const next = await request(`/${version.id}/approve`, { expectedRevision: expectedRevision.value, expectedReviewCounter: version.reviewCounter }) as State
+        if (disposed || commandEpoch !== formatEpoch) return
+        state.value = next
+        expectedRevision.value = next.adaptation?.revision ?? expectedRevision.value
+        savedVersionNumber.value = null
+        emit('caption-generated')
+      }
     }
     if (/\/(?:approve|withdraw|rereview)$/u.test(path)) emit('caption-generated')
   }
   catch (cause) { if (commandEpoch === formatEpoch && commandFormat === format.value) error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
   finally { busy.value = false }
 }
-async function checkpoint() {
+async function checkpoint(approve = false) {
   checkpointing.value = true
-  try { await command('/checkpoint') }
+  try { await command('/checkpoint', {}, false, approve) }
   finally { checkpointing.value = false }
 }
 async function refreshInputs() {
@@ -216,6 +226,7 @@ async function generateFromSources() {
   try {
     const result = await request('/source-prepare',{ commandKey,expectedRevision: expectedRevision.value,inputMode: inputMode.value,includeLink: includeLink.value }) as { request: SourceWritingStatus }
     if (generationEpoch !== formatEpoch) return
+    requestedProposalId = result.request.id
     acceptSourceStatus(result.request)
     commandKeys.delete(key)
     void pollJobs()
@@ -299,6 +310,7 @@ async function generate() {
     commandKeys.delete(identity)
     if (generationEpoch !== formatEpoch || generationFormat !== format.value) return
     jobs.value = [result.job, ...jobs.value.filter(job => job.id !== result.job.id)]
+    requestedProposalId = result.job.id
     jobMessage.value = 'Створюємо пропозицію. Чернетка залишиться доступною для редагування.'
     void pollJobs()
   } catch (cause) { if (generationEpoch === formatEpoch && generationFormat === format.value) error.value = cause instanceof Error ? cause.message : 'Не вдалося створити пропозицію.' }
@@ -321,6 +333,7 @@ async function pollJobs() {
       else if (sourceRequest.value === currentRequest && result.status === 404) { sourceRequest.value = null; rememberSourceRequest() }
     }
     if (sourceResultPending.value && await load()) {
+      if (sourceRequest.value?.id === requestedProposalId) { proposalOpen.value = true; requestedProposalId = null }
       sourceResultPending.value = false
       rememberSourceRequest()
       emit('caption-generated')
@@ -334,6 +347,7 @@ async function pollJobs() {
       jobs.value = result.jobs.filter(job => job.operation === 'TELEGRAM_GENERATION' && (job.format === format.value || (!job.format && format.value === 'TELEGRAM_POST')))
       const latest = jobs.value[0]
       if (latest?.status === 'SUCCEEDED' && latest.id !== loadedCreativeResultId && await load()) {
+        if (latest.id === requestedProposalId) { proposalOpen.value = true; requestedProposalId = null }
         loadedCreativeResultId = latest.id
         if (!sourceRequest.value) jobMessage.value = ''
         emit('caption-generated')
@@ -467,9 +481,6 @@ function inputFreshness(reasons: string[]) {
   const specific = reasons.flatMap(reason => labels[reason] ? [labels[reason]] : [])
   return [...new Set(specific)].join(', ') || 'змінилися джерела або налаштування'
 }
-function hasUnresolvedReviewBlock(revision: Revision) {
-  return revision.blockingReasons.some(reason => reason !== 'UNMAPPED_NOT_ACKNOWLEDGED' || !reviewAcknowledgements.value[revision.id])
-}
 function formatDate(value?: string | null) { return value ? new Intl.DateTimeFormat('uk-UA', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—' }
 function restoreLocal() {
   const item = recovered.value
@@ -530,9 +541,6 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
   <div class="telegram-workspace">
     <header class="telegram-heading">
       <div>
-        <p class="telegram-context">
-          {{ projectTopic }}
-        </p>
         <h1 id="telegram-title">
           {{ formatLabel }}
         </h1>
@@ -707,7 +715,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         v-else
         class="telegram-source-note"
       >
-        Джерело: {{ selectedArticle?.title || `погоджена стаття · версія ${selectedArticle?.number ?? ''}` }}. Зміни чернетки статті не змінюють цю адаптацію.
+        Джерело: {{ selectedArticle?.title || 'погоджена стаття' }} (версія {{ selectedArticle?.number }}). Зміни чернетки статті не змінюють цю адаптацію.
       </p>
       <p
         v-if="state.brief?.currentRevision?.contentMode !== contentMode"
@@ -743,14 +751,15 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         </Button>
       </div>
 
-      <section
+      <details
         v-if="latestProposal"
         class="telegram-proposal"
-        aria-labelledby="channel-proposal-heading"
+        :open="proposalOpen"
+        @toggle="proposalOpen = ($event.target as HTMLDetailsElement).open"
       >
-        <h2 id="channel-proposal-heading">
+        <summary id="channel-proposal-heading">
           {{ sourceRequest?.stage === 'FAILED' ? 'Попередня пропозиція тексту' : 'Пропозиція тексту' }}
-        </h2>
+        </summary>
         <p class="telegram-history-text">
           {{ latestProposal.content.text }}
         </p>
@@ -781,7 +790,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             href="#script-title"
           >Перейти до сценарію</a>
         </div>
-      </section>
+      </details>
 
       <SourceWritingStarter
         v-if="sourceRequest?.sourceStarter"
@@ -881,9 +890,16 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             <Button
               class="workspace-button workspace-button-primary"
               :disabled="readonly || busy || checkpointing || conflict || !!recovered || !text.trim() || text.length > textLimit || coverText.length > 200 || coverInstruction.length > 2000"
-              @click="checkpoint"
+              @click="checkpoint()"
             >
               {{ checkpointing ? 'Зберігаємо версію…' : 'Зберегти версію' }}
+            </Button>
+            <Button
+              class="workspace-button workspace-button-primary"
+              :disabled="readonly || busy || checkpointing || conflict || !!recovered || !text.trim() || text.length > textLimit || (isCover && (!coverText.trim() || !coverInstruction.trim()))"
+              @click="checkpoint(true)"
+            >
+              Зберегти й погодити
             </Button>
           </div>
           <p
@@ -898,7 +914,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
           >
             <div class="telegram-paper-heading">
               <h2 id="language-heading">
-                Мова й пунктуація
+                Пробіли й пунктуація
               </h2>
               <Button
                 class="workspace-button"
@@ -906,7 +922,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
                 :disabled="readonly || busy || saving || languageBusy || conflict || !!recovered"
                 @click="reviewLanguage"
               >
-                {{ languageBusy ? 'Перевіряємо…' : 'Перевірити мову' }}
+                {{ languageBusy ? 'Перевіряємо…' : 'Перевірити' }}
               </Button>
             </div>
             <p
@@ -987,10 +1003,12 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
               Скасувати підготовку
             </Button>
           </div>
-          <div
+          <details
             v-if="sourceMappings.length"
             aria-label="Посилання на уривки"
+            class="telegram-linked"
           >
+            <summary>Прив’язані уривки</summary>
             <p
               v-for="mapping in sourceMappings"
               :key="`${mapping.passageId}:${mapping.startOffset}`"
@@ -1010,7 +1028,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
                 Прибрати посилання
               </Button>
             </p>
-          </div>
+          </details>
           <p
             v-if="sourceError && !selectedSource"
             class="telegram-source-error"
@@ -1029,7 +1047,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             class="telegram-review-controls"
           >
             <p v-if="activeApproval">
-              {{ activeApproval.staleReasons.length ? 'Раніше погоджена версія допису' : 'Погоджена версія допису' }} · {{ activeApproval.number }}
+              {{ activeApproval.staleReasons.length ? 'Раніше погоджена версія допису' : 'Погоджена версія допису' }} (версія {{ activeApproval.number }})
             </p>
           </div>
         </section>
@@ -1088,32 +1106,38 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             </blockquote>
             <a :href="`/projects/${projectId}/sources`">Відкрити джерела проєкту</a>
           </section>
-          <article
-            v-for="item in state.eligibleSourcePassages ?? []"
-            :key="item.passageId"
-            class="telegram-evidence-item"
+          <div
+            class="telegram-passage-list"
+            tabindex="0"
+            aria-label="Уривки джерел"
           >
-            <h3>{{ item.materialTitle }}</h3><blockquote>
-              <SourceMarkdown
-                :text="item.quote"
-                compact
-              />
-            </blockquote>
-            <Button
-              variant="ghost"
-              @click="openSourcePassage(item)"
+            <article
+              v-for="item in state.eligibleSourcePassages ?? []"
+              :key="item.passageId"
+              class="telegram-evidence-item"
             >
-              Відкрити джерело
-            </Button>
-            <Button
-              variant="outline"
-              :disabled="readonly || contentMode !== 'FACTUAL'"
-              @mousedown.prevent
-              @click="linkSourcePassage(item)"
-            >
-              Прив’язати виділення до уривка
-            </Button>
-          </article>
+              <h3>{{ item.materialTitle }}</h3><blockquote>
+                <SourceMarkdown
+                  :text="item.quote"
+                  compact
+                />
+              </blockquote>
+              <Button
+                variant="ghost"
+                @click="openSourcePassage(item)"
+              >
+                Відкрити джерело
+              </Button>
+              <Button
+                variant="outline"
+                :disabled="readonly || contentMode !== 'FACTUAL'"
+                @mousedown.prevent
+                @click="linkSourcePassage(item)"
+              >
+                Прив’язати виділення до уривка
+              </Button>
+            </article>
+          </div>
           <p
             v-if="!state.eligibleSourcePassages?.length"
             class="telegram-empty-evidence"
@@ -1196,15 +1220,11 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             >
               Застосувати до чернетки
             </Button>
-            <label v-if="revision.hasUnmapped && ((revision.status === 'PROPOSED' && revision.id === state.adaptation?.draft?.baseRevisionId) || (revision.status === 'APPROVED' && revision.id === state.adaptation?.currentApprovedRevisionId && revision.staleReasons.length))"><input
-              v-model="reviewAcknowledgements[revision.id]"
-              type="checkbox"
-            > Я переглянув речення без посилань на джерела</label>
             <template v-if="revision.status === 'PROPOSED' && revision.id === (state.adaptation?.draft?.baseRevisionId ?? null)">
               <Button
                 class="workspace-button workspace-button-primary"
-                :disabled="busy || readonly || dirty || conflict || hasUnresolvedReviewBlock(revision) || (revision.hasUnmapped && !reviewAcknowledgements[revision.id])"
-                @click="command(`/${revision.id}/approve`, { expectedReviewCounter: revision.reviewCounter, acknowledgeUnmapped: reviewAcknowledgements[revision.id] === true })"
+                :disabled="busy || readonly || dirty || conflict || !!revision.blockingReasons.length"
+                @click="command(`/${revision.id}/approve`, { expectedReviewCounter: revision.reviewCounter })"
               >
                 Погодити версію
               </Button>
@@ -1212,8 +1232,8 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
             <Button
               v-if="revision.status === 'APPROVED' && revision.id === state.adaptation?.currentApprovedRevisionId && revision.staleReasons.length"
               class="workspace-button workspace-button-primary"
-              :disabled="busy || readonly || dirty || conflict || hasUnresolvedReviewBlock(revision) || (revision.hasUnmapped && !reviewAcknowledgements[revision.id])"
-              @click="command(`/${revision.id}/rereview`, { expectedReviewCounter: revision.reviewCounter, acknowledgeUnmapped: reviewAcknowledgements[revision.id] === true })"
+              :disabled="busy || readonly || dirty || conflict || !!revision.blockingReasons.length"
+              @click="command(`/${revision.id}/rereview`, { expectedReviewCounter: revision.reviewCounter })"
             >
               Переглянути без зміни тексту
             </Button>
@@ -1279,6 +1299,12 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 .telegram-evidence { min-width: 0; }
 .telegram-evidence h2, .telegram-history h2, .telegram-proposal h2 { margin: 0; font: 550 25px/1.3 SourceSerif, Georgia, serif; }
 .telegram-evidence > p { color: var(--muted); font-size: 13px; line-height: 1.55; }
+.telegram-passage-list { max-height: 750px; overflow-y: auto; }
+.telegram-linked summary, .telegram-proposal summary { cursor: pointer; font-weight: 600; }
+.telegram-linked p { padding: 12px 0; margin: 0; border-top: 1px solid var(--rule); }
+.telegram-linked summary { padding: 12px 0; }
+.telegram-proposal summary { font: 550 25px/1.3 SourceSerif, Georgia, serif; }
+.telegram-linked button { text-decoration: underline; text-underline-offset: 3px; }
 .telegram-evidence-item { padding: 16px 0; border-top: 1px solid var(--rule); }
 .telegram-evidence-item h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.45; }
 .telegram-evidence-item p { margin: 7px 0; color: var(--muted); font-size: 12px; }
@@ -1314,7 +1340,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
 .telegram-history-entry ul { padding-left: 20px; color: var(--muted); overflow-wrap: anywhere; }
 .telegram-state { padding: 22px 0; }
 .telegram-workspace :deep(button:focus-visible), .telegram-history summary:focus-visible { outline: 2px solid var(--copper); outline-offset: 3px; }
-@media (max-width: 900px) { .telegram-layout { grid-template-columns: minmax(0, 1fr); gap: 32px; } .telegram-evidence { border-top: 1px solid var(--rule); padding-top: 20px; } .telegram-evidence-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; } .telegram-evidence-item blockquote { grid-column: 1; } .telegram-evidence-item button { grid-column: 2; grid-row: 2 / span 2; align-self: center; } }
-@media (max-width: 600px) { .telegram-heading { align-items: start; flex-direction: column; gap: 8px; margin-bottom: 20px; } .telegram-heading h1 { font-size: 34px; } .telegram-controls { align-items: stretch; flex-direction: column; gap: 14px; } .telegram-select select { width: 100%; min-width: 0; } .telegram-manuscript { min-height: 280px; padding: 18px 16px; font-size: 18px; } .telegram-actions { align-items: stretch; flex-direction: column; } .telegram-actions > * { width: 100%; } .telegram-recovery { align-items: stretch; flex-direction: column; } .telegram-recovery > * { width: 100%; } .telegram-evidence-item { display: block; } .telegram-inputs { grid-template-columns: minmax(0, 1fr); gap: 2px; } .telegram-inputs dd { margin-bottom: 8px; } }
+@media (max-width: 900px) { .telegram-layout { grid-template-columns: minmax(0, 1fr); gap: 32px; } .telegram-evidence { border-top: 1px solid var(--rule); padding-top: 20px; } .telegram-evidence-item { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; } .telegram-evidence-item blockquote { margin: 2px 0 4px; } }
+@media (max-width: 600px) { .telegram-heading { align-items: start; flex-direction: column; gap: 8px; margin-bottom: 20px; } .telegram-heading h1 { font-size: 34px; } .telegram-controls { align-items: stretch; flex-direction: column; gap: 14px; } .telegram-select select { width: 100%; min-width: 0; } .telegram-manuscript { min-height: 280px; padding: 18px 16px; font-size: 18px; } .telegram-actions { align-items: stretch; flex-direction: column; } .telegram-actions > * { width: 100%; } .telegram-recovery { align-items: stretch; flex-direction: column; } .telegram-recovery > * { width: 100%; } .telegram-evidence-item { display: flex; } .telegram-inputs { grid-template-columns: minmax(0, 1fr); gap: 2px; } .telegram-inputs dd { margin-bottom: 8px; } }
 @media (prefers-reduced-motion: reduce) { .telegram-workspace *, .telegram-workspace *::before, .telegram-workspace *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 </style>

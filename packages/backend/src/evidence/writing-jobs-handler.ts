@@ -17,6 +17,7 @@ import type { ScriptService } from '../editorial/script.service.js';
 import { sourceArticleContext } from './source-article-context.js';
 import type { ArticleService } from '../editorial/article.service.js';
 import { sourceWritingInputSchema, sourceWritingOutputSchema, validateSourceWritingOutput } from './writing-contracts.js';
+import { guideSourceWritingBrief } from './writing-format-guidance.js';
 import { DifySourceWritingProvider, SourceWritingProviderError, sourceWritingReleaseId, sourceWritingWorkflowSettings } from './writing-provider.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -121,14 +122,23 @@ async function validateFrozen(tx: Prisma.TransactionClient, job: JobContext['job
     return { snapshotId: row.snapshotId, purpose: row.capturedPurpose, sha256: row.snapshot.sha256, text: row.snapshot.normalizedText };
   }).sort((a,b) => a.snapshotId.localeCompare(b.snapshotId));
   const request = sourceWritingInputSchema.parse({ schemaVersion: 'source-writing-input-v1', requestId: manifest.requestId, task: manifest.task,
-    brief: { topic: frozen.topic, audience: frozen.audience, centralMessage: frozen.centralMessage, category: frozen.category,
+    brief: guideSourceWritingBrief({ topic: frozen.topic, audience: frozen.audience, centralMessage: frozen.centralMessage, category: frozen.category,
       tone: frozen.tone, targetLength: frozen.targetLength, cta: frozen.cta, exclusions: frozen.exclusions, notes: frozen.notes },
+    manifest.task === 'ADAPTATION' ? manifest.format : undefined),
     style: { brandbook: frozen.style.brandbook, tone: frozen.style.tone, settings: frozen.style.settings }, context, ...sectionContext,
     ...(manifest.task === 'ADAPTATION' ? { format: manifest.format,...(approvedArticle ? { approvedArticle } : {}) } : {}),
     passages: grounding.passages.filter(row => manifest.task !== 'SECTION' || row.packetId === manifest.packetId)
       .map(row => ({ id: row.id, packetId: row.packetId, snapshotId: row.snapshotId, quote: row.quote })),
     requiredClaims: grounding.requiredClaims.filter(row => !requiredIds || requiredIds.has(row.claimRevisionId)) });
-  if (canonicalManifestHash(request) !== canonicalManifestHash(manifest.request)) throw new JobFailure('INPUT_INTEGRITY', 'NOT_SUBMITTED');
+  if (canonicalManifestHash(request) !== canonicalManifestHash(manifest.request)) {
+    // Preserve requests already queued before format guidance was introduced.
+    // Both accepted shapes must reconstruct the exact original frozen brief.
+    const legacyRequest = sourceWritingInputSchema.parse({ ...request,
+      brief: { ...request.brief, notes: frozen.notes, tone: frozen.tone } });
+    if (canonicalManifestHash(legacyRequest) !== canonicalManifestHash(manifest.request)) {
+      throw new JobFailure('INPUT_INTEGRITY', 'NOT_SUBMITTED');
+    }
+  }
 }
 
 export function createSourceWritingJobHandler(deps: { prisma: PrismaClient; editorial: EditorialService; factualBasis: FactualBasisService;

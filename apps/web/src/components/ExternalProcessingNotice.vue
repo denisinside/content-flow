@@ -143,7 +143,7 @@ onBeforeUnmount(() => {
     >
       <summary>Зовнішня обробка · Згоду збережено</summary>
       <p class="external-notice-accepted">
-        Версія {{ notice.version }}<span v-if="readableDate(acceptedAt)"> · {{ readableDate(acceptedAt) }}</span>
+        Версія {{ notice.version }}<span v-if="readableDate(acceptedAt)"> ({{ readableDate(acceptedAt) }})</span>
       </p>
       <p class="external-notice-copy">
         {{ notice.text }}

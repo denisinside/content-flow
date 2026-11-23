@@ -133,3 +133,19 @@ test('does not restore a delayed Google connection response after logout', async
   context.releaseConnectionList();
   await expect(page.getByLabel('Посилання або ID документа')).toHaveCount(0);
 });
+
+test('switching between comments and Google Docs preserves the inspected document input', async ({ page }) => {
+  await fixture(page);
+  await openBinding(page);
+  await page.getByLabel('Посилання або ID документа').fill(documentId);
+  await page.getByRole('button', { name: 'Коментарі й правки' }).click();
+  await expect(page.getByRole('heading', { name: 'Коментарі й правки' })).toBeVisible();
+  await page.getByRole('button', { name: 'Google Документи' }).click();
+  await expect(page.getByLabel('Посилання або ID документа')).toHaveValue(documentId);
+  await page.getByRole('button', { name: 'Перевірити документ' }).click();
+  await expect(page.getByText('Тестовий документ')).toBeVisible();
+  await page.getByRole('button', { name: 'Коментарі й правки' }).click();
+  await page.getByRole('button', { name: 'Google Документи' }).click();
+  await expect(page.getByText('Тестовий документ')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});

@@ -562,6 +562,29 @@ test('a channel-only project offers Brief without imposing an Article route or p
   await assertClean(context);
 });
 
+test('evidence highlighting can be toggled without changing the manuscript', async ({ page }) => {
+  const context = await fixture(page, false, true);
+  await page.goto(`/projects/${projectId}/article`);
+  const toggle = page.getByRole('button', { name: 'Підкреслення доказів', exact: true });
+  const mark = page.locator('.article-writing .article-evidence');
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(mark).toHaveCSS('border-bottom-width', '1px');
+  await toggle.focus(); await page.keyboard.press('Space');
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await expect(mark).toHaveCSS('border-bottom-width', '0px');
+  await expect(mark).toHaveText(wording);
+  await expect(mark).toHaveAttribute('data-evidence-id', 'evidence-1');
+  for (const width of [1280, 768, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `.local-checks/evidence-toggle-${width}.png` });
+  }
+  await toggle.click();
+  await expect(mark).toHaveCSS('border-bottom-width', '1px');
+  expect(context.articleSaves).toHaveLength(0);
+  await assertClean(context);
+});
+
 test('linking a newly selected sentence replaces the wording in the evidence inspector', async ({ page }) => {
   const context = await fixture(page, false, true);
   await page.goto(`/projects/${projectId}/article`);

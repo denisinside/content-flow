@@ -26,7 +26,8 @@ async function copyStarter() {
     class="source-writing-starter"
     aria-label="Робоча заготовка з джерел"
   >
-    <h3>Робоча заготовка з джерел</h3>
+    <details open>
+    <summary><h3>Робоча заготовка з джерел</h3></summary>
     <p>Готовий текст потребує доопрацювання. Ці уривки можна використати для власної чернетки.</p>
     <p><strong>{{ starter.topic }}</strong></p>
     <div
@@ -49,11 +50,15 @@ async function copyStarter() {
     >
       {{ copyMessage }}
     </p>
+    </details>
   </section>
 </template>
 
 <style scoped>
 .source-writing-starter { margin: 20px 0; padding: 14px 16px; border-inline-start: 2px solid var(--rule); }
 .source-writing-starter h3 { margin: 0 0 8px; font-size: 17px; }
+.source-writing-starter summary { cursor: pointer; }
+.source-writing-starter summary h3 { display: inline; }
+.source-writing-starter summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .source-writing-starter blockquote { margin: 4px 0 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

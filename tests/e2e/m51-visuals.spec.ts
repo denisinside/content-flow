@@ -150,6 +150,16 @@ test('M5.2 unknown outcome preserves text and offers no automatic retry',async({
   const data=await fixture(page);data.enableBackground(true);await openVisuals(page,'LINKEDIN_COVER');await page.getByRole('button',{name:'Створити візуал'}).click();await page.getByText('AI-фон для кадру',{exact:true}).click();await page.getByLabel('Опишіть фон без тексту').fill('Природний фон');await page.getByRole('button',{name:'Згенерувати фон',exact:true}).click();await expect(page.getByText('Результат невідомий.',{exact:false})).toBeVisible();await expect(page.getByRole('button',{name:'Повторити безпечно'})).toHaveCount(0);await expect(page.getByRole('textbox',{name:'Текст',exact:true})).toHaveValue('Міський сервіс стає доступнішим');expect(data.commands.filter(row=>row.path.endsWith('/backgrounds/generate'))).toHaveLength(1);
 });
 
+async function openCoordinates(page: Page) {
+  const details = page.locator('.visual-coordinate-details');
+  if (!(await details.evaluate(node => (node as HTMLDetailsElement).open))) {
+    await details.locator('summary').click();
+  }
+}
+async function addLayer(page: Page, type: 'Текст' | 'Форма') {
+  await page.locator('.visual-add-layer summary').click();
+  await page.locator('.visual-add-layer-menu').getByRole('button', { name: type }).click();
+}
 async function openVisuals(page: Page, format: Format) {
   await page.goto(`/projects/${projectId}/visuals?format=${format}`);
   await expect(page.getByRole('heading', { name: 'Візуали' })).toBeVisible();
@@ -232,6 +242,7 @@ test('text, template, typography and position persist through checkpoint and rel
   await page.getByLabel('Шрифт', { exact: true }).selectOption('source-serif');
   await page.getByLabel('Розмір шрифту').fill('64');
   await page.getByLabel('Колір тексту').fill('#315b70');
+  await openCoordinates(page);
   const finalDraftResponse = page.waitForResponse(response => response.url().includes('/visuals/draft')
     && response.request().method() === 'POST'
     && (response.request().postDataJSON() as { composition: Composition }).composition.frames[0]?.layers[0]?.['x'] === 120);
@@ -250,6 +261,7 @@ test('text, template, typography and position persist through checkpoint and rel
   await expect(page.getByLabel('Макет')).toHaveValue('statement');
   await expect(page.getByLabel('Шрифт', { exact: true })).toHaveValue('source-serif');
   await expect(page.getByLabel('Розмір шрифту')).toHaveValue('64');
+  await openCoordinates(page);
   await expect(page.getByLabel('X', { exact: true })).toHaveValue('120');
   expect(ctx.pageErrors).toEqual([]);
 });
@@ -288,9 +300,164 @@ test('409 keeps unsaved Ukrainian text; stale parent blocks creation and 401 ret
   const stale = ctx.states.get('LINKEDIN_COVER')!;
   stale.composition = null; stale.parent.eligible = false; stale.parent.staleReasons = ['SCRIPT_STALE'];
   await page.reload();
-  await expect(page.getByText('Погоджене джерело застаріло або потребує перевірки.')).toBeVisible();
+  await expect(page.getByText('Спочатку погодьте актуальний текст або сценарій у вкладці «Канали».')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Створити візуал' })).toHaveCount(0);
   ctx.expireSession();
   await page.reload();
   await expect(page.getByRole('status').filter({ hasText: 'Сесію завершено. Увійдіть, щоб продовжити роботу.' })).toBeVisible();
+});
+
+test('visual editor drag, undo and redo preserve coordinates and template history', async ({ page }) => {
+  const ctx = await fixture(page);
+  await openVisuals(page, 'LINKEDIN_COVER');
+  await page.getByRole('button', { name: 'Створити візуал' }).click();
+  await expect(page.locator('.visual-stage canvas')).toBeVisible();
+  await openCoordinates(page);
+  const x = page.getByLabel('X', { exact: true });
+  await expect(x).toHaveValue('84');
+  await page.locator('.visual-stage-wrap').scrollIntoViewIfNeeded();
+  const bounds = await page.locator('.visual-stage').boundingBox();
+  if (!bounds) throw new Error('Visual canvas missing');
+  const scale = bounds.width / 1080;
+  const startX = bounds.x + (84 + 70) * scale;
+  const startY = bounds.y + (110 + 38) * scale;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + 95 * scale, startY + 25 * scale, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => Number(await x.inputValue())).toBeGreaterThan(84);
+  const draggedX = Number(await x.inputValue());
+  await page.getByRole('button', { name: /Скасувати/ }).click();
+  await expect(x).toHaveValue('84');
+  await page.getByRole('button', { name: /Повторити/ }).click();
+  await expect(x).toHaveValue(String(draggedX));
+  await page.getByLabel('Макет').selectOption('split');
+  await expect(page.getByLabel('Макет')).toHaveValue('split');
+  await page.getByRole('button', { name: /Скасувати/ }).click();
+  await expect(page.getByLabel('Макет')).toHaveValue('editorial');
+  await page.getByRole('button', { name: /Повторити/ }).click();
+  await expect(page.getByLabel('Макет')).toHaveValue('split');
+  await page.getByLabel('Макет').selectOption('quote');
+  await expect(page.getByLabel('Макет')).toHaveValue('quote');
+  await page.getByLabel('Макет').selectOption('minimal');
+  await expect(page.getByLabel('Макет')).toHaveValue('minimal');
+  expect(ctx.pageErrors).toEqual([]);
+});
+
+test('visual gallery, multiple styled texts, grouping and layer controls', async ({ page }) => {
+  const ctx = await fixture(page);
+  await openVisuals(page, 'LINKEDIN_COVER');
+  await page.getByRole('button', { name: 'Створити візуал' }).click();
+  await expect(page.locator('.visual-template-card')).toHaveCount(7);
+  await page.getByRole('button', { name: 'Шаблон: Цитата' }).click();
+  await expect(page.getByLabel('Макет', { exact: true })).toHaveValue('quote');
+  await addLayer(page, 'Текст');
+  await expect(page.locator('.visual-layer-row')).toHaveCount(3);
+  await page.getByLabel('Насиченість').selectOption('700');
+  await page.getByLabel('Міжрядковий інтервал').fill('1.5');
+  await expect(page.getByLabel('Міжрядковий інтервал')).toHaveValue('1.5');
+  await page.getByRole('button', { name: 'Дублювати шар' }).click();
+  await expect(page.locator('.visual-layer-row')).toHaveCount(4);
+  await page.locator('.visual-layer-row').nth(0).locator('input[type=checkbox]').check();
+  await expect(page.getByRole('button', { name: 'Групувати шари', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Групувати шари', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Розгрупувати шари' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Приховати шар' }).click();
+  await expect(page.getByRole('button', { name: 'Показати шар' })).toBeVisible();
+  await page.getByRole('button', { name: 'Показати шар' }).click();
+  await page.getByRole('button', { name: 'Заблокувати шар' }).click();
+  await expect(page.getByRole('button', { name: 'Розблокувати шар' })).toBeVisible();
+  await page.getByRole('button', { name: 'Розблокувати шар' }).click();
+  await page.getByRole('button', { name: 'Розгрупувати шари' }).click();
+  await expect.poll(() => ctx.states.get('LINKEDIN_COVER')!.composition!.draft!.content.frames[0]!.layers.length).toBe(4);
+  expect(ctx.pageErrors).toEqual([]);
+});
+
+test('zoom displays original canvas pixels with scroll without changing composition size', async ({ page }) => {
+  const ctx = await fixture(page);
+  await openVisuals(page, 'LINKEDIN_COVER');
+  await page.getByRole('button', { name: 'Створити візуал' }).click();
+  const canvas = page.locator('.visual-stage canvas');
+  const fitWidth = (await canvas.boundingBox())!.width;
+  await page.getByLabel('Масштаб').selectOption('100');
+  await expect.poll(async () => Math.round((await canvas.boundingBox())!.width)).toBe(1080);
+  await expect.poll(() => page.locator('.visual-stage-wrap').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(ctx.states.get('LINKEDIN_COVER')!.composition!.draft!.content.width).toBe(1080);
+  await page.getByRole('button', { name: 'Умістити' }).click();
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBeLessThan(1080);
+  expect(fitWidth).toBeLessThan(1080);
+});
+
+test('carousel frame duplication creates independent frame and retains editability', async ({ page }) => {
+  const ctx = await fixture(page);
+  await openVisuals(page, 'INSTAGRAM_CAROUSEL');
+  await page.getByRole('button', { name: 'Створити візуал' }).click();
+  await expect(page.getByRole('navigation', { name: 'Кадри' }).getByRole('button')).toHaveCount(3);
+  await page.getByRole('button', { name: 'Дублювати кадр' }).click();
+  await expect(page.getByRole('navigation', { name: 'Кадри' }).getByRole('button')).toHaveCount(4);
+  await expect.poll(() => ctx.states.get('INSTAGRAM_CAROUSEL')!.composition!.draft!.content.frames.length).toBe(4);
+  const frames = ctx.states.get('INSTAGRAM_CAROUSEL')!.composition!.draft!.content.frames;
+  expect(new Set(frames.map(row => row.id)).size).toBe(4);
+  expect(frames[1]!.sourceFrameId).toBe(frames[0]!.sourceFrameId);
+  expect(frames[1]!.layers[0]!.id).not.toBe(frames[0]!.layers[0]!.id);
+  expect(ctx.pageErrors).toEqual([]);
+});
+
+test('canvas snaps a shape to the centre and a grouped pair moves together', async ({ page }) => {
+  const ctx = await fixture(page);
+  await openVisuals(page, 'LINKEDIN_COVER');
+  await page.getByRole('button', { name: 'Створити візуал' }).click();
+  await addLayer(page, 'Форма');
+  const wrap = page.locator('.visual-stage-wrap');
+  await wrap.scrollIntoViewIfNeeded();
+  const bounds = (await page.locator('.visual-stage').boundingBox())!;
+  const scale = bounds.width / 1080;
+  const drag = async (x: number, y: number, dx: number, dy = 0) => {
+    await page.mouse.move(bounds.x + x * scale, bounds.y + y * scale);
+    await page.mouse.down();
+    await page.mouse.move(bounds.x + (x + dx) * scale, bounds.y + (y + dy) * scale, { steps: 12 });
+    await page.mouse.up();
+  };
+  await drag(124, 104, 313);
+  await openCoordinates(page);
+  await expect(page.getByLabel('X', { exact: true })).toHaveValue('400');
+  await addLayer(page, 'Форма');
+  await page.locator('.visual-layer-row').nth(1).locator('input[type=checkbox]').check();
+  await page.getByRole('button', { name: 'Групувати шари', exact: true }).click();
+  await page.getByLabel('Прив’язка').uncheck();
+  await drag(124, 104, 80);
+  await expect.poll(() => {
+    const xs = ctx.states.get('LINKEDIN_COVER')!.composition!.draft!.content.frames[0]!.layers
+      .filter(row => row.type === 'rect').map(row => Number(row.x));
+    return xs[0]! - 400 === xs[1]! - 84 && xs[0]! >= 478 && xs[0]! <= 482;
+  }).toBe(true);
+  expect(ctx.pageErrors).toEqual([]);
+});
+
+test('minimal visual controls keep icon actions accessible and hide unavailable frame duplication', async ({ page }) => {
+  const ctx = await fixture(page);
+  await openVisuals(page, 'LINKEDIN_COVER');
+  await page.getByRole('button', { name: 'Створити візуал' }).click();
+  await expect(page.getByRole('button', { name: 'Дублювати кадр' })).toHaveCount(0);
+  await expect(page.locator('.visual-edit-toolbar')).toHaveCount(0);
+  await expect(page.locator('.visual-template-gallery summary')).toHaveText('Галерея макетів');
+  await expect(page.locator('.visual-coordinate-details')).not.toHaveAttribute('open', '');
+  await expect(page.getByRole('button', { name: 'Скасувати' })).toContainText('');
+  await expect(page.getByRole('button', { name: 'Скасувати' }).locator('svg')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Повторити' }).locator('svg')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Дублювати шар' }).locator('svg')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Видалити шар' }).locator('svg')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Опустити шар' }).locator('svg')).toHaveCount(1);
+  await expect(page.locator('#visual-zoom')).not.toContainText('Вмістити');
+  await page.locator('.visual-add-layer summary').click();
+  await expect(page.locator('.visual-add-layer-menu')).toBeVisible();
+  await page.locator('.visual-add-layer-menu').getByRole('button', { name: 'Форма' }).click();
+  await expect(page.locator('.visual-layer-row')).toHaveCount(2);
+  await expect(page.locator('.visual-add-layer')).not.toHaveAttribute('open', '');
+  await openCoordinates(page);
+  await expect(page.getByLabel('X', { exact: true })).toBeVisible();
+  await page.locator('.visual-coordinate-details summary').click();
+  await expect(page.locator('.visual-coordinate-details')).not.toHaveAttribute('open', '');
+  expect(ctx.pageErrors).toEqual([]);
 });

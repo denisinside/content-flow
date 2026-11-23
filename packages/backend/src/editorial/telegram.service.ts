@@ -252,7 +252,6 @@ export class TelegramService {
     if (format.includes('COVER') && !content.cover?.instruction.trim()) blockingReasons.push('COVER_INSTRUCTION_REQUIRED');
     if (!row.claimsSealed) blockingReasons.push('UNSEALED_EVIDENCE');
     if (row.withdrawnAt) blockingReasons.push('APPROVAL_WITHDRAWN');
-    if (details.hasUnmapped && !row.acknowledgedUnmapped) blockingReasons.push('UNMAPPED_NOT_ACKNOWLEDGED');
     if (staleReasons.some(reason => ['INVALID_ORIGINAL_FACTUAL_BASIS', 'INVALID_ORIGINAL_SOURCE_ARTICLE', 'INVALID_ORIGINAL_SOURCE_EVIDENCE'].includes(reason))) blockingReasons.push('ORIGINAL_DEPENDENCY_BLOCKED');
     if (row.sourceEvidenceSetId) {
       if (!row.sourceEvidenceSealed || !await this.sourceCitationIntegrity(tx, project, row, content)) blockingReasons.push('SOURCE_CITATIONS_UNSEALED');
@@ -435,7 +434,6 @@ export class TelegramService {
         if (input.expectedReviewCounter === undefined || input.expectedReviewCounter !== version.reviewCounter) throw new ConflictException('Telegram review counter is required and must match');
         if (version.approvedAt || !draft || draft.baseRevisionId !== version.id || draft.sha256 !== version.sha256 || !this.sameInputs(draft, version)) throw new ConflictException('Approve only the exact current saved Telegram checkpoint');
         const details = await this.reviewable(tx, project, version);
-        if (details.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge that unmapped Telegram text has not been completely fact checked');
         await tx.adaptationRevision.update({ where: { id: version.id }, data: { approvedBy: user, approvedAt: new Date(), acknowledgedUnmapped: details.hasUnmapped && input.acknowledgeUnmapped === true,
         } });
         await tx.adaptation.update({ where: { id: adaptation.id }, data: { currentApprovedRevisionId: version.id, revision: { increment: 1 } } });
@@ -451,8 +449,7 @@ export class TelegramService {
       if (!version) throw new NotFoundException('Telegram revision not found');
       if (adaptation.currentApprovedRevisionId !== version.id || !version.approvedAt || version.withdrawnAt || version.reviewCounter !== input.expectedReviewCounter) throw new ConflictException('Re-review only the current active approval with its exact review counter');
       if (canonicalManifestHash(version.content) !== version.sha256) throw new ConflictException('Telegram revision integrity check failed');
-      const details = await this.reviewable(tx, project, version, true);
-      if (details.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge unmapped Telegram text during re-review');
+      await this.reviewable(tx, project, version, true);
       const current = await this.currentInputs(tx, project, version.inputMode, version.contentMode, version.includeLink);
       await tx.adaptationRevision.update({ where: { id: version.id }, data: { reviewCounter: { increment: 1 },
         reviewedBriefRevisionId: current.briefRevisionId, reviewedBasisRevisionId: version.sourceEvidenceSetId ? null : current.basisRevisionId,

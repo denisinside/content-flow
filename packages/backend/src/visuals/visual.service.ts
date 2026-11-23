@@ -377,7 +377,7 @@ export class VisualService {
     });
   }
   review(user: string, project: string, rawFormat: string, revisionId: string, action: 'approve' | 'withdraw', input: {
-    expectedRevision: number; expectedReviewCounter: number; acknowledgeUnmapped: boolean;
+    expectedRevision: number; expectedReviewCounter: number; acknowledgeUnmapped?: boolean | undefined;
   }) {
     const format = this.format(rawFormat);
     return this.command(user, project, async tx => {
@@ -404,7 +404,6 @@ export class VisualService {
         }
         const inspection = await this.inspectRevision(tx, project, row);
         if (inspection.staleReasons.length || inspection.blockingReasons.length || !inspection.eligible) throw new ConflictException('Visual revision needs correction or a new checkpoint before approval');
-        if (inspection.hasUnmapped && !input.acknowledgeUnmapped) throw new ConflictException('Acknowledge unmapped visual text before approval');
         await tx.visualCompositionRevision.update({ where: { id: row.id }, data: { approvedBy: user, approvedAt: new Date(), reviewCounter: { increment: 1 } } });
         await tx.visualComposition.update({ where: { id: owner.id }, data: { currentApprovedRevisionId: row.id, revision: { increment: 1 } } });
       }

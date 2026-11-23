@@ -148,25 +148,19 @@ async function captureWidths(page: Page, name: string) {
   }
 }
 
-test('approval waits for every canonical frame preview and explicit unmapped-text acknowledgement', async ({ page }) => {
+test('editor approval waits for every canonical frame preview without a separate acknowledgment', async ({ page }) => {
   const ctx = await fixture(page);
   await openVisuals(page, 'INSTAGRAM_CAROUSEL');
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.keyboard.press('Tab');
   await expect(page.locator(':focus-visible')).toHaveCount(1);
-  const prepare = page.getByRole('button', { name: 'Підготувати прев’ю всіх кадрів і погодити' });
-  await prepare.click();
-  await expect(page.getByText('Підтвердьте окремо, що текст без зіставлення не підтверджений джерелами.')).toBeVisible();
-  expect(ctx.previewCalls).toEqual([frameId(0), frameId(1), frameId(2)]);
-  expect(ctx.commands.some(row => row.path.endsWith('/approve'))).toBe(false);
   await captureWidths(page, 'unapproved-visual');
-  await page.getByRole('checkbox', { name: /Я перевірив текст без зіставлення/ }).check();
-  await prepare.click();
+  await page.getByRole('button', { name: 'Зберегти й погодити', exact: true }).click();
   await expect(page.getByText(/Візуальну версію 1 погоджено/)).toBeVisible();
   const approve = ctx.commands.find(row => row.path.endsWith('/approve'))!;
-  expect(approve.body).toMatchObject({ expectedRevision: 2, expectedReviewCounter: 0, acknowledgeUnmapped: true });
+  expect(approve.body).toEqual({ expectedRevision: 2, expectedReviewCounter: 0 });
   expect(ctx.states.get('INSTAGRAM_CAROUSEL')!.composition.currentApprovedRevisionId).toBe(revisionId('INSTAGRAM_CAROUSEL'));
-  expect(ctx.previewCalls).toHaveLength(6);
+  expect(ctx.previewCalls).toEqual([frameId(0), frameId(1), frameId(2)]);
   await captureWidths(page, 'approved-visual');
 });
 

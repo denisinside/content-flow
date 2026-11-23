@@ -51,9 +51,9 @@ describe('article draft checkpoints and exact human approval', () => {
     const checkpoint = await articles.checkpoint(user, project, { expectedRevision: 1 }, true), version = checkpoint.article!.versions[0]!;
     expect(checkpoint).toMatchObject({ editorOnly: true, article: { revision: 2, draft: { baseVersionId: version.id } } });
     expect((await articles.checkpoint(user, project, { expectedRevision: 2 })).article!.versions).toHaveLength(1);
-    await expect(articles.review(user, project, version.id, 'approve', { expectedRevision: 2 })).rejects.toMatchObject({ status: 409 });
-    const approved = await articles.review(member, project, version.id, 'approve', { expectedRevision: 2, acknowledgeUnmapped: true });
-    expect(approved.article!.versions[0]).toMatchObject({ approvedBy: member, acknowledgedUnmapped: true, claimsSealed: true });
+    await expect(articles.review(user, project, version.id, 'approve', { expectedRevision: 1 })).rejects.toMatchObject({ status: 409 });
+    const approved = await articles.review(member, project, version.id, 'approve', { expectedRevision: 2 });
+    expect(approved.article!.versions[0]).toMatchObject({ approvedBy: member, acknowledgedUnmapped: false, claimsSealed: true });
     const edited = await articles.saveDraft(user, project, { expectedRevision: 3, contentMode: 'CREATIVE', content: content('Новий текст') });
     expect(edited.article!.versions[0]!.content).toEqual(version.content);
     const withdrawn = await articles.review(user, project, version.id, 'withdraw', { expectedRevision: 4 });

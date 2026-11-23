@@ -29,7 +29,7 @@ type ProjectDto = {
 };
 
 type ApiIdentity = { id: string; email: string; cookie: string; session: ProviderSession };
-type WorkspaceDto = { id: string; name: string; ownerId: string; archivedAt: string | null; styleRevision: number; lifecycleRevision: number; members?: { userId: string }[] };
+type WorkspaceDto = { id: string; name: string; ownerId: string; archivedAt: string | null; styleRevision: number; lifecycleRevision: number; members?: { userId: string; email: string | null }[] };
 type HttpContext = { baseUrl: string; origin: string };
 type ApiReply<T> = { response: Response; body: T };
 
@@ -231,6 +231,9 @@ describe('isolated project and private asset API', () => {
     const accepted = await request<{ workspace: WorkspaceDto }>(recipient, 'POST', '/api/v1/workspace-invites/accept', { token: invited.body.invite.token });
     expect(accepted.response.status).toBe(201);
     expect(accepted.body.workspace.members?.map(member => member.userId)).toContain(recipient.id);
+    expect(accepted.body.workspace.members?.find(member => member.userId === recipient.id)?.email).toBe(recipient.email);
+    const detail = await request<{ workspace: WorkspaceDto }>(owner, 'GET', `/api/v1/workspaces/${workspaceId}`);
+    expect(detail.body.workspace.members?.find(member => member.userId === recipient.id)?.email).toBe(recipient.email);
     expect((await request(recipient, 'GET', `/api/v1/projects/${project.body.project.id}`)).response.status).toBe(200);
     expect((await request(recipient, 'POST', '/api/v1/workspace-invites/accept', { token: invited.body.invite.token })).response.status).toBe(404);
     const expiring = await request<{ invite: { id: string; token: string } }>(owner, 'POST', `/api/v1/workspaces/${workspaceId}/invites`, { email: wrongRecipient.email });

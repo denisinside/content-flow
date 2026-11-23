@@ -254,9 +254,6 @@ onBeforeUnmount(() => { requestVersion++ })
           :key="font.id"
           :value="font.id"
         >{{ font.label }}</option></select></label>
-        <p class="field-help visual-logo-help">
-          Логотип можна додати в редакторі візуалу як актив простору.
-        </p>
       </fieldset>
 
       <div class="style-field">

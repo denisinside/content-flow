@@ -19,7 +19,7 @@ interface SourcePassage { passageId: string; packetId: string; snapshotId: strin
 interface SourceRequest { id: string; stage: string; errorCategory: string | null; resultRefs?: { articleVersionId?: string }; partialArticle?: { content: Content; reviewedSectionCount: number } }
 interface State { editorOnly?: boolean; article: { id: string; revision: number; draft: Draft | null; currentApprovedVersionId: string | null; versions: Version[] } | null; articleSelected: boolean; eligibleSourcePassages?: SourcePassage[]; mappingIssues: { locator: string; reason: string }[]; staleReasons: string[]; hasUnmapped: boolean; editorial: { brief: { currentRevision: { id?: string; contentMode: string } | null } | null; outline: { currentApprovedRevisionId: string | null; currentRevision?: { id?: string; briefRevisionId?: string; sourceEvidenceSetId?: string | null } | null } | null } }
 interface LanguageSuggestion { id: string; targetType: 'ARTICLE' | 'ADAPTATION'; sourceRevisionId: string; contentHash: string; locator: { field: 'TITLE' | 'BODY' | 'COVER_TEXT'; start: number; end: number }; originalText: string; replacementText: string; finding: string; status: 'OPEN' | 'ACCEPTED' | 'REJECTED'; stale: boolean; resultVersionId?: string | null }
-interface Job { id: string; status: string; operation: string; retryAllowed: boolean }
+interface Job { id: string; status: string; operation: string; retryAllowed: boolean; resultRefs?: { articleVersionId?: string } | null }
 const props = defineProps<{ projectId: string; projectTopic: string; csrfToken: string; userId: string; archived?: boolean; openHistory?: boolean }>()
 const emit = defineEmits<{ 'session-expired': []; 'open-brief': [] }>()
 const state = ref<State | null>(null)
@@ -42,6 +42,7 @@ const inspector = ref<'history' | 'evidence' | 'proposal' | 'import' | 'annotati
 const googleDocsVisited = ref(false)
 const inspectorHeading = ref<HTMLHeadingElement | null>(null)
 const contentsOpen = ref(false)
+const showEvidenceMarks = ref(true)
 let contentsViewport: MediaQueryList | undefined
 let inspectorOpener: HTMLElement | null = null
 let inspectorReadingPosition = { left: 0, top: 0 }
@@ -77,7 +78,6 @@ const sourceProgress = computed(() => {
 })
 const annotationAnchor = ref<{ start: number; end: number; quote: string } | null>(null)
 const importedText = ref('')
-const acknowledgeUnmapped = ref(false)
 const recovered = ref<{ content: Content; contentMode: 'FACTUAL' | 'CREATIVE'; expectedRevision: number } | null>(null)
 const jobs = ref<Job[]>([])
 const languageSuggestions = ref<LanguageSuggestion[]>([])
@@ -94,6 +94,7 @@ let pollTimer: ReturnType<typeof setTimeout> | undefined
 let polling = false
 let loadedJobResults = ''
 let sourceResultPending = false
+let requestedArticleJobId: string | null = null
 let inFlight: Promise<boolean> | null = null
 let commandKey: string | null = null
 let languageRequest = 0
@@ -395,9 +396,9 @@ async function save(): Promise<boolean> {
   const ok = await inFlight
   return ok && dirty.value && !disposed ? save() : ok
 }
-async function action(path: string, extra: object = {}, replace = false) {
-  if (busy.value || readonly.value || !await save()) return
-  busy.value = true; error.value = ''; if (replace) editor.value?.setEditable(false, false)
+async function action(path: string, extra: object = {}, replace = false, approve = false) {
+  if (busy.value || readonly.value || !await save() || busy.value || disposed) return
+  busy.value = true; error.value = ''; if (replace || approve) editor.value?.setEditable(false, false)
   try {
     const checkpoint = path === '/article/checkpoint'
     if (checkpoint) savedCheckpoint.value = false
@@ -405,12 +406,19 @@ async function action(path: string, extra: object = {}, replace = false) {
     expectedRevision.value = state.value.article?.revision ?? expectedRevision.value
     if (checkpoint) {
       savedCheckpoint.value = !dirty.value
+      const article = state.value.article
+      const versionId = article?.draft?.baseVersionId
+      if (approve && versionId && article.currentApprovedVersionId !== versionId && !dirty.value && !disposed) {
+        state.value = await request(`/article/${versionId}/approve`, { expectedRevision: expectedRevision.value }) as State
+        expectedRevision.value = state.value.article?.revision ?? expectedRevision.value
+        savedCheckpoint.value = false
+      }
       if (inspector.value === 'history' || inspector.value === 'evidence') void loadDetails()
     }
     if (replace) { populate(state.value.article?.draft); closeInspector(); candidate.value = null }
   }
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
-  finally { busy.value = false; if (replace) editor.value?.setEditable(!readonly.value, false) }
+  finally { busy.value = false; if (replace || approve) editor.value?.setEditable(!readonly.value, false) }
 }
 async function refreshInputs() { if (!await save()) return; const submittedBytes = serialized.value; busy.value = true; try { state.value = await request('/article/draft', { ...payload(), expectedRevision: expectedRevision.value, refreshInputs: true }) as State; expectedRevision.value = state.value.article?.revision ?? expectedRevision.value; baseline.value = submittedBytes; error.value = ''; if (dirty.value) changed() } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Контекст недоступний.' } finally { busy.value = false } }
 async function reconcile(useLocal: boolean) {
@@ -535,7 +543,11 @@ async function generate() {
     if (state.value?.editorial.brief?.currentRevision?.contentMode === 'FACTUAL') {
       sourceRequest.value = (await request('/article/source-prepare', input) as { request: SourceRequest }).request
       sessionStorage.setItem(`${recoveryKey}:source-request`, sourceRequest.value.id)
-    } else await request('/article/generate', input)
+    } else {
+      const result = await request('/article/generate', input) as { job: Job }
+      requestedArticleJobId = result.job.id
+      sessionStorage.setItem(`${recoveryKey}:article-job`, result.job.id)
+    }
     commandKey = null
     await poll()
   } catch (cause) {
@@ -552,7 +564,8 @@ async function cancelSourceRequest() {
   finally { busy.value = false }
 }
 function format(kind: string) { const chain = editor.value?.chain().focus(); if (!chain) return; if (kind === 'bold') chain.toggleBold().run(); if (kind === 'italic') chain.toggleItalic().run(); if (kind === 'heading') chain.toggleHeading({ level: 2 }).run(); if (kind === 'list') chain.toggleBulletList().run() }
-function inspectEvidence(event: Event) { const source = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-passage-id]'); if (source?.dataset.passageId && source.dataset.packetId) { event.preventDefault(); void openSourcePassage(source.dataset.passageId, source.dataset.packetId); return true }; return false }
+function inspectEvidence(event: Event) { if (!showEvidenceMarks.value) return false; const source = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-passage-id]'); if (source?.dataset.passageId && source.dataset.packetId) { event.preventDefault(); void openSourcePassage(source.dataset.passageId, source.dataset.packetId); return true }; return false }
+watch(showEvidenceMarks, enabled => { if (!enabled) sourcePassageRequest++ })
 async function importReady() { if (!importedText.value.trim() || busy.value) return; busy.value = true; try { const content: Content = { title: title.value || props.projectTopic, document: { type: 'doc', content: importedText.value.split(/\n\s*\n/).filter(Boolean).map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) } }; state.value = await request('/article/import', { expectedRevision: expectedRevision.value, contentMode: contentMode.value, content }) as State; populate(state.value.article?.draft); sessionStorage.removeItem(recoveryKey); importedText.value = ''; inspector.value = null } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося додати статтю.' } finally { busy.value = false } }
 async function poll() {
   clearTimeout(pollTimer)
@@ -570,6 +583,11 @@ async function poll() {
     if (sourceResultPending || completed !== loadedJobResults) {
       if (!await load()) return
       loadedJobResults = completed
+      const requestedJob = jobs.value.find(job => job.id === requestedArticleJobId)
+      const versionId = (sourceResultPending ? sourceRequest.value?.resultRefs?.articleVersionId : undefined) ?? (requestedJob?.status === 'SUCCEEDED' ? requestedJob.resultRefs?.articleVersionId : undefined)
+      const proposal = state.value?.article?.versions.find(version => version.id === versionId && version.origin === 'AI' && version.status === 'PROPOSED')
+      if (proposal) { candidate.value = proposal; inspector.value = 'proposal' }
+      if (requestedJob && ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(requestedJob.status)) { requestedArticleJobId = null; sessionStorage.removeItem(`${recoveryKey}:article-job`) }
       if (sourceResultPending) {
         sourceResultPending = false
         sessionStorage.removeItem(`${recoveryKey}:source-request`)
@@ -596,6 +614,7 @@ async function openArticle() {
     await load(true)
     const pending = sessionStorage.getItem(`${recoveryKey}:source-request`)
     if (pending) sourceRequest.value = { id: pending, stage: 'GENERATING', errorCategory: null }
+    requestedArticleJobId = sessionStorage.getItem(`${recoveryKey}:article-job`)
     const saved = sessionStorage.getItem(recoveryKey)
     if (saved) recovered.value = JSON.parse(saved) as typeof recovered.value
     void poll()
@@ -642,14 +661,20 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
     aria-labelledby="article-heading"
   >
     <header class="article-boundary">
-      <div>
+      <div class="article-title-status">
         <h1 id="article-heading">
           Стаття
         </h1>
+        <p
+          v-if="approval"
+          class="article-approved"
+        >
+          Погоджено, версія {{ approval.number }}
+        </p>
       </div><span
         role="status"
         aria-live="polite"
-      ><span v-if="!loading">{{ readonly ? 'Перегляд' : 'Чернетка' }} · </span><span>{{ loading ? 'Відкриваємо…' : saveStatus }}</span></span>
+      ><span v-if="!loading">{{ readonly ? 'Перегляд' : 'Чернетка' }} </span><span>{{ loading ? 'Відкриваємо…' : saveStatus }}</span></span>
     </header>
     <p
       v-if="loading"
@@ -914,53 +939,60 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             class="article-title"
           />
           <div
-            v-if="!readonly"
             class="article-toolbar"
             role="toolbar"
-            aria-label="Форматування тексту"
+            aria-label="Інструменти тексту"
           >
+            <template v-if="!readonly">
+              <button
+                type="button"
+                :aria-pressed="editor?.isActive('bold')"
+                aria-label="Жирний"
+                @click="format('bold')"
+              >
+                <strong aria-hidden="true">Ж</strong>
+              </button><button
+                type="button"
+                :aria-pressed="editor?.isActive('italic')"
+                aria-label="Курсив"
+                @click="format('italic')"
+              >
+                <em aria-hidden="true">К</em>
+              </button><button
+                type="button"
+                :aria-pressed="editor?.isActive('heading', { level: 2 })"
+                @click="format('heading')"
+              >
+                Підзаголовок
+              </button><button
+                type="button"
+                :aria-pressed="editor?.isActive('bulletList')"
+                @click="format('list')"
+              >
+                Список
+              </button><button
+                type="button"
+                @click="inspector = inspector === 'evidence' ? null : 'evidence'"
+              >
+                Доказ
+              </button>
+            </template>
             <button
               type="button"
-              :aria-pressed="editor?.isActive('bold')"
-              aria-label="Жирний"
-              @click="format('bold')"
+              :aria-pressed="showEvidenceMarks"
+              @click="showEvidenceMarks = !showEvidenceMarks"
             >
-              <strong aria-hidden="true">Ж</strong>
-            </button><button
-              type="button"
-              :aria-pressed="editor?.isActive('italic')"
-              aria-label="Курсив"
-              @click="format('italic')"
-            >
-              <em aria-hidden="true">К</em>
-            </button><button
-              type="button"
-              :aria-pressed="editor?.isActive('heading', { level: 2 })"
-              @click="format('heading')"
-            >
-              Підзаголовок
-            </button><button
-              type="button"
-              :aria-pressed="editor?.isActive('bulletList')"
-              @click="format('list')"
-            >
-              Список
-            </button><button
-              type="button"
-              @click="inspector = inspector === 'evidence' ? null : 'evidence'"
-            >
-              Доказ
+              Підкреслення доказів
             </button>
           </div>
           <EditorContent
             v-if="editor"
             :editor="editor"
             class="article-writing"
+            :class="{ 'show-evidence-marks': showEvidenceMarks }"
           />
           <footer class="article-review">
-            <p v-if="approval">
-              Погоджено · Версія {{ approval.number }}. Нові правки зберігаються окремою чернеткою.
-            </p><p v-if="state.mappingIssues.length">
+            <p v-if="state.mappingIssues.length">
               Посилання потребують перегляду. Видаліть або повторно прив’яжіть змінене речення до доказу.
             </p><div v-if="!readonly">
               <label class="article-mode"><input
@@ -968,13 +1000,24 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 type="checkbox"
                 true-value="FACTUAL"
                 false-value="CREATIVE"
-              > На основі джерел</label><Button
-                class="workspace-button workspace-button-primary"
-                :disabled="busy || saving || conflict || !!recovered || !title.trim()"
-                @click="action('/article/checkpoint')"
-              >
-                Зберегти версію
-              </Button>
+              > На основі джерел</label>
+              <div class="article-save-actions">
+                <Button
+                  class="workspace-button"
+                  variant="outline"
+                  :disabled="busy || saving || conflict || !!recovered || !title.trim()"
+                  @click="action('/article/checkpoint')"
+                >
+                  Зберегти версію
+                </Button>
+                <Button
+                  class="workspace-button workspace-button-primary"
+                  :disabled="busy || saving || conflict || !!recovered || !title.trim()"
+                  @click="action('/article/checkpoint', {}, false, true)"
+                >
+                  Зберегти й погодити
+                </Button>
+              </div>
               <span
                 v-if="savedCheckpoint"
                 role="status"
@@ -996,7 +1039,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 :disabled="busy || saving || languageBusy || conflict || !!recovered"
                 @click="reviewLanguage"
               >
-                {{ languageBusy ? 'Перевіряємо…' : 'Перевірити пробіли' }}
+                {{ languageBusy ? 'Перевіряємо…' : 'Перевірити' }}
               </Button>
             </div>
             <p>Шукає повторні пробіли та пробіли перед розділовими знаками.</p>
@@ -1229,7 +1272,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               :key="version.id"
               class="article-version"
             >
-              <h3>Версія {{ version.number }}</h3><p>{{ version.origin === 'AI' ? (version.id === state.article?.draft?.baseVersionId ? 'Створено AI · Застосовано до чернетки' : 'Пропозиція AI · Не застосовано') : version.origin === 'UNVERIFIED_IMPORTED' ? 'Готова стаття · Не перевірено' : 'Редакторська версія' }} · {{ version.status === 'APPROVED' ? 'Погоджено' : version.status === 'WITHDRAWN' ? 'Відкликано' : 'Очікує перегляду' }}</p><p
+              <h3>Версія {{ version.number }}</h3><p>{{ version.origin === 'AI' ? (version.id === state.article?.draft?.baseVersionId ? 'Створено AI · Застосовано до чернетки' : 'Пропозиція AI') : version.origin === 'UNVERIFIED_IMPORTED' ? 'Готова стаття · Не перевірено' : 'Редакторська версія' }} · {{ version.status === 'APPROVED' ? 'Погоджено' : version.status === 'WITHDRAWN' ? 'Відкликано' : 'Очікує перегляду' }}</p><p
                 v-if="version.staleReasons?.length"
                 class="article-notice"
               >
@@ -1240,24 +1283,18 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
               >
                 Не можна погодити: {{ dependencyStatus(version.blockingReasons) }}.
               </p><p>{{ version.content.title }}</p><details><summary>Переглянути текст версії</summary><ArticlePreview :document="version.content.document" /></details><template v-if="version.status === 'PROPOSED' && version.id === state.article?.draft?.baseVersionId && !readonly">
-                <label v-if="version.hasUnmapped"><input
-                  v-model="acknowledgeUnmapped"
-                  type="checkbox"
-                > Переглянув речення без посилань на джерела</label><Button
+                <Button
                   class="workspace-button workspace-button-primary"
-                  :disabled="state.editorOnly || detailsLoading || busy || dirty || conflict || !!version.blockingReasons?.length || !!state.mappingIssues.length || (version.hasUnmapped && !acknowledgeUnmapped)"
-                  @click="action(`/article/${version.id}/approve`, { acknowledgeUnmapped })"
+                  :disabled="state.editorOnly || detailsLoading || busy || dirty || conflict || !!version.blockingReasons?.length || !!state.mappingIssues.length"
+                  @click="action(`/article/${version.id}/approve`)"
                 >
                   Погодити версію {{ version.number }}
                 </Button>
               </template><template v-if="version.status === 'APPROVED' && version.id === state.article?.currentApprovedVersionId && version.staleReasons?.length && !readonly">
-                <label v-if="version.hasUnmapped"><input
-                  v-model="acknowledgeUnmapped"
-                  type="checkbox"
-                > Переглянув речення без посилань на джерела</label><Button
+                <Button
                   class="workspace-button workspace-button-primary"
-                  :disabled="busy || dirty || conflict || !!version.blockingReasons?.length || (version.hasUnmapped && !acknowledgeUnmapped)"
-                  @click="action(`/article/${version.id}/rereview`, { acknowledgeUnmapped, expectedRevision: state.article?.revision, expectedReviewCounter: version.reviewCounter ?? 0 })"
+                  :disabled="busy || dirty || conflict || !!version.blockingReasons?.length"
+                  @click="action(`/article/${version.id}/rereview`, { expectedReviewCounter: version.reviewCounter ?? 0 })"
                 >
                   Переглянути без зміни тексту
                 </Button>
@@ -1280,7 +1317,6 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
             </section>
           </template>
           <template v-if="inspector === 'proposal' && candidate">
-            <p>{{ candidate.origin === 'AI' ? 'Пропозиція AI · Не застосовано' : candidate.origin === 'UNVERIFIED_IMPORTED' ? 'Імпортована версія · Не застосовано' : 'Пропозиція правки · Не застосовано' }}</p>
             <div
               class="proposal-tabs"
               role="group"
@@ -1303,9 +1339,6 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
                 Поточна чернетка
               </Button>
             </div>
-            <p class="proposal-citation-hint">
-              Натисніть підкреслений текст, щоб переглянути джерело.
-            </p>
             <div class="proposal-manuscript">
               <h3>{{ proposalView === 'suggested' ? candidate.content.title : title }}</h3>
               <ArticlePreview
@@ -1457,7 +1490,9 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 .article-boundary, .article-actions, .article-toolbar, .article-inspector > header, .article-review > div, .article-job { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .article-boundary { justify-content: space-between; margin-bottom: 24px; }
 .article-boundary h1 { font-family: var(--serif); font-weight: 550; font-size: 39px; line-height: 1.2; letter-spacing: -.025em; margin: 0; }
-.article-boundary > span { font-size: 12px; color: var(--muted); }
+.article-title-status { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.article-approved { margin: 0; color: var(--muted); font: 13px var(--sans); }
+.article-boundary > span { display: flex; gap: 8px; font-size: 12px; color: var(--muted); }
 .article-actions { margin-bottom: 0; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
 .article-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 40px; align-items: start; }
 .article-layout.with-inspector { grid-template-columns: minmax(0, 1fr) 280px; gap: 40px; }
@@ -1480,7 +1515,8 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 .article-writing :deep(h3) { font-size: 24px; font-weight: 600; line-height: 1.4; margin: 1.4em 0 .6em; scroll-margin-top: 24px; }
 .article-writing :deep(ul), .article-writing :deep(ol) { padding-left: 26px; }
 .article-writing :deep(blockquote) { border-left: 1px solid var(--rule); padding-left: 20px; margin: 32px 0; font-size: 29px; line-height: 1.5; }
-.article-writing :deep(.article-evidence) { border-bottom: 1px solid var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); cursor: pointer; }
+.article-writing :deep(.article-evidence) { pointer-events: none; }
+.article-writing.show-evidence-marks :deep(.article-evidence) { pointer-events: auto; cursor: pointer; border-bottom: 1px solid var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); }
 .article-review { margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--rule); font-family: var(--sans); font-size: 13px; color: var(--muted); }
 .article-language { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule); }
 .article-language-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
@@ -1493,6 +1529,7 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 .article-language-select { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
 .article-mode { display: flex; gap: 7px; align-items: center; min-height: 44px; color: var(--ink); }
 .article-review > div { justify-content: space-between; }
+.article-save-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .article-inspector { min-width: 0; margin-top: 48px; border-left: 1px solid var(--rule); padding-left: 20px; font-size: 14px; overflow-wrap: anywhere; }
 .article-layout.with-proposal { display: block; }
 .article-layout.with-proposal-evidence { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: 32px; }
@@ -1500,7 +1537,8 @@ onBeforeUnmount(() => { retain(); disposed = true; controller.abort(); clearTime
 .proposal-citation-hint { color: var(--muted); font-size: 13px; }
 .article-proposal { max-width: 820px; margin: 40px auto 0; padding: 0; border: 0; }
 .proposal-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 30px; }
-.proposal-tabs button[aria-pressed="true"] { background: var(--graphite); border-color: var(--graphite); color: #fff; }
+.proposal-tabs button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--document); }
+.proposal-tabs button[aria-pressed="false"] { background: transparent; border-color: var(--rule); color: var(--ink); }
 .proposal-manuscript h3 { margin: 0 0 30px; font: 550 42px/1.15 var(--serif); overflow-wrap: anywhere; }
 .proposal-manuscript :deep(.article-preview) { font-size: 20px; line-height: 1.7; }
 .article-inspector > header { justify-content: space-between; flex-wrap: nowrap; }

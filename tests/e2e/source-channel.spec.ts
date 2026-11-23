@@ -86,6 +86,12 @@ test('a failed source generation shows reusable excerpts without overwriting the
   await page.getByRole('button', { name: 'Запропонувати текст', exact: true }).click();
   const starter = page.getByRole('region', { name: 'Робоча заготовка з джерел' });
   await expect(starter).toContainText(quote, { timeout: 10_000 });
+  const disclosure = starter.locator('summary');
+  await disclosure.focus();
+  await page.keyboard.press('Enter');
+  await expect(starter.getByRole('button', { name: 'Скопіювати заготовку' })).toBeHidden();
+  await page.keyboard.press('Enter');
+  await expect(starter.getByRole('button', { name: 'Скопіювати заготовку' })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Текст публікації' })).toHaveValue('Мій допис має залишитися.');
   await page.reload();
   await expect(starter.getByRole('button', { name: 'Скопіювати заготовку' })).toBeVisible();

@@ -1056,6 +1056,7 @@ onBeforeUnmount(() => { disposed = true; controller.abort(); clearTimeout(timer)
           v-for="candidate in candidates"
           :key="candidate.id"
           class="brief-candidate"
+          open
         >
           <summary>Пропозиція AI · Не застосовано</summary><h3>{{ candidate.content.title }}</h3><p
             v-if="candidate.sourceEvidenceSetId"

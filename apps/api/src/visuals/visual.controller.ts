@@ -13,7 +13,7 @@ const initializeSchema = z.object({ parentRevisionId: z.uuid() }).strict();
 const draftSchema = z.object({ expectedRevision: z.number().int().nonnegative(), expectedDraftCounter: z.number().int().nonnegative(),
   workspaceStyleRevision: z.number().int().positive().optional(), composition: z.unknown() }).strict();
 const checkpointSchema = z.object({ expectedRevision: z.number().int().nonnegative(), expectedDraftCounter: z.number().int().nonnegative() }).strict();
-const reviewSchema = z.object({ expectedRevision: z.number().int().nonnegative(), expectedReviewCounter: z.number().int().nonnegative(), acknowledgeUnmapped: z.boolean() }).strict();
+const reviewSchema = z.object({ expectedRevision: z.number().int().nonnegative(), expectedReviewCounter: z.number().int().nonnegative(), acknowledgeUnmapped: z.boolean().optional() }).strict();
 const previewSchema = z.object({ frameId: z.uuid() }).strict();
 const assetSchema = z.object({ filename: z.string().min(1).max(255), mediaType: z.enum(['image/png', 'image/jpeg']), base64: z.string().max(7_000_000) }).strict();
 function id(value: string) { const parsed = idSchema.safeParse(value); if (!parsed.success) throw new BadRequestException('Invalid resource identifier'); return parsed.data; }

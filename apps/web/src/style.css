@@ -524,7 +524,7 @@ button { color: inherit; }
 .workspace-empty [data-slot="empty"] { min-height: 285px; padding: 45px 24px; gap: 20px; }
 .workspace-empty [data-slot="empty-title"] { font-family: var(--serif); font-size: 25px; font-weight: 500; }
 .workspace-empty [data-slot="empty-description"] { max-width: 460px; color: var(--muted); font-size: 13px; line-height: 1.6; }
-.project-list { border-top: 1px solid var(--rule); }
+.project-list { border-top: 0; }
 .project-row {
   display: flex;
   align-items: center;
@@ -538,7 +538,8 @@ button { color: inherit; }
 .project-link { color: var(--ink); font-family: var(--serif); font-size: 23px; font-weight: 500; line-height: 1.3; text-decoration: none; text-wrap: balance; }
 .project-link:hover { color: var(--copper); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
 .project-link:focus-visible { outline: 2px solid var(--copper); outline-offset: 4px; }
-.project-formats { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.project-formats { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.project-formats span { padding: 3px 7px; border: 1px solid var(--rule); border-radius: 3px; }
 .project-updated { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .project-archived { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .list-more { display: flex; justify-content: center; padding-top: 24px; }
@@ -775,3 +776,8 @@ button { color: inherit; }
   .author-desk-app .workspace-utilities { flex-basis: auto; margin-left: auto; }
   .workspace-utilities-menu .account-email { max-width: 200px; }
 }
+
+.project-row { align-items: flex-start; }
+.project-row-copy { flex: 1 1 0; }
+.project-row .project-lifecycle-compact { flex: 0 0 92px; flex-wrap: nowrap; justify-content: flex-end; margin-top: 0; }
+.project-list .project-row:last-child { border-bottom: 0; }

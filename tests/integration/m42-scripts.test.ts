@@ -51,7 +51,7 @@ describe('M4.2 independent scripts and designer packages', () => {
       expectedDraftCounter: state.script?.draft?.counter ?? 0, parentAdaptationRevisionId: state.parent!.id, content });
     state = await scripts.checkpoint(owner, id, format, { expectedRevision: state.script!.revision, expectedDraftCounter: state.script!.draft!.counter });
     const row = state.script!.revisions[0]!;
-    return scripts.review(owner, id, format, row.id, 'approve', { expectedRevision: state.script!.revision, expectedReviewCounter: 0, acknowledgeUnmapped: true });
+    return scripts.review(owner, id, format, row.id, 'approve', { expectedRevision: state.script!.revision, expectedReviewCounter: 0 });
   }
   async function packageFor(id: string, format: 'JSON' | 'MARKDOWN' | 'ZIP', targets: Array<{ format: 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT'; revisionId: string; reviewCounter: number }>) {
     const ready = await exports.readiness(owner, id);
@@ -117,6 +117,14 @@ describe('M4.2 independent scripts and designer packages', () => {
       expect(row.content).toEqual(content); expect(row.eligible).toBe(true);
       targets.push({ format: `${format}_SCRIPT` as 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT', revisionId: row.id, reviewCounter: 0 });
     }
+    // Once the approved parent was inspected for this response, historical script
+    // verification must reuse it instead of issuing the same expensive inspection again.
+    const inspectParent = vi.spyOn(channels, 'inspectRevision');
+    try {
+      const state = await scripts.get(owner, project, formats[0]);
+      expect(state.script?.revisions.length).toBeGreaterThan(0);
+      expect(inspectParent).toHaveBeenCalledTimes(1);
+    } finally { inspectParent.mockRestore(); }
     const json = await packageFor(project, 'JSON', [targets[0]!]);
     expect(JSON.parse(json.download.bytes.toString('utf8'))).toMatchObject({ frames: [{ purpose: 'Висновок' }, { purpose: 'Вступ' }] });
     const markdown = await packageFor(project, 'MARKDOWN', [targets[1]!]);

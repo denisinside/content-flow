@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { Plus } from '@lucide/vue'
 import {
   DialogClose, DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle,
   SelectContent, SelectItem, SelectItemIndicator, SelectItemText, SelectPortal, SelectRoot, SelectTrigger, SelectValue, SelectViewport,
@@ -9,7 +10,7 @@ import { Button } from '@/components/ui/button'
 
 interface Member {
   userId: string
-  email?: string
+  email?: string | null
   displayName?: string | null
 }
 
@@ -405,22 +406,6 @@ watch(() => props.refreshEpoch, (next, previous) => {
           </SelectPortal>
         </SelectRoot>
         <button
-          id="workspace-new-action"
-          type="button"
-          class="workspace-header-action"
-          :disabled="busy"
-          @click="openDialog('choose', $event)"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            aria-hidden="true"
-          ><path d="M12 5v14M5 12h14" /></svg>
-          <span>Новий простір</span>
-        </button>
-        <button
           v-if="selected"
           type="button"
           class="workspace-header-icon"
@@ -440,6 +425,20 @@ watch(() => props.refreshEpoch, (next, previous) => {
             cy="7"
             r="4"
           /></svg>
+        </button>
+        <button
+          id="workspace-new-action"
+          type="button"
+          class="workspace-header-icon"
+          aria-label="Новий простір"
+          title="Новий простір"
+          :disabled="busy"
+          @click="openDialog('choose', $event)"
+        >
+          <Plus
+            aria-hidden="true"
+            :stroke-width="1.5"
+          />
         </button>
       </div>
     </Teleport>
@@ -598,7 +597,7 @@ watch(() => props.refreshEpoch, (next, previous) => {
                       v-for="member in members"
                       :key="member.userId"
                     >
-                      {{ member.displayName || member.email || member.userId }}<span v-if="member.userId === selected.ownerId"> · Власник</span>
+                      {{ member.displayName?.trim() || member.email || 'Учасник' }}<span v-if="member.userId === selected.ownerId"> · Власник</span>
                     </li>
                   </ul>
                   <form
@@ -663,7 +662,7 @@ watch(() => props.refreshEpoch, (next, previous) => {
                           :key="member.userId"
                           :value="member.userId"
                         >
-                          {{ member.displayName || member.email || member.userId }}
+                          {{ member.displayName?.trim() || member.email || 'Учасник' }}
                         </option>
                       </select>
                       <Button

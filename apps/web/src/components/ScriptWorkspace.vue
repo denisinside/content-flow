@@ -473,9 +473,6 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
             >
               Додати кадр
             </Button>
-            <p class="script-order-help">
-              Alt + ↑ / ↓ змінює порядок вибраного кадру.
-            </p>
           </nav>
 
           <div
@@ -594,7 +591,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
             <div>
               <h3 id="script-language-title">
                 Пробіли й пунктуація
-              </h3><p>Перевірка підказує точкові виправлення. Вибір залишається за вами.</p>
+              </h3>
             </div>
             <Button
               variant="outline"
@@ -604,12 +601,6 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
               {{ languageBusy ? 'Перевіряємо…' : 'Перевірити текст' }}
             </Button>
           </div>
-          <p
-            v-if="!state?.script?.draft?.baseRevisionId"
-            class="script-help"
-          >
-            Збережіть версію сценарію, перш ніж перевіряти мову.
-          </p>
           <p
             v-if="languageMessage"
             class="script-language-message"

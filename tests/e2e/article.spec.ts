@@ -28,7 +28,7 @@ async function fixture(page: Page, selected = true) {
     if (request.method() === 'POST') expect(request.headers()['x-csrf-token']).toBe('csrf');
     if (path === `${base}/article/draft` || path === `${base}/article/import`) {
       const body = request.postDataJSON() as { expectedRevision: number; content: Content; contentMode: string };
-      if (failSave || body.expectedRevision !== (article?.revision ?? 0)) return json({ error: 'CONFLICT' }, 409);
+      if (failSave || body.expectedRevision !== (article?.revision ?? 0)) return json({ error: 'REVISION_CONFLICT' }, 409);
       submitted.push(body.content);
       const old = article;
       article = { id: 'article', revision: (old?.revision ?? 0) + 1, draft: { content: body.content, contentMode: body.contentMode, origin: path.endsWith('/import') ? 'UNVERIFIED_IMPORTED' : 'MANUAL', baseVersionId: null }, currentApprovedVersionId: old?.currentApprovedVersionId ?? null, versions: old?.versions ?? [] };
@@ -59,11 +59,9 @@ test('autosave acknowledges exact submitted text and coalesces later edits; appr
   await expect(writing(page)).toContainText('Нова думка, введена під час збереження.');
   await page.reload();
   await expect(writing(page)).toContainText('Нова думка, введена під час збереження.');
-  await page.getByRole('button', { name: 'Зберегти версію' }).click();
-  await page.getByRole('button', { name: 'Історія версій' }).click();
-  await page.getByLabel('Переглянув твердження без посилань').check();
-  await page.getByRole('button', { name: 'Погодити версію 1', exact: true }).click();
-  await expect(page.getByText('Погоджено · Версія 1.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Зберегти й погодити', exact: true }).click();
+  await expect.poll(() => context.state().article?.currentApprovedVersionId).toBe('v1');
+  await expect(page.getByText('Погоджено, версія 1', { exact: true })).toBeVisible();
   await writing(page).fill('Окрема нова редакторська чернетка.');
   await expect(page.getByText('Збережено', { exact: true })).toBeVisible();
   expect(context.state().article!.versions[0]!.content.document).toEqual(context.submitted[1]!.document);

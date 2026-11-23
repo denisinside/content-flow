@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Settings } from '@lucide/vue'
 import WorkspaceHub from './components/WorkspaceHub.vue'
 import ProfileSettings from './components/ProfileSettings.vue'
 import SiteFooter from './components/SiteFooter.vue'
@@ -31,7 +32,7 @@ interface WorkspaceSummary {
   trashedAt: string | null
   purgeAfter: string | null
   lifecycleRevision: number
-  members?: { userId: string; displayName?: string | null; email?: string }[]
+  members?: { userId: string; displayName?: string | null; email?: string | null }[]
 }
 
 const state = ref<ViewState>('loading')
@@ -517,19 +518,10 @@ onUnmounted(() => {
               aria-label="Налаштування профілю"
               title="Налаштування профілю"
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.7"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+              <Settings
                 aria-hidden="true"
-              ><path d="m9.4 3-.6 2.4-2 .9-2.1-.7-2.1 3.6 1.6 1.7-.2 2.2-1.7 1.6 2.1 3.6 2.3-.5 1.8 1.3.5 2.9h4.2l.6-2.4 2-.9 2.1.7 2.1-3.6-1.6-1.7.2-2.2 1.7-1.6-2.1-3.6-2.3.5-1.8-1.3-.5-2.9Z" /><circle
-                cx="12"
-                cy="12"
-                r="3"
-              /></svg>
+                :stroke-width="1.7"
+              />
             </a>
             <button
               class="account-icon-action"

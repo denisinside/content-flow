@@ -118,7 +118,7 @@ test('an empty factual article can retry a rejected section and preview the next
   await page.route(`**${base}/source-writing/*`, route => {
     stage = starts === 1 ? 'FAILED' : 'SUCCEEDED';
     return route.fulfill({ json: { request: { id: `source-run-${starts}`, stage,
-      errorCategory: stage === 'FAILED' ? 'SECTION_DRAFT_INVALID' : null } } });
+      errorCategory: stage === 'FAILED' ? 'SECTION_DRAFT_INVALID' : null, ...(stage === 'SUCCEEDED' ? { resultRefs: { articleVersionId: version.id } } : {}) } } });
   });
   await page.route(`**${base}/materials/${materialId}/snapshots/${snapshotId}`, route =>
     route.fulfill({ json: { snapshot: { normalizedText: quote } } }));
@@ -129,7 +129,6 @@ test('an empty factual article can retry a rejected section and preview the next
   await expect(page.getByText('Один із розділів не пройшов перевірку тексту й посилань. Попередній текст збережено.')).toBeVisible();
   await generate.click();
   await expect(page.getByText('Пропозиція статті готова до перегляду.')).toBeVisible();
-  await page.getByRole('button', { name: 'Переглянути пропозицію AI · Не застосовано' }).click();
   await expect(page.getByText(proposalText, { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Застосувати до чернетки' })).toBeEnabled();
   await expect(page.locator('.article-writing .tiptap')).toHaveText('');
@@ -194,6 +193,11 @@ test('article source marks survive editing and open their exact saved source',as
   await page.goto(`/projects/${projectId}/article`);
   const source = page.locator('.tiptap [data-passage-id]');
   await expect(source).toHaveText('Атомарність захищає дані 😀.');
+  const toggle = page.getByRole('button', { name: 'Підкреслення доказів' });
+  await toggle.click();
+  await source.click({ force: true });
+  await expect(page.getByRole('region',{ name: 'Уривок джерела' })).toHaveCount(0);
+  await toggle.click();
   await source.click();
   await expect(page.getByRole('region',{ name: 'Уривок джерела' })).toBeVisible();
   await page.getByText('Точне місце в джерелі',{ exact: true }).click();

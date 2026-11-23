@@ -48,7 +48,6 @@ test('real channels-only DIRECT Telegram approval and exact-input re-review pres
   await capture(page, 'direct-draft');
   await page.getByRole('button', { name: 'Зберегти версію' }).click();
   await page.getByRole('button', { name: 'Історія й походження' }).click();
-  await page.getByLabel('Я переглянув непов’язані твердження').check();
   const approvalResponse = page.waitForResponse(response => response.url().endsWith('/approve') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Погодити версію' }).click();
   const firstReview = await checked<TelegramState>(await approvalResponse);
@@ -63,7 +62,6 @@ test('real channels-only DIRECT Telegram approval and exact-input re-review pres
   await checked(await page.request.post(`${base}/brief`, { headers, data: { ...brief, expectedRevision: 1, notes: 'Оновлений контекст до перевірки вже погодженого тексту.' } }));
   await page.reload(); await page.getByRole('button', { name: 'Історія й походження' }).click();
   await expect(page.locator('.telegram-notice.telegram-stale')).toContainText('змінився бриф');
-  await page.getByLabel('Я переглянув непов’язані твердження').check();
   const reviewResponse = page.waitForResponse(response => response.url().endsWith('/rereview') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Переглянути без зміни тексту' }).click();
   const rereviewed = await checked<TelegramState>(await reviewResponse);
@@ -84,7 +82,6 @@ test('real channels-only DIRECT Telegram approval and exact-input re-review pres
   await expect(page.locator('.telegram-notice.telegram-stale')).toHaveCount(0);
   await writing.fill(`${first.content.text}\nНова авторська правка.`);
   await page.getByRole('button', { name: 'Зберегти версію' }).click();
-  await page.getByLabel('Я переглянув непов’язані твердження').check();
   const secondApprovalResponse = page.waitForResponse(response => response.url().endsWith('/approve') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Погодити версію' }).click();
   const secondApproval = await checked<TelegramState>(await secondApprovalResponse);
@@ -108,14 +105,12 @@ test('real channels-only DIRECT Telegram approval and exact-input re-review pres
   await checked(await page.request.post(`${mixedBase}/brief`, { headers, data: { ...brief, expectedRevision: 1, notes: 'Перевірити незмінний текст із новим контекстом.' } }));
   await page.goto(`/projects/${mixed.project.id}/article`);
   await page.getByRole('button', { name: 'Історія версій' }).click();
-  await page.getByLabel('Переглянув твердження без посилань').check();
   const articleResponse = page.waitForResponse(response => response.url().endsWith(`/article/${source.id}/rereview`) && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Переглянути без зміни тексту' }).click();
   const reviewedSource = await checked<ArticleState>(await articleResponse);
   expect(reviewedSource.article.versions[0]).toMatchObject({ approvedAt: initialSource.approvedAt, approvedBy: initialSource.approvedBy, content: initialSource.content, reviewCounter: 1, eligible: true });
   await page.goto(`/projects/${mixed.project.id}/telegram`);
   await page.getByRole('button', { name: 'Історія й походження' }).click();
-  await page.getByLabel('Я переглянув непов’язані твердження').check();
   const derivedResponse = page.waitForResponse(response => response.url().endsWith(`/telegram/${derived.id}/rereview`) && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Переглянути без зміни тексту' }).click();
   const reviewedDerived = await checked<TelegramState>(await derivedResponse);

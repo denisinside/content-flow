@@ -9,6 +9,7 @@ import { SourceEvidenceService } from './evidence.service.js';
 import { SourceGroundingService } from './source-grounding.service.js';
 import { adaptationFormatSchema, type AdaptationFormat } from '../editorial/telegram-contracts.js';
 import { sourceWritingInputSchema } from './writing-contracts.js';
+import { guideSourceWritingBrief } from './writing-format-guidance.js';
 import { ArticleService } from '../editorial/article.service.js';
 import { sourceArticleContext } from './source-article-context.js';
 import { FactualBasisService } from '../claims/factual-basis.service.js';
@@ -66,9 +67,9 @@ function outlineQuery(brief: FrozenBrief): string {
     boundedField('Audience', brief.audience, 190), boundedField('Category', brief.category, 32)].filter(Boolean).join('\n');
 }
 
-function toWritingBrief(brief: FrozenBrief) {
-  return { topic: brief.topic, audience: brief.audience, centralMessage: brief.centralMessage, category: brief.category,
-    tone: brief.tone, targetLength: brief.targetLength, cta: brief.cta, exclusions: brief.exclusions, notes: brief.notes };
+function toWritingBrief(brief: FrozenBrief, format?: AdaptationFormat) {
+  return guideSourceWritingBrief({ topic: brief.topic, audience: brief.audience, centralMessage: brief.centralMessage, category: brief.category,
+    tone: brief.tone, targetLength: brief.targetLength, cta: brief.cta, exclusions: brief.exclusions, notes: brief.notes }, format);
 }
 
 function parseRequest(row: RequestRow): RequestInput {
@@ -202,7 +203,7 @@ export class SourcePreparationService {
         release, noticeVersion: EXTERNAL_PROCESSING_NOTICE.version, acceptedAt: frozen.acceptedAt };
       const boundedBase = { schemaVersion: 'source-writing-input-v1', requestId: randomUUID(), task,
         ...(parent ? { approvedArticle: parent.approvedArticle } : {}),
-        brief: toWritingBrief(frozen.brief), style: frozen.brief.style, context: frozen.context, passages: [], requiredClaims: [] };
+        brief: toWritingBrief(frozen.brief, channel?.format), style: frozen.brief.style, context: frozen.context, passages: [], requiredClaims: [] };
       if (Buffer.byteLength(JSON.stringify(boundedBase), 'utf8') > MAX_WRITING_INPUT_BYTES) throw new ConflictException('INPUT_TOO_LARGE');
       const id = randomUUID(), now = new Date(), inputHash = canonicalManifestHash(manifest);
       const rows = await tx.$queryRaw<RequestRow[]>`INSERT INTO contextflow."SourceWritingRequest"
@@ -407,7 +408,7 @@ export class SourcePreparationService {
       if (set.sha256 !== data.sourceEvidenceSetHash) throw new ConflictException('Frozen source evidence set changed');
       const outline = await tx.outline.findUnique({ where: { projectId }, select: { revision: true } });
       if (input.task === 'OUTLINE' && (outline?.revision ?? 0) !== input.expectedOutlineRevision) throw new ConflictException('Outline changed while evidence was prepared');
-      const brief = toWritingBrief(input.brief);
+      const brief = toWritingBrief(input.brief, input.format);
       const passages = set.passages.map(row => ({ id: row.id, packetId: row.packetId, snapshotId: row.snapshotId, quote: row.quote }));
       const requiredClaims = set.requiredClaims.map(row => ({ ...row, evidence: row.evidence }));
       if (requiredClaims.some(row => row.evidence.length > 10)) throw new ConflictException('REQUIRED_EVIDENCE_LIMIT');
