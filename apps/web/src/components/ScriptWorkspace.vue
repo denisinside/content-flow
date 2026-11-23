@@ -35,7 +35,6 @@ const error = ref('')
 const recovered = ref(false)
 const selectedFrame = ref(0)
 const selectedApplyFrames = ref<Record<string, string[]>>({})
-const reviewAcknowledgements = ref<Record<string, boolean>>({})
 const languageSuggestions = ref<LanguageSuggestion[]>([])
 const selectedLanguageIds = ref<string[]>([])
 const languageBusy = ref(false)
@@ -49,6 +48,11 @@ const approvedParents = computed(() => {
 const readonly = computed(() => props.archived || state.value?.formatSelected === false)
 const dirty = computed(() => baseline.value !== serialize())
 const activeRevision = computed(() => state.value?.script?.revisions.find(row => row.id === state.value?.script?.currentApprovedRevisionId) ?? null)
+const recoverableRevision = computed(() => {
+  if (state.value?.script?.draft || frames.value.length || recovered.value) return null
+  return state.value?.script?.revisions.find(row => revisionStatus(row) !== 'WITHDRAWN'
+    && !row.staleReasons?.length && !row.blockingReasons?.length) ?? null
+})
 const completeFrames = computed(() => frames.value.length > 0 && frames.value.every(frame => frame.purpose.trim() && frame.text.trim() && (props.format !== 'INSTAGRAM_STORIES' || frame.transition?.trim())))
 let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
@@ -213,14 +217,22 @@ async function save(): Promise<boolean> {
   const ok = await inFlight
   return ok && dirty.value && !disposed ? save() : ok
 }
-async function command(path: string, extra: Record<string, unknown> = {}, saveFirst = true) {
-  if (busy.value || readonly.value || (saveFirst && !await save())) return
+async function command(path: string, extra: Record<string, unknown> = {}, saveFirst = true, approve = false) {
+  const ownEpoch = formatEpoch
+  if (busy.value || readonly.value || (saveFirst && !await save()) || busy.value || disposed || ownEpoch !== formatEpoch) return
   if (!parentId.value && path === '/checkpoint') { error.value = 'Спершу виберіть погоджену версію підпису.'; return }
   busy.value = true; error.value = ''
   try {
     const next = await request(path, { expectedRevision: expectedRevision.value, ...(path === '/checkpoint' ? { expectedDraftCounter: expectedDraftCounter.value } : {}), ...extra }) as State
-    if (disposed) return
+    if (disposed || ownEpoch !== formatEpoch) return
     populate(next)
+    const script = next.script
+    const version = script?.revisions.find(item => item.id === script.draft?.baseRevisionId)
+    if (approve && script && version && revisionStatus(version) === 'PROPOSED') {
+      const approved = await request(`/revisions/${version.id}/approve`, { expectedRevision: script.revision, expectedReviewCounter: version.reviewCounter }) as State
+      if (disposed || ownEpoch !== formatEpoch) return
+      populate(approved)
+    }
     if (!dirty.value) sessionStorage.removeItem(recoveryKey.value)
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Не вдалося виконати дію.' }
   finally { busy.value = false }
@@ -283,7 +295,6 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
         <h2 id="script-title">
           {{ formatLabel }}
         </h2>
-        <p>Погоджений сценарій можна передати дизайнеру в JSON, Markdown або ZIP. Готові зображення з’являться пізніше.</p>
       </div>
       <p
         class="script-save-state"
@@ -390,7 +401,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
                 v-for="revision in approvedParents"
                 :key="revision.id"
                 :value="revision.id"
-              >Версія {{ revision.number }} · погоджена</option>
+              >Версія {{ revision.number }}</option>
             </select>
           </label>
           <p
@@ -539,12 +550,24 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
               {{ frames[selectedFrame]!.text.length }} / 3000 символів
             </p>
           </div>
-          <p
+          <div
             v-else
-            class="script-empty"
+            class="script-empty script-resume"
           >
-            Додайте перший кадр до сценарію.
-          </p>
+            <template v-if="recoverableRevision">
+              <p>Є збережений сценарій — версія {{ recoverableRevision.number }}.</p>
+              <Button
+                variant="outline"
+                :disabled="readonly || busy || saving"
+                @click="command('/revisions/' + recoverableRevision.id + '/apply', {}, false)"
+              >
+                Продовжити з версії {{ recoverableRevision.number }}
+              </Button>
+            </template>
+            <p v-else>
+              Додайте перший кадр до сценарію.
+            </p>
+          </div>
         </div>
 
         <div class="script-actions">
@@ -556,11 +579,11 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
             Зберегти версію
           </Button>
           <Button
-            variant="outline"
-            :disabled="readonly || busy || saving || !state?.script?.draft?.baseRevisionId"
-            @click="command(`/revisions/${state!.script!.draft!.baseRevisionId}/apply`)"
+            class="workspace-button workspace-button-primary"
+            :disabled="readonly || busy || saving || conflict || recovered || !completeFrames || !parentId"
+            @click="command('/checkpoint', {}, true, true)"
           >
-            Застосувати сценарій
+            Зберегти й погодити сценарій
           </Button>
         </div>
         <section
@@ -570,7 +593,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
           <div class="script-language-heading">
             <div>
               <h3 id="script-language-title">
-                Мовні пропозиції
+                Пробіли й пунктуація
               </h3><p>Перевірка підказує точкові виправлення. Вибір залишається за вами.</p>
             </div>
             <Button
@@ -578,7 +601,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
               :disabled="readonly || busy || saving || conflict || languageBusy || dirty || recovered || !state?.script?.draft?.baseRevisionId"
               @click="reviewLanguage"
             >
-              {{ languageBusy ? 'Перевіряємо…' : 'Перевірити мову' }}
+              {{ languageBusy ? 'Перевіряємо…' : 'Перевірити текст' }}
             </Button>
           </div>
           <p
@@ -653,6 +676,7 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
         </section>
 
         <section
+          v-if="state?.script?.revisions.length"
           class="script-history"
           aria-label="Історія сценаріїв"
         >
@@ -701,19 +725,11 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
               >
                 Застосувати вибрані ({{ selectedApplyFrames[revision.id]?.length ?? 0 }})
               </Button>
-              <label
-                v-if="revisionStatus(revision) === 'PROPOSED' && revision.hasUnmapped"
-                class="script-acknowledgement"
-              ><input
-                v-model="reviewAcknowledgements[revision.id]"
-                type="checkbox"
-                :disabled="readonly || busy || dirty || recovered"
-              > Підтверджую, що непов’язаний із доказами текст цього кадру перевірено вручну.</label>
               <Button
                 v-if="revisionStatus(revision) === 'PROPOSED'"
                 variant="outline"
-                :disabled="readonly || busy || dirty || recovered || (revision.hasUnmapped && !reviewAcknowledgements[revision.id])"
-                @click="command(`/revisions/${revision.id}/approve`, { expectedReviewCounter: revision.reviewCounter, acknowledgeUnmapped: reviewAcknowledgements[revision.id] === true })"
+                :disabled="readonly || busy || dirty || recovered || !!revision.blockingReasons?.length"
+                @click="command(`/revisions/${revision.id}/approve`, { expectedReviewCounter: revision.reviewCounter })"
               >
                 Погодити
               </Button>
@@ -762,6 +778,8 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
 .script-add { margin-top:14px; }
 .script-order-help { margin:8px 0; font-size:12px; }
 .script-paper { min-width:0; padding:18px clamp(18px,3vw,34px); border:1px solid var(--rule); background:var(--paper); }
+.script-resume { display:grid; justify-items:start; gap:12px; padding:20px; border:1px solid var(--rule); background:var(--paper); }
+.script-resume p { margin:0; }
 .script-paper-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
 .script-field { display:grid; gap:7px; margin:14px 0; font-size:13px; }
 .script-field textarea { min-height:80px; resize:vertical; padding:10px 12px; }
@@ -792,7 +810,6 @@ onBeforeUnmount(() => { keepRecovery(); disposed = true; clearTimeout(timer); co
 .script-revision-actions { margin-top:8px; }
 .script-apply-frame { display:flex; align-items:flex-start; gap:9px; margin:8px 0; }
 .script-apply-frame input { margin-top:5px; }
-.script-acknowledgement { flex-basis:100%; display:flex; align-items:flex-start; gap:8px; font-size:13px; line-height:1.5; }
 .script-empty { color:var(--muted); }
 .is-readonly { opacity:.82; }
 @media(max-width:720px) { .script-heading { align-items:flex-start; flex-direction:column; gap:4px; } .script-editor { grid-template-columns:minmax(0,1fr); gap:18px; } .script-outline { display:block; } .script-outline ol { display:flex; gap:6px; overflow-x:auto; padding:8px 0; } .script-outline li { min-width:148px; border:1px solid var(--rule); } .script-frame-order { padding-left:6px; } .script-frame-tab { min-height:44px; } .script-actions>* { flex:1 1 100%; } .script-recovery { align-items:stretch; } }

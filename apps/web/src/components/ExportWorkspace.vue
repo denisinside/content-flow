@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { getProjectReadinessPreview, invalidateProjectReadiness } from '../lib/project-readiness'
 
 type OutputFormat = 'ARTICLE' | 'TELEGRAM_POST' | 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'LINKEDIN_CAROUSEL_SCRIPT' | 'INSTAGRAM_CAROUSEL_SCRIPT' | 'INSTAGRAM_STORIES_SCRIPT' | 'LINKEDIN_COVER_VISUAL' | 'INSTAGRAM_COVER_VISUAL' | 'LINKEDIN_CAROUSEL_VISUAL' | 'INSTAGRAM_CAROUSEL_VISUAL' | 'INSTAGRAM_STORIES_VISUAL'
 type PackageFormat = 'TXT' | 'MARKDOWN' | 'JSON' | 'PNG' | 'PDF' | 'ZIP'
@@ -81,6 +82,36 @@ const canBuild = computed(() => {
   return packageFormat.value === 'TXT' ? !script : true
 })
 const readyCount = computed(() => state.value?.items.filter(item => item.ready).length ?? 0)
+const readinessFilter = ref<'ALL' | 'READY' | 'BLOCKED'>('ALL')
+const visibleReadinessItems = computed(() => {
+  const all = state.value?.items ?? []
+  return all.filter(item => readinessFilter.value === 'ALL'
+    || (readinessFilter.value === 'READY' ? item.ready && supported(item) : !item.ready || !supported(item)))
+    .sort((a, b) => Number(b.ready && supported(b)) - Number(a.ready && supported(a)))
+})
+function isExportable(item: ReadinessItem) { return item.ready && supported(item) }
+function isGroupStart(index: number, item: ReadinessItem) {
+  return index === 0 || isExportable(visibleReadinessItems.value[index - 1]!) !== isExportable(item)
+}
+function visibleReasons(item: ReadinessItem) {
+  const reasons = item.reasons.filter(reason => reason !== 'INPUTS_CHANGED' || item.reasons.length === 1)
+  return [...new Set((reasons.length ? reasons : ['APPROVAL_REQUIRED']).map(reasonLabel))]
+}
+function nextStep(item: ReadinessItem): { label: string; target: string } {
+  if (item.reasons.some(reason => reason.startsWith('SOURCE_EVIDENCE') || reason.includes('CITATION') || reason.includes('EVIDENCE') || reason.includes('UNSEALED'))) {
+    return { label: 'Перевірити докази', target: 'FACTS' }
+  }
+  if (item.reasons.some(reason => reason.includes('BRIEF'))) {
+    return { label: 'Перевірити бриф', target: 'BRIEF' }
+  }
+  if (item.reasons.some(reason => reason.includes('PARENT')) && item.format.endsWith('_VISUAL')) {
+    const source = item.format.slice(0, -7)
+    return { label: 'Перевірити вихідний матеріал', target: /_(CAROUSEL|STORIES)$/.test(source) ? `${source}_SCRIPT` : source }
+  }
+  if (item.format.endsWith('_VISUAL')) return { label: 'Відкрити редактор візуалу', target: item.format }
+  if (item.format === 'ARTICLE') return { label: 'Перевірити версію статті', target: item.format }
+  return { label: item.revisionId ? 'Перевірити погодження' : 'Підготувати та погодити', target: item.format }
+}
 
 function supported(item: ReadinessItem): item is ReadinessItem & { format: OutputFormat; revisionId: string; number: number; reviewCounter: number } {
   return ['ARTICLE', 'TELEGRAM_POST', 'LINKEDIN_TEXT', 'LINKEDIN_COVER', 'INSTAGRAM_COVER', 'LINKEDIN_CAROUSEL', 'INSTAGRAM_CAROUSEL', 'INSTAGRAM_STORIES', 'LINKEDIN_CAROUSEL_SCRIPT', 'INSTAGRAM_CAROUSEL_SCRIPT', 'INSTAGRAM_STORIES_SCRIPT', 'LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL', 'LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL', 'INSTAGRAM_STORIES_VISUAL'].includes(item.format) && !!item.revisionId && item.number !== null && item.reviewCounter !== null
@@ -109,6 +140,11 @@ function removeSelection(item: Selection) {
 }
 function reasonLabel(reason: string) {
   const specific: Record<string, string> = {
+    APPROVAL_REQUIRED: 'Ще немає актуальної погодженої версії.',
+    PARENT_NOT_APPROVED: 'Спочатку погодьте матеріал, на якому засновано цей формат.',
+    PARENT_REVIEW_CHANGED: 'Після зміни погодження вихідного матеріалу перевірте цей формат повторно.',
+    SOURCE_CITATION_INTEGRITY: 'Посилання на джерела в сценарії потребують перевірки.',
+    UNSEALED_EVIDENCE: 'Потрібно перевірити прив’язки до доказів.',
     BRIEF_CHANGED: 'Після погодження змінився бриф.',
     OUTLINE_CHANGED: 'Після погодження змінився план статті.',
     WORKSPACE_STYLE_CHANGED: 'Після погодження змінився стиль простору.',
@@ -180,6 +216,14 @@ function exportError(status: number) {
 }
 
 async function readState(url: string): Promise<Readiness | null> {
+  if (url === `${base}?view=items`) {
+    try { return await getProjectReadinessPreview<Readiness>(props.projectId, props.userId) }
+    catch (cause) {
+      const status = (cause as { status?: number }).status ?? 0
+      if (status === 401) { sessionEnded = true; emit('session-expired'); return null }
+      throw new Error(exportError(status))
+    }
+  }
   const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
   if (response.status === 401) { sessionEnded = true; emit('session-expired'); return null }
   if (!response.ok) throw new Error(exportError(response.status))
@@ -204,7 +248,8 @@ async function getState(firstLoad = false): Promise<boolean> {
   }
   return true
 }
-async function refresh() {
+async function refresh(force = false) {
+  if (force) invalidateProjectReadiness(props.projectId, props.userId)
   try {
     if (await getState(loading.value && !state.value)) {
       error.value = ''
@@ -220,7 +265,7 @@ async function refresh() {
 }
 function schedulePoll(delay: number) {
   clearTimeout(pollTimer)
-  if (!disposed && !sessionEnded) pollTimer = setTimeout(() => void refresh(), delay)
+  if (!disposed && !sessionEnded) pollTimer = setTimeout(() => void refresh(true), delay)
 }
 function commandKeyFor(identity: string) {
   if (pendingCommand?.identity !== identity) pendingCommand = { key: crypto.randomUUID(), identity }
@@ -240,6 +285,7 @@ async function createExport() {
     }
     await response.json() as { exportId: string; jobId: string }
     pendingCommand = null
+    invalidateProjectReadiness(props.projectId, props.userId)
     notice.value = 'Файл додано до черги. Матеріали можна й далі переглядати.'
     await refresh()
     schedulePoll(700)
@@ -306,14 +352,11 @@ onBeforeUnmount(() => {
   >
     <header class="export-heading">
       <div>
-        <p class="export-context">
-          {{ props.archived ? 'Архівований проєкт' : 'Проєкт' }} · {{ props.topic }}
-        </p>
         <h1 id="export-title">
           Готовність і експорт
         </h1>
         <p class="export-lead">
-          Оберіть незалежно готові тексти, сценарії та візуали. Обкладинка завантажується як PNG, карусель — як PDF, а змішані матеріали можна зібрати у ZIP. Статтю включено лише тоді, коли ви її виберете.
+          Оберіть матеріали для завантаження. Обкладинки доступні у PNG, каруселі — у PDF, а кілька матеріалів можна зібрати в ZIP.
         </p>
       </div>
     </header>
@@ -349,61 +392,110 @@ onBeforeUnmount(() => {
             variant="outline"
             class="workspace-button"
             :disabled="busy"
-            @click="refresh"
+            @click="refresh(true)"
           >
             Оновити перевірку
           </Button>
+        </div>
+        <div
+          v-if="state.items.length"
+          class="export-readiness-filters"
+          role="group"
+          aria-label="Фільтр готовності"
+        >
+          <button
+            type="button"
+            :aria-pressed="readinessFilter === 'ALL'"
+            @click="readinessFilter = 'ALL'"
+          >
+            Усі ({{ state.items.length }})
+          </button>
+          <button
+            type="button"
+            :aria-pressed="readinessFilter === 'READY'"
+            @click="readinessFilter = 'READY'"
+          >
+            Готові ({{ readyCount }})
+          </button>
+          <button
+            type="button"
+            :aria-pressed="readinessFilter === 'BLOCKED'"
+            @click="readinessFilter = 'BLOCKED'"
+          >
+            Потребують дій ({{ state.items.length - readyCount }})
+          </button>
         </div>
         <p
           v-if="!state.items.length"
           class="export-empty"
         >
-          У проєкті поки немає підготовлених матеріалів для експорту.
+          У проєкті поки немає матеріалів для експорту.
         </p>
-        <article
-          v-for="item in state.items"
-          :key="item.format"
-          class="export-item"
+        <p
+          v-else-if="!visibleReadinessItems.length"
+          class="export-empty"
         >
-          <label class="export-choice">
-            <input
-              type="checkbox"
-              :aria-label="`Вибрати ${formatLabel(item.format)}`"
-              :checked="isSelected(item)"
-              :disabled="!supported(item) || !item.ready || busy || props.archived"
-              @change="toggle(item)"
+          Немає матеріалів у цій категорії.
+        </p>
+        <template
+          v-for="(item, index) in visibleReadinessItems"
+          :key="item.format"
+        >
+          <h3
+            v-if="isGroupStart(index, item)"
+            class="export-group-title"
+          >
+            {{ isExportable(item) ? 'Готові до експорту' : 'Потрібні дії' }}
+          </h3>
+          <article class="export-item">
+            <label class="export-choice">
+              <input
+                type="checkbox"
+                :aria-label="`Вибрати ${formatLabel(item.format)}`"
+                :checked="isSelected(item)"
+                :disabled="!supported(item) || !item.ready || busy || props.archived"
+                @change="toggle(item)"
+              >
+              <span class="export-item-title">{{ formatLabel(item.format) }}</span>
+            </label>
+            <p
+              class="export-item-state"
+              :class="{ 'export-item-state-pending': !isExportable(item) }"
             >
-            <span class="export-item-title">{{ item.title || formatLabel(item.format) }}</span>
-          </label>
-          <p class="export-item-state">
-            <span>{{ supported(item) && item.ready ? 'Можна експортувати' : formatLabel(item.format) }}</span>
-            <span
-              v-if="item.contentMode === 'CREATIVE'"
-              class="export-unverified"
-            >Авторський текст · без перевірки в джерелах</span>
-          </p>
-          <p
-            v-if="!item.ready || !supported(item)"
-            class="export-reasons"
-          >
-            {{ item.reasons.length ? [...new Set(item.reasons.filter(reason => reason !== 'INPUTS_CHANGED' || item.reasons.length === 1).map(reasonLabel))].join(' ') : reasonLabel('UNIMPLEMENTED') }}
-          </p>
-          <Button
-            v-if="supported(item) && !item.ready"
-            variant="outline"
-            class="workspace-button"
-            @click="emit('open-material', item.format)"
-          >
-            {{ item.format === 'ARTICLE' ? 'Відкрити версії статті' : item.format.endsWith('_VISUAL') ? 'Відкрити візуал' : 'Відкрити в каналах' }}
-          </Button>
-          <details
-            v-if="item.revisionId"
-            class="export-provenance"
-          >
-            <summary>Версія й перегляд</summary>
-            <dl><dt>Версія матеріалу</dt><dd>{{ item.number ?? '—' }}</dd><dt>Перегляди залежностей</dt><dd>{{ item.reviewCounter ?? '—' }}</dd><dt>Ідентифікатор версії</dt><dd>{{ item.revisionId }}</dd></dl>
-          </details>
-        </article>
+              <span>{{ isExportable(item) ? 'Готово' : item.revisionId ? 'Потребує перевірки' : 'Немає погодженої версії' }}</span>
+              <span
+                v-if="item.contentMode === 'CREATIVE'"
+                class="export-unverified"
+              >Авторський текст · без перевірки в джерелах</span>
+            </p>
+            <ul
+              v-if="!isExportable(item)"
+              class="export-reasons-list"
+            >
+              <li
+                v-for="reason in visibleReasons(item)"
+                :key="reason"
+              >
+                {{ reason }}
+              </li>
+            </ul>
+            <Button
+              v-if="!isExportable(item) && !item.reasons.some(reason => reason.includes('NOT_IMPLEMENTED') || reason.includes('UNSUPPORTED'))"
+              variant="outline"
+              class="workspace-button export-next-step"
+              @click="emit('open-material', nextStep(item).target)"
+            >
+              {{ nextStep(item).label }}
+            </Button>
+            <details
+              v-if="item.revisionId"
+              class="export-provenance"
+            >
+              <summary>Версія й перегляд</summary>
+              <dl><dt>Версія матеріалу</dt><dd>{{ item.number ?? '—' }}</dd><dt>Перегляди залежностей</dt><dd>{{ item.reviewCounter ?? '—' }}</dd><dt>Ідентифікатор версії</dt><dd>{{ item.revisionId }}</dd></dl>
+            </details>
+          </article>
+        </template>
       </section>
 
       <section
@@ -435,7 +527,7 @@ onBeforeUnmount(() => {
             :key="`${item.format}:${item.revisionId}:${item.reviewCounter}`"
             class="export-selected-row"
           >
-            <span>{{ item.title }} · версія {{ item.number }}<span v-if="item.contentMode === 'CREATIVE'"> · авторський текст</span></span>
+            <span>{{ formatLabel(item.format) }} (версія {{ item.number }})<span v-if="item.contentMode === 'CREATIVE'">, авторський текст</span></span>
             <span
               v-if="!selectedMatchesReadiness"
               class="export-stale-choice"
@@ -455,17 +547,17 @@ onBeforeUnmount(() => {
           :disabled="busy || props.archived || !selected.length"
         >
           <legend>Формат файлу</legend>
-          <label><input
+          <label v-if="!selected.length || (selected.length === 1 && !selected[0]?.format.endsWith('_SCRIPT') && !selected[0]?.format.endsWith('_VISUAL'))"><input
             v-model="packageFormat"
             type="radio"
             value="TXT"
           > Текст TXT</label>
-          <label><input
+          <label v-if="!selected.length || (selected.length === 1 && !selected[0]?.format.endsWith('_VISUAL'))"><input
             v-model="packageFormat"
             type="radio"
             value="MARKDOWN"
           > Markdown</label>
-          <label :aria-disabled="selected.length !== 1 || !selected[0]?.format.endsWith('_SCRIPT')">
+          <label v-if="!selected.length || (selected.length === 1 && selected[0]?.format.endsWith('_SCRIPT'))">
             <input
               v-model="packageFormat"
               type="radio"
@@ -474,7 +566,7 @@ onBeforeUnmount(() => {
             >
             JSON сценарію
           </label>
-          <label :aria-disabled="selected.length !== 1 || !['LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL'].includes(selected[0]?.format ?? '')">
+          <label v-if="!selected.length || (selected.length === 1 && ['LINKEDIN_COVER_VISUAL', 'INSTAGRAM_COVER_VISUAL'].includes(selected[0]?.format ?? ''))">
             <input
               v-model="packageFormat"
               type="radio"
@@ -483,7 +575,7 @@ onBeforeUnmount(() => {
             >
             PNG обкладинки
           </label>
-          <label :aria-disabled="selected.length !== 1 || !['LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL'].includes(selected[0]?.format ?? '')">
+          <label v-if="!selected.length || (selected.length === 1 && ['LINKEDIN_CAROUSEL_VISUAL', 'INSTAGRAM_CAROUSEL_VISUAL'].includes(selected[0]?.format ?? ''))">
             <input
               v-model="packageFormat"
               type="radio"
@@ -497,12 +589,6 @@ onBeforeUnmount(() => {
             type="radio"
             value="ZIP"
           > ZIP-архів</label>
-          <p
-            v-if="packageFormat !== 'ZIP' && selected.length !== 1"
-            class="export-muted"
-          >
-            Окремий файл містить один матеріал. Для кількох виберіть ZIP.
-          </p>
           <p
             v-if="packageFormat === 'JSON' && selected.length === 1 && !selected[0]?.format.endsWith('_SCRIPT')"
             class="export-muted"
@@ -665,7 +751,15 @@ onBeforeUnmount(() => {
 .export-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .export-workspace h2 { margin: 0; font: 550 25px/1.3 SourceSerif, Georgia, serif; }
 .export-item { min-width: 0; padding: 16px 0; border-top: 1px solid var(--rule); }
+.export-readiness-filters { display:flex; flex-wrap:wrap; align-items:center; gap:16px; margin:16px 0; border-bottom:1px solid var(--rule); }
+.export-readiness-filters button { min-height:40px; border:0; border-bottom:2px solid transparent; padding:8px 0; background:transparent; color:var(--muted); font:500 12px var(--sans); cursor:pointer; }
+.export-readiness-filters button[aria-pressed='true'] { border-color:var(--ink); color:var(--ink); }
+.export-group-title { font:550 18px/1.4 SourceSerif,Georgia,serif; margin:20px 0 10px; }
 .export-item:first-of-type { margin-top: 12px; }
+.export-item-state-pending { color:var(--review, #945000); }
+.export-reasons-list { margin:8px 0 10px 29px; padding-left:18px; font-size:13px; color:var(--review,#945000); line-height:1.55; }
+.export-reasons-list li+li { margin-top:3px; }
+.export-next-step { margin:4px 0 4px 29px; }
 .export-choice { display: flex; align-items: flex-start; gap: 12px; min-height: 36px; cursor: pointer; }
 .export-choice input, .export-formats input { flex: none; width: 17px; height: 17px; margin: 3px 0 0; accent-color: var(--graphite, #343a40); }
 .export-item-title { font: 550 21px/1.35 SourceSerif, Georgia, serif; overflow-wrap: anywhere; }

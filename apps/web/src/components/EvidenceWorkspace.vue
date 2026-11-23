@@ -82,6 +82,20 @@ const loading = ref(true)
 const loadError = ref('')
 const configured = ref(false)
 const materials = ref<EvidenceMaterial[]>([])
+const sourceListQuery = ref('')
+const sourceListMode = ref<'ALL' | 'SELECTED' | 'READY' | 'NEEDS_INDEX'>('ALL')
+const sourceVisibleLimit = ref(25)
+const filteredSourceMaterials = computed(() => {
+  const term = sourceListQuery.value.trim().toLocaleLowerCase('uk-UA')
+  return materials.value.filter(item => {
+    if (sourceListMode.value === 'SELECTED' && (!item.snapshotId || !selectedSnapshotIds.value.includes(item.snapshotId))) return false
+    if (sourceListMode.value === 'READY' && item.indexState !== 'READY') return false
+    if (sourceListMode.value === 'NEEDS_INDEX' && item.indexState === 'READY') return false
+    return !term || item.label.toLocaleLowerCase('uk-UA').includes(term)
+  })
+})
+const visibleSourceMaterials = computed(() => filteredSourceMaterials.value.slice(0, sourceVisibleLimit.value))
+function resetSourceLimit() { sourceVisibleLimit.value = 25 }
 const selectedSnapshotIds = ref<string[]>(recovery?.selectedSnapshotIds ?? [])
 let selectionInitialized = recovery !== null
 const sourcesOpen = ref(true)
@@ -735,17 +749,9 @@ onBeforeUnmount(() => {
         maxlength="1000"
         :disabled="Boolean(activeSearch()) || Boolean(pendingSearch && !searchJob && !pendingAfterIndex) || archived"
         placeholder="Наприклад: як система перевіряє вхід користувача?"
-        :aria-describedby="query.trim() === projectTopic.trim() && query.trim() ? 'evidence-query-help' : undefined"
         @input="invalidateAutoSearch"
       />
       <div class="evidence-search-footer">
-        <p
-          v-if="query.trim() === projectTopic.trim() && query.trim()"
-          id="evidence-query-help"
-          class="evidence-hint"
-        >
-          Підставлена тема проєкту. Уточніть її для цього пошуку.
-        </p>
         <Button
           class="evidence-primary"
           type="submit"
@@ -842,12 +848,49 @@ onBeforeUnmount(() => {
             <p>У проєкті ще немає готових джерел для пошуку.</p>
             <a :href="`/projects/${projectId}/sources`">Додати джерела</a>
           </div>
+          <div
+            v-if="materials.length"
+            class="evidence-material-filters"
+          >
+            <input
+              v-model="sourceListQuery"
+              type="search"
+              aria-label="Знайти джерело для пошуку"
+              placeholder="Знайти джерело"
+              @input="resetSourceLimit"
+            >
+            <select
+              v-model="sourceListMode"
+              aria-label="Фільтр джерел для пошуку"
+              @change="resetSourceLimit"
+            >
+              <option value="ALL">
+                Усі джерела
+              </option>
+              <option value="SELECTED">
+                Вибрані
+              </option>
+              <option value="READY">
+                Готові
+              </option>
+              <option value="NEEDS_INDEX">
+                Потребують підготовки
+              </option>
+            </select>
+            <span>{{ filteredSourceMaterials.length }} з {{ materials.length }}</span>
+          </div>
+          <p
+            v-if="materials.length && !filteredSourceMaterials.length"
+            class="evidence-empty"
+          >
+            Немає джерел за вибраними фільтрами.
+          </p>
           <ul
-            v-else
+            v-else-if="filteredSourceMaterials.length"
             class="evidence-material-list"
           >
             <li
-              v-for="material in materials"
+              v-for="material in visibleSourceMaterials"
               :key="material.id"
               class="evidence-material"
             >
@@ -872,6 +915,14 @@ onBeforeUnmount(() => {
               >Відкрити джерело</a>
             </li>
           </ul>
+          <button
+            v-if="filteredSourceMaterials.length > visibleSourceMaterials.length"
+            type="button"
+            class="evidence-source-more"
+            @click="sourceVisibleLimit += 25"
+          >
+            Показати ще ({{ filteredSourceMaterials.length - visibleSourceMaterials.length }})
+          </button>
           <Button
             v-if="materials.some(item => item.snapshotId && item.indexState !== 'READY' && !item.indexing)"
             type="button"
@@ -1127,6 +1178,13 @@ onBeforeUnmount(() => {
 .evidence-source-controls p { margin: 0; }
 .evidence-source-controls > div { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .evidence-source-control { min-height: 38px; padding: 4px 0; color: var(--ink); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.evidence-material-filters { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:0 0 12px; }
+.evidence-material-filters input,.evidence-material-filters select { min-height:36px; min-width:0; padding:7px 9px; border:1px solid var(--rule); border-radius:3px; background:var(--paper); color:var(--ink); font:12px var(--sans); }
+.evidence-material-filters input { flex:1 1 170px; }
+.evidence-material-filters select { flex:1 1 155px; }
+.evidence-material-filters span { flex:none; color:var(--muted); font-size:12px; }
+.evidence-source-more { padding:10px 0; border:0; background:transparent; font:500 12px var(--sans); color:var(--copper); text-decoration:underline; cursor:pointer; }
+.evidence-source-more:focus-visible,.evidence-material-filters :is(input,select):focus-visible { outline:2px solid var(--copper); outline-offset:2px; }
 .evidence-material-list, .evidence-passage-list { margin: 0; padding: 0; list-style: none; }
 .evidence-material { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(190px, auto) auto; align-items: center; gap: 15px; min-height: 58px; border-top: 1px solid var(--rule); }
 .evidence-material-choice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; font-size: 14px; line-height: 1.5; cursor: pointer; }

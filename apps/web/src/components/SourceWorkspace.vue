@@ -75,6 +75,24 @@ const purposes: { id: Purpose; label: string }[] = [
 ]
 
 const materials = ref<Material[]>([])
+const sourceSearch = ref('')
+const sourcePurposeFilter = ref<'ALL' | Purpose>('ALL')
+const sourceIncludedFilter = ref<'ALL' | 'INCLUDED' | 'EXCLUDED'>('ALL')
+const sourceSort = ref<'RECENT' | 'NAME'>('RECENT')
+const sourceVisibleLimit = ref(25)
+const filteredMaterials = computed(() => {
+  const term = sourceSearch.value.trim().toLocaleLowerCase('uk-UA')
+  return materials.value.filter(item => {
+    if (sourcePurposeFilter.value !== 'ALL' && item.purpose !== sourcePurposeFilter.value) return false
+    if (sourceIncludedFilter.value === 'INCLUDED' && !item.included) return false
+    if (sourceIncludedFilter.value === 'EXCLUDED' && item.included) return false
+    return !term || [item.label, item.originalFilename ?? '', item.sourceUrl ?? '']
+      .some(value => value.toLocaleLowerCase('uk-UA').includes(term))
+  }).sort((a, b) => sourceSort.value === 'NAME'
+    ? a.label.localeCompare(b.label, 'uk-UA') : Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+})
+const visibleMaterials = computed(() => filteredMaterials.value.slice(0, sourceVisibleLimit.value))
+function resetSourceWindow() { sourceVisibleLimit.value = 25 }
 const selectedMaterial = ref<Material | null>(null)
 const snapshots = ref<SnapshotSummary[]>([])
 const selectedSnapshot = ref<Snapshot | null>(null)
@@ -719,7 +737,7 @@ onBeforeUnmount(() => {
             placeholder="Вставте або введіть текст…"
             :disabled="busy || archived"
           />
-          <FieldDescription>{{ textCount.toLocaleString('uk-UA') }} / {{ TEXT_LIMIT.toLocaleString('uk-UA') }} символів · зберігається як окрема версія.</FieldDescription>
+          <FieldDescription>{{ textCount.toLocaleString('uk-UA') }} / {{ TEXT_LIMIT.toLocaleString('uk-UA') }} символів</FieldDescription>
         </Field>
         <Field
           v-else-if="mode === 'upload' || mode === 'document'"
@@ -806,6 +824,64 @@ onBeforeUnmount(() => {
             <p>Вибрані фактичні джерела використовуються для пошуку доказів і генерації з джерел.</p>
           </div>
         </div>
+        <div
+          v-if="listState === 'ready' && materials.length"
+          class="source-filter-bar"
+        >
+          <input
+            v-model="sourceSearch"
+            type="search"
+            aria-label="Пошук серед джерел"
+            placeholder="Знайти джерело"
+            @input="resetSourceWindow"
+          >
+          <select
+            v-model="sourcePurposeFilter"
+            aria-label="Тип джерела"
+            @change="resetSourceWindow"
+          >
+            <option value="ALL">
+              Усі типи
+            </option>
+            <option
+              v-for="item in purposes"
+              :key="item.id"
+              :value="item.id"
+            >
+              {{ item.label }}
+            </option>
+          </select>
+          <select
+            v-model="sourceIncludedFilter"
+            aria-label="Вибір джерел"
+            @change="resetSourceWindow"
+          >
+            <option value="ALL">
+              Усі джерела
+            </option>
+            <option value="INCLUDED">
+              Вибрані
+            </option>
+            <option value="EXCLUDED">
+              Не вибрані
+            </option>
+          </select>
+          <select
+            v-model="sourceSort"
+            aria-label="Порядок джерел"
+            @change="resetSourceWindow"
+          >
+            <option value="RECENT">
+              Спочатку нові
+            </option>
+            <option value="NAME">
+              За назвою
+            </option>
+          </select>
+          <p class="source-filter-count">
+            {{ filteredMaterials.length }} з {{ materials.length }}
+          </p>
+        </div>
         <p
           v-if="listState === 'loading'"
           class="source-state"
@@ -833,12 +909,25 @@ onBeforeUnmount(() => {
         >
           Джерел поки немає. Додайте текст або файл вище.
         </p>
+        <p
+          v-else-if="!filteredMaterials.length"
+          class="source-state"
+        >
+          За цими фільтрами джерел немає.
+          <button
+            type="button"
+            class="source-reset"
+            @click="sourceSearch = ''; sourcePurposeFilter = 'ALL'; sourceIncludedFilter = 'ALL'; resetSourceWindow()"
+          >
+            Скинути фільтри
+          </button>
+        </p>
         <ul
           v-else
           class="source-items"
         >
           <li
-            v-for="material in materials"
+            v-for="material in visibleMaterials"
             :key="material.id"
             :class="{ 'source-item-selected': selectedMaterial?.id === material.id }"
           >
@@ -866,6 +955,14 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
+        <button
+          v-if="filteredMaterials.length > visibleMaterials.length"
+          type="button"
+          class="source-more"
+          @click="sourceVisibleLimit += 25"
+        >
+          Показати ще ({{ filteredMaterials.length - visibleMaterials.length }})
+        </button>
       </section>
 
       <section
@@ -1202,6 +1299,13 @@ onBeforeUnmount(() => {
 .sources-columns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 38px; padding-top: 28px; }
 .source-list, .source-reader { min-width: 0; }
 .sources-columns.with-reader { grid-template-columns: 260px minmax(0, 1fr); }
+.source-filter-bar { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin-bottom:14px; }
+.source-filter-bar input,.source-filter-bar select { min-height:36px; min-width:0; border:1px solid var(--rule); border-radius:3px; background:var(--document); padding:7px 9px; color:var(--ink); font:12px var(--sans); }
+.source-filter-bar input { flex:1 1 150px; }
+.source-filter-bar select { flex:1 1 120px; }
+.source-filter-count { margin:0; font-size:12px; color:var(--muted); width:100%; }
+.source-more,.source-reset { margin:10px 0; padding:8px 2px; border:0; background:transparent; color:var(--copper); font:500 12px var(--sans); cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
+.source-filter-bar :is(input,select):focus-visible,.source-more:focus-visible,.source-reset:focus-visible { outline:2px solid var(--copper); outline-offset:2px; }
 .source-items { margin: 0; padding: 0; list-style: none; }
 .source-items li { display: grid; gap: 7px; padding: 18px 14px; border-top: 1px solid var(--rule); transition: background 140ms; }
 .source-items li:hover { background: var(--row-hover, #fafafa); }

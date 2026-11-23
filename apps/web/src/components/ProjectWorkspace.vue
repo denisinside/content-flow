@@ -11,13 +11,27 @@ import EvidenceWorkspace from './EvidenceWorkspace.vue'
 import BriefWorkspace from './BriefWorkspace.vue'
 import EditorPresence from './EditorPresence.vue'
 import ProjectLifecycle from './ProjectLifecycle.vue'
+import { getProjectReadinessPreview, prefetchProjectReadiness, invalidateProjectReadiness } from '../lib/project-readiness'
 const loadArticleWorkspace = () => import('./ArticleWorkspace.vue')
 const ArticleWorkspace = defineAsyncComponent(loadArticleWorkspace)
 function preloadArticleWorkspace() { void loadArticleWorkspace().catch(() => {}) }
-const TelegramWorkspace = defineAsyncComponent(() => import('./TelegramWorkspace.vue'))
-const ScriptWorkspace = defineAsyncComponent(() => import('./ScriptWorkspace.vue'))
-const ExportWorkspace = defineAsyncComponent(() => import('./ExportWorkspace.vue'))
-const VisualWorkspace = defineAsyncComponent(() => import('./VisualWorkspace.vue'))
+const loadTelegramWorkspace = () => import('./TelegramWorkspace.vue')
+const loadScriptWorkspace = () => import('./ScriptWorkspace.vue')
+const TelegramWorkspace = defineAsyncComponent(loadTelegramWorkspace)
+const ScriptWorkspace = defineAsyncComponent(loadScriptWorkspace)
+function preloadChannels() {
+  void loadTelegramWorkspace().catch(() => {})
+  void loadScriptWorkspace().catch(() => {})
+}
+const loadExportWorkspace = () => import('./ExportWorkspace.vue')
+const ExportWorkspace = defineAsyncComponent(loadExportWorkspace)
+function preloadExportWorkspace(id: string) {
+  void loadExportWorkspace().catch(() => {})
+  prefetchProjectReadiness(id, props.userId)
+}
+const loadVisualWorkspace = () => import('./VisualWorkspace.vue')
+const VisualWorkspace = defineAsyncComponent(loadVisualWorkspace)
+function preloadVisuals() { void loadVisualWorkspace().catch(() => {}) }
 
 type ChannelFormat = 'LINKEDIN_TEXT' | 'LINKEDIN_COVER' | 'INSTAGRAM_COVER' | 'LINKEDIN_CAROUSEL' | 'INSTAGRAM_CAROUSEL' | 'INSTAGRAM_STORIES' | 'TELEGRAM_POST'
 type ProjectFormat =
@@ -109,6 +123,100 @@ const selectedVisualFormat = computed<VisualFormat>(() => {
   return visualFormats.value.includes(requested as VisualFormat) ? requested as VisualFormat : visualFormats.value[0] ?? 'LINKEDIN_COVER'
 })
 const isDetail = computed(() => page.value !== null)
+const isProjectOverview = computed(() => /^\/projects\/[0-9a-f-]{36}\/?$/i.test(pathname.value))
+type OverviewSection = 'sources' | 'facts' | 'brief' | 'article' | 'channels' | 'visuals' | 'export'
+interface OverviewProgress {
+  sources: { total: number; included: number } | null
+  briefSaved: boolean | null
+  outlineApproved: boolean | null
+  items: Array<{ format: string; ready: boolean; revisionId: string | null }> | null
+}
+const freshOverviewProgress = (): OverviewProgress => ({ sources: null, briefSaved: null, outlineApproved: null, items: null })
+const overviewProgress = ref<OverviewProgress>(freshOverviewProgress())
+let overviewController: AbortController | null = null
+let overviewEpoch = 0
+let lastOverviewProjectId: string | null = null
+const overviewSteps = computed(() => {
+  const result: Array<{ id: OverviewSection; title: string }> = [
+    { id: 'sources', title: 'Джерела' },
+    { id: 'facts', title: 'Докази' },
+    { id: 'brief', title: 'Бриф' },
+  ]
+  if (currentProject.value?.formats.includes('ARTICLE') || historicalArticle.value) result.push({ id: 'article', title: 'Стаття' })
+  if (channelFormats.value.length) result.push({ id: 'channels', title: 'Канали' })
+  if (visualFormats.value.length) result.push({ id: 'visuals', title: 'Візуали' })
+  result.push({ id: 'export', title: 'Готовність і експорт' })
+  return result
+})
+function overviewPath(section: OverviewSection) {
+  const base = `/projects/${currentProject.value?.id ?? ''}`
+  if (section === 'channels') return `${base}/channels?format=${selectedChannelFormat.value}`
+  if (section === 'visuals') return `${base}/visuals?format=${selectedVisualFormat.value}`
+  return `${base}/${section}`
+}
+function sourceNumberLabel(value: number) {
+  const last = value % 10, lastTwo = value % 100
+  const form = last === 1 && lastTwo !== 11 ? 'джерело'
+    : last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14) ? 'джерела' : 'джерел'
+  return `${value} ${form}`
+}
+function overviewStatus(section: OverviewSection) {
+  const summary = overviewProgress.value
+  if (section === 'sources') return summary.sources === null ? 'Перевіряємо…'
+    : summary.sources.total ? sourceNumberLabel(summary.sources.total) : 'Не розпочато'
+  if (section === 'facts') return summary.sources === null ? 'Перевіряємо…'
+    : summary.sources.included ? `Обрано ${sourceNumberLabel(summary.sources.included)}` : 'Потрібні джерела'
+  if (section === 'brief') return summary.briefSaved === null ? 'Перевіряємо…'
+    : summary.outlineApproved ? 'Є погоджений план' : summary.briefSaved ? 'Бриф збережено' : 'Не розпочато'
+  const items = summary.items
+  if (!items) return 'Перевіряємо…'
+  if (section === 'article') {
+    const article = items.find(item => item.format === 'ARTICLE')
+    return article?.ready ? 'Готово' : article?.revisionId ? 'Потребує перегляду' : 'Немає погодженої статті'
+  }
+  const formats: string[] = section === 'channels' ? channelFormats.value
+    : section === 'visuals' ? visualFormats.value.map(format => `${format}_VISUAL`)
+      : items.map(item => item.format)
+  const relevant = items.filter(item => formats.includes(item.format))
+  return `${relevant.filter(item => item.ready).length} з ${relevant.length} готово`
+}
+function stopOverviewProgress() { overviewEpoch++; overviewController?.abort(); overviewController = null }
+function loadOverviewProgress(id: string) {
+  stopOverviewProgress()
+  if (lastOverviewProjectId !== id) {
+    overviewProgress.value = freshOverviewProgress()
+    lastOverviewProjectId = id
+  }
+  if (!isProjectOverview.value) return
+  const current = overviewEpoch
+  const controller = new AbortController()
+  overviewController = controller
+  const loadSection = async (path: string, update: (data: unknown) => void) => {
+    try {
+      const response = await fetch(`/api/v1/projects/${encodeURIComponent(id)}${path}`, { credentials: 'same-origin', signal: controller.signal })
+      if (response.status === 401) { emit('session-expired'); return }
+      if (!response.ok || current !== overviewEpoch) return
+      const result: unknown = await response.json()
+      if (current === overviewEpoch && !controller.signal.aborted) update(result)
+    } catch { /* Project navigation remains usable if a summary endpoint is unavailable. */ }
+  }
+  void loadSection('/materials', data => {
+    const materials = (data as { materials?: Array<{ included: boolean }> }).materials ?? []
+    overviewProgress.value.sources = { total: materials.length, included: materials.filter(item => item.included).length }
+  })
+  void loadSection('/editorial', data => {
+    const editorial = data as { brief?: { currentRevision?: unknown }; outline?: { currentApprovedRevisionId?: string | null } }
+    overviewProgress.value.briefSaved = !!editorial.brief?.currentRevision
+    overviewProgress.value.outlineApproved = !!editorial.outline?.currentApprovedRevisionId
+  })
+  void getProjectReadinessPreview<{ items: NonNullable<OverviewProgress['items']> }>(id, props.userId)
+    .then(data => {
+      if (current === overviewEpoch && !controller.signal.aborted) overviewProgress.value.items = data.items
+    })
+    .catch(cause => {
+      if ((cause as { status?: number }).status === 401) emit('session-expired')
+    })
+}
 const isTrashed = computed(() => Boolean(currentProject.value?.trashedAt))
 const isSources = computed(() => /\/sources\/?$/i.test(pathname.value))
 const isBrief = computed(() => /\/brief\/?$/i.test(pathname.value))
@@ -154,6 +262,9 @@ function routeTo(path: string, push = true) {
     requestVersion += 1
     saving.value = false
   }
+  if (currentProject.value && !isProjectOverview.value && !isExport.value) {
+    invalidateProjectReadiness(currentProject.value.id, props.userId)
+  }
   closeForm(true)
   clearForm()
   conflict.value = false
@@ -163,7 +274,10 @@ function routeTo(path: string, push = true) {
   search.value = window.location.search
   if (isDetail.value) {
     if (currentProject.value?.id !== page.value) void loadProject(page.value as string)
+    else if (isProjectOverview.value) loadOverviewProgress(page.value as string)
+    else stopOverviewProgress()
   } else {
+    stopOverviewProgress()
     currentProject.value = null
     void loadProjects()
   }
@@ -171,6 +285,9 @@ function routeTo(path: string, push = true) {
 
 function openExportMaterial(projectId: string, format: string) {
   const root = `/projects/${projectId}`
+  if (format === 'FACTS') return routeTo(`${root}/facts`)
+  if (format === 'SOURCES') return routeTo(`${root}/sources`)
+  if (format === 'BRIEF') return routeTo(`${root}/brief`)
   if (format === 'ARTICLE') return routeTo(`${root}/article?review=1`)
   const visual = format.endsWith('_VISUAL')
   const channelFormat = format.replace(/_(VISUAL|SCRIPT)$/u, '')
@@ -212,13 +329,20 @@ function onPopState() {
   requestController?.abort()
   requestVersion += 1
   saving.value = false
+  if (currentProject.value && !isProjectOverview.value && !isExport.value) {
+    invalidateProjectReadiness(currentProject.value.id, props.userId)
+  }
   closeForm(true)
   clearForm()
   conflict.value = false
   pathname.value = window.location.pathname
   search.value = window.location.search
-  if (isDetail.value) void loadProject(page.value as string)
-  else {
+  if (isDetail.value) {
+    if (currentProject.value?.id !== page.value) void loadProject(page.value as string)
+    else if (isProjectOverview.value) loadOverviewProgress(page.value as string)
+    else stopOverviewProgress()
+  } else {
+    stopOverviewProgress()
     currentProject.value = null
     void loadProjects()
   }
@@ -303,6 +427,7 @@ async function loadProject(id: string) {
     if (!requestIsCurrent(version)) return
     currentProject.value = result.project
     emit('project-workspace', result.project.workspaceId)
+    if (isProjectOverview.value) loadOverviewProgress(id)
     if (!result.project.formats.includes('ARTICLE')) {
       void fetch(`/api/v1/projects/${encodeURIComponent(id)}/article`, { credentials: 'same-origin', signal: controller.signal }).then(async response => {
         if (!response.ok || !requestIsCurrent(version)) return
@@ -427,6 +552,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  stopOverviewProgress()
   requestController?.abort()
   requestVersion += 1
   window.removeEventListener('popstate', onPopState)
@@ -660,11 +786,17 @@ onBeforeUnmount(() => {
               v-else
               class="project-link"
             >{{ project.topic }}</span>
-            <p class="project-formats">
-              {{ project.formats.map(labelFor).join(' · ') }}
-            </p>
+            <div
+              class="project-formats"
+              aria-label="Формати матеріалів"
+            >
+              <span
+                v-for="format in project.formats"
+                :key="format"
+              >{{ labelFor(format) }}</span>
+            </div>
             <p class="project-updated">
-              {{ project.trashedAt ? `У кошику · видалення доступне після ${formatUpdatedAt(project.purgeAfter ?? '')}` : project.archivedAt ? 'Архівований' : 'Активний' }} · Оновлено {{ formatUpdatedAt(project.updatedAt) }}
+              {{ project.trashedAt ? `У кошику · видалення доступне після ${formatUpdatedAt(project.purgeAfter ?? '')}` : project.archivedAt ? 'Архівований' : 'Активний' }} (оновлено {{ formatUpdatedAt(project.updatedAt) }})
             </p>
           </div>
           <ProjectLifecycle
@@ -760,17 +892,23 @@ onBeforeUnmount(() => {
             v-if="channelFormats.length"
             :href="`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`"
             :aria-current="isChannels ? 'page' : undefined"
+            @pointerenter="preloadChannels"
+            @focus="preloadChannels"
             @click.prevent="routeTo(`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`)"
           >Канали</a>
           <a
             v-if="visualFormats.length"
             :href="`/projects/${currentProject.id}/visuals?format=${selectedVisualFormat}`"
             :aria-current="isVisuals ? 'page' : undefined"
+            @pointerenter="preloadVisuals"
+            @focus="preloadVisuals"
             @click.prevent="routeTo(`/projects/${currentProject.id}/visuals?format=${selectedVisualFormat}`)"
           >Візуали</a>
           <a
             :href="`/projects/${currentProject.id}/export`"
             :aria-current="isExport ? 'page' : undefined"
+            @pointerenter="preloadExportWorkspace(currentProject.id)"
+            @focus="preloadExportWorkspace(currentProject.id)"
             @click.prevent="routeTo(`/projects/${currentProject.id}/export`)"
           >Експорт</a>
         </nav>
@@ -1075,126 +1213,44 @@ onBeforeUnmount(() => {
 
           <section
             v-else
-            class="project-detail-body"
-            aria-labelledby="formats-title"
+            class="project-detail-body project-steps"
+            aria-labelledby="overview-steps-title"
           >
-            <div class="project-sources-entry">
-              <div>
-                <p class="eyebrow">
-                  Дослідження
-                </p>
-                <h2>Джерела</h2>
-                <p class="project-detail-copy">
-                  Додавайте тексти й документи та переглядайте збережені версії.
-                </p>
-              </div>
-              <Button
-                class="workspace-button workspace-button-secondary"
-                variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/sources`)"
-              >
-                Відкрити джерела
-              </Button>
-            </div>
-            <div class="project-sources-entry">
-              <div>
-                <p class="eyebrow">
-                  Перевірка
-                </p>
-                <h2>Докази для матеріалу</h2>
-                <p class="project-detail-copy">
-                  Шукайте точні уривки в джерелах під тему або розділ матеріалу.
-                </p>
-              </div>
-              <Button
-                class="workspace-button workspace-button-secondary"
-                variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/facts`)"
-              >
-                Знайти докази
-              </Button>
-            </div>
-            <div class="project-sources-entry">
-              <div>
-                <h2>Бриф</h2>
-                <p class="project-detail-copy">
-                  Визначайте аудиторію, головне повідомлення та тон матеріалів.
-                </p>
-              </div>
-              <Button
-                class="workspace-button workspace-button-secondary"
-                variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/brief`)"
-              >
-                Відкрити бриф
-              </Button>
-            </div>
-            <div
-              v-if="currentProject.formats.includes('ARTICLE') || historicalArticle"
-              class="project-sources-entry"
-            >
-              <div>
-                <h2>Стаття</h2>
-                <p class="project-detail-copy">
-                  Пишіть, переглядайте докази та зберігайте версії статті.
-                </p>
-              </div>
-              <Button
-                class="workspace-button workspace-button-secondary"
-                variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/article`)"
-              >
-                Відкрити статтю
-              </Button>
-            </div>
-            <div
-              v-if="channelFormats.length"
-              class="project-sources-entry"
-            >
-              <div>
-                <h2>Канали</h2>
-                <p class="project-detail-copy">
-                  Підготовка каналів: {{ channelFormats.map(labelFor).join(' · ') }}. Для кожного формату є окремі чернетка, погодження й історія.
-                </p>
-              </div>
-              <Button
-                class="workspace-button workspace-button-secondary"
-                variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/channels?format=${selectedChannelFormat}`)"
-              >
-                Відкрити канали
-              </Button>
-            </div>
-            <div class="project-sources-entry">
-              <div>
-                <h2>Готовність і експорт</h2>
-                <p class="project-detail-copy">
-                  Якщо файл недоступний, почніть тут. Для кожного матеріалу показано причину й перехід до потрібної вкладки.
-                </p>
-              </div>
-              <Button
-                class="workspace-button workspace-button-secondary"
-                variant="outline"
-                @click="routeTo(`/projects/${currentProject.id}/export`)"
-              >
-                Відкрити експорт
-              </Button>
-            </div>
-            <div
-              class="detail-rule"
-              aria-hidden="true"
-            />
-            <h2 id="formats-title">
-              Формати матеріалів
+            <h2 id="overview-steps-title">
+              Етапи проєкту
             </h2>
-            <ul class="format-list">
-              <li
-                v-for="format in currentProject.formats"
-                :key="format"
+            <div class="project-step-list">
+              <button
+                v-for="step in overviewSteps"
+                :key="step.id"
+                type="button"
+                class="project-step-row"
+                @click="routeTo(overviewPath(step.id))"
               >
-                {{ labelFor(format) }}
-              </li>
-            </ul>
+                <span class="project-step-name">{{ step.title }}</span>
+                <span
+                  class="project-step-status"
+                  :aria-label="step.title + ': ' + overviewStatus(step.id)"
+                >
+                  {{ overviewStatus(step.id) }}
+                </span>
+                <span
+                  class="project-step-arrow"
+                  aria-hidden="true"
+                >→</span>
+              </button>
+            </div>
+            <details class="project-format-details">
+              <summary>Формати матеріалів · {{ currentProject.formats.length }}</summary>
+              <ul class="format-list">
+                <li
+                  v-for="format in currentProject.formats"
+                  :key="format"
+                >
+                  {{ labelFor(format) }}
+                </li>
+              </ul>
+            </details>
             <Alert
               v-if="currentProject.archivedAt"
               class="workspace-alert archive-note"
@@ -1210,6 +1266,24 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.project-steps { max-width:950px; margin-inline:auto; }
+.project-steps > h2 { margin:0 0 14px; font:550 26px/1.35 var(--serif); }
+.project-step-list { border-top:1px solid var(--rule); }
+.project-step-row { width:100%; min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto 18px; align-items:center; gap:12px 20px; padding:16px 4px; border:0; border-bottom:1px solid var(--rule); background:transparent; color:var(--ink); text-align:left; cursor:pointer; }
+.project-step-row:hover { background:var(--row-hover,#fafafa); }
+.project-step-row:focus-visible { outline:2px solid var(--copper); outline-offset:2px; }
+.project-step-name { font:550 20px/1.35 var(--serif); }
+.project-step-status { font-size:12px; color:var(--muted); text-align:right; }
+.project-step-arrow { font-size:18px; color:var(--muted); }
+.project-format-details { margin:24px 0; padding:10px 0; border-top:1px solid var(--rule); }
+.project-format-details > summary { font-size:13px; color:var(--muted); cursor:pointer; }
+.project-format-details .format-list { margin-top:12px; }
+@media(max-width:580px) {
+ .project-step-row { grid-template-columns:minmax(0,1fr) 18px; gap:4px 10px; }
+ .project-step-status { grid-column:1; text-align:left; }
+ .project-step-arrow { grid-column:2; grid-row:1/3; }
+}
+
 .project-detail { width: 100%; display: block; }
 .project-detail > * { min-width: 0; }
 .project-state-filter { display: flex; gap: 24px; margin: 4px 0 20px; border-bottom: 1px solid var(--rule); }

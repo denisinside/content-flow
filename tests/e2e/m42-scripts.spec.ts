@@ -77,7 +77,11 @@ async function fixture(page: Page) {
       if (action === 'apply') {
         const ids = body['frameIds'] as string[] | undefined;
         const chosen = ids ? revision.content.frames.filter(frame => ids.includes(frame.id)) : revision.content.frames;
-        const old = state.script.draft!;
+        const old = state.script.draft ?? {
+          counter: 0, parentAdaptationRevisionId: revision.parentAdaptationRevisionId,
+          parentAdaptationRevisionHash: 'caption-hash', parentAdaptationReviewCounter: 0,
+          content: { frames: [] as Frame[] }, sha256: 'new-draft', baseRevisionId: null,
+        };
         const chosenById = new Map(chosen.map(frame => [frame.id, frame]));
         const existingIds = new Set(old.content.frames.map(frame => frame.id));
         const frames = ids ? [...old.content.frames.map(frame => chosenById.get(frame.id) ?? frame), ...chosen.filter(frame => !existingIds.has(frame.id))] : [...chosen];
@@ -127,10 +131,8 @@ test('manual frames keep stable IDs through reorder and can be checkpointed and 
   await secondFrame.press('Alt+ArrowUp');
   await expect.poll(() => ctx.state.script.draft?.content.frames[0]?.id).toBe(secondId);
   expect(ctx.state.script.draft!.content.frames[1]!.id).toBe(firstId);
-  await page.locator('.script-workspace').getByRole('button', { name: 'Зберегти версію' }).click();
+  await page.getByRole('button', { name: 'Зберегти й погодити сценарій', exact: true }).click();
   await expect(page.locator('.script-workspace').getByRole('region', { name: 'Історія сценаріїв' }).getByText('Версія 1', { exact: true })).toBeVisible();
-  await page.locator('.script-workspace').getByLabel(/Підтверджую, що непов’язаний/).check();
-  await page.locator('.script-workspace').getByRole('button', { name: 'Погодити' }).click();
   await expect.poll(() => ctx.state.script.currentApprovedRevisionId).toBe('script-revision-1');
   mkdirSync('.local-checks/m42', { recursive: true });
   for (const width of [1280, 768, 390]) {
@@ -186,7 +188,7 @@ test('frame language proposals change exact text only after explicit acceptance'
   await page.locator('.script-workspace').getByRole('textbox', { name: 'Точний текст' }).fill('Чернетка кадру.');
   await expect.poll(() => ctx.state.script.draft?.content.frames.length).toBe(1);
   await page.locator('.script-workspace').getByRole('button', { name: 'Зберегти версію' }).click();
-  await page.locator('.script-workspace').getByRole('button', { name: 'Перевірити мову' }).click();
+  await page.locator('.script-workspace').getByRole('button', { name: 'Перевірити текст' }).click();
   await expect(page.locator('.script-workspace').getByText('Уточнити формулювання')).toBeVisible();
   const text = page.locator('.script-workspace').getByRole('textbox', { name: 'Точний текст' });
   await expect(text).toHaveValue('Чернетка кадру.');
@@ -194,4 +196,29 @@ test('frame language proposals change exact text only after explicit acceptance'
   await page.locator('.script-workspace').getByRole('button', { name: 'Застосувати вибрані правки' }).click();
   await expect(text).toHaveValue('Оновлений точний текст кадру.');
   expect(ctx.commands.some(command => command.path.endsWith('/language-suggestions/accept'))).toBe(true);
+});
+
+
+test('a saved historical script can be resumed inline without changing its approved revision', async ({ page }) => {
+  const ctx = await fixture(page);
+  const savedFrame: Frame = {
+    id: 'restored-frame', purpose: 'Вступ', text: 'Збережений сценарій.',
+    visualHint: 'Великий заголовок', transition: 'Далі', mappings: [],
+  };
+  ctx.state.script.revisions.unshift({
+    id: 'previous-script', number: 1, content: { frames: [savedFrame] },
+    parentAdaptationRevisionId: 'caption-approved', reviewCounter: 0,
+    approvedAt: '2026-10-12T09:00:00Z', withdrawnAt: null,
+    claimsSealed: true, hasUnmapped: false, staleReasons: [], blockingReasons: [], eligible: true,
+  });
+  ctx.state.script.currentApprovedRevisionId = 'previous-script';
+  ctx.state.script.revision = 2;
+  await page.reload();
+  await expect(page.locator('.script-workspace').getByText('Погоджений сценарій можна передати дизайнеру в JSON, Markdown або ZIP.')).toHaveCount(0);
+  await expect(page.locator('.script-parent option')).toHaveText(['Виберіть погоджену версію', 'Версія 1']);
+  await expect(page.getByRole('button', { name: 'Продовжити з версії 1' })).toBeVisible();
+  await page.getByRole('button', { name: 'Продовжити з версії 1' }).click();
+  await expect(page.locator('.script-workspace').getByRole('textbox', { name: 'Точний текст' })).toHaveValue(savedFrame.text);
+  expect(ctx.state.script.currentApprovedRevisionId).toBe('previous-script');
+  expect(ctx.commands.some(cmd => cmd.path.endsWith('/apply'))).toBe(true);
 });
